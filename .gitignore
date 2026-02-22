@@ -1,0 +1,9 @@
+__pycache__
+.idea
+envs
+voiceprints\
+/model
+ffmpeg-N-122425-g21a3e44fbe-win64-gpl-shared
+server_venv
+static
+*.zip
