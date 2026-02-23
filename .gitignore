@@ -36,7 +36,7 @@ saved_faces
 object_models/object_test
 object_models/v8_world
 object_models/v4
-object_models/v8m
+object_models/v8m/
 object_models/v8n
 coco.names
 object_models/export_custom.py
