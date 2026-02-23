@@ -11,3 +11,6 @@ config.py
 hotwords.txt
 list_devices.py
 hearing/t.py
+realtime_screen_analysis.log
+realtime_screen_analysis.txt
+realtime_screen_config.json
