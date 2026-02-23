@@ -41,3 +41,4 @@ coco.names
 export_custom.py
 visual/models/object_models/t.py
 *.exe
+DEPENDENCIES.md
