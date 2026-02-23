@@ -24,3 +24,10 @@ thinking_venv
 README_RAG_WEB.md
 program_log.txt
 @AutomationLog.txt
+chroma_db_layered
+memory_dynamic.json
+memory_permanent.json
+memory_short.json
+moments_tools.log
+qq_msg_buffer.json
+qq_msg_private_buffer.json
