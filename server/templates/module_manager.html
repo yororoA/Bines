@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模块管理控制台</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+            background: #2a2a2a;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            overflow: hidden;
+            border: 1px solid #444;
+        }
+
+        .header {
+            background: #1a1a1a;
+            color: #f5f5f5;
+            padding: 20px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #333;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: #0a5;
+            color: #fff;
+        }
+
+        .btn-primary:hover {
+            background: #084;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0,100,0,0.35);
+        }
+
+        .btn-danger {
+            background: #c00;
+            color: #fff;
+        }
+
+        .btn-danger:hover {
+            background: #a00;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(180,0,0,0.35);
+        }
+
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #333;
+            border: 1px solid #bbb;
+        }
+
+        .btn-secondary:hover {
+            background: #d0d0d0;
+            border-color: #999;
+            color: #1a1a1a;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .main-content {
+            display: flex;
+            height: calc(100vh - 120px);
+        }
+
+        .sidebar {
+            width: 250px;
+            background: #e8e8e8;
+            border-right: 1px solid #bbb;
+            overflow-y: auto;
+        }
+
+        .service-list {
+            list-style: none;
+        }
+
+        .service-item {
+            padding: 14px 20px;
+            border-bottom: 1px solid #d5d5d5;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: #333;
+        }
+
+        .service-item:hover {
+            background: #d8d8d8;
+        }
+
+        .service-item.active {
+            background: #0a5;
+            color: #fff;
+            border-bottom-color: #084;
+        }
+
+        .service-name {
+            font-weight: 500;
+            font-size: 15px;
+        }
+
+        .service-status {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #999;
+            flex-shrink: 0;
+        }
+
+        .service-item.active .service-status.stopped {
+            background: rgba(255,255,255,0.8);
+        }
+
+        .service-status.running {
+            background: #0a5;
+        }
+
+        .service-status.stopped {
+            background: #c00;
+        }
+
+        .content-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .content-header {
+            padding: 20px 30px;
+            border-bottom: 1px solid #d0d0d0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f8f8f8;
+        }
+
+        .content-header h2 {
+            font-size: 20px;
+            color: #1a1a1a;
+        }
+
+        .content-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn-small {
+            padding: 8px 16px;
+            font-size: 13px;
+        }
+
+        .log-container {
+            flex: 1;
+            padding: 20px 30px;
+            overflow-y: auto;
+            background: #1e1e1e;
+            color: #d8d8d8;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            border-top: 1px solid #333;
+        }
+
+        .log-line {
+            margin-bottom: 2px;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+
+        .log-line.error {
+            color: #f66;
+        }
+
+        .log-line.warning {
+            color: #b0b0b0;
+        }
+
+        .log-line.info {
+            color: #5c5;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #888;
+        }
+
+        .empty-state h3 {
+            font-size: 18px;
+            margin-bottom: 10px;
+            color: #aaa;
+        }
+
+        .empty-state p {
+            font-size: 14px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .status-badge.running {
+            background: #d8ecd8;
+            color: #084;
+            border: 1px solid #a0c0a0;
+        }
+
+        .status-badge.stopped {
+            background: #f0d8d8;
+            color: #a00;
+            border: 1px solid #d0a0a0;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #444;
+            border-top: 2px solid #0a5;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            border-radius: 6px;
+            color: #fff;
+            font-weight: 500;
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+        }
+
+        .notification.success {
+            background: #0a5;
+            border: 1px solid #084;
+        }
+
+        .notification.error {
+            background: #c00;
+            border: 1px solid #a00;
+        }
+
+        .tools-section {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding: 24px 30px;
+            max-width: 800px;
+            background: #fafafa;
+        }
+
+        .tools-section h2 {
+            font-size: 20px;
+            color: #1a1a1a;
+            margin-bottom: 8px;
+        }
+
+        .tools-section .hint {
+            color: #555;
+            font-size: 13px;
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }
+
+        .tools-section .hint code {
+            background: #e5e5e5;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #333;
+            border: 1px solid #ccc;
+        }
+
+        .tools-actions {
+            margin-bottom: 16px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .tool-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 12px 14px;
+            border: 1px solid #d0d0d0;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            background: #fff;
+            transition: background 0.15s, border-color 0.15s;
+        }
+
+        .tool-item:hover {
+            border-color: #bbb;
+            background: #f9f9f9;
+        }
+
+        .tool-item input[type="checkbox"] {
+            margin-top: 3px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            accent-color: #0a5;
+        }
+
+        .tool-item .name {
+            font-weight: 600;
+            color: #1a1a1a;
+            min-width: 180px;
+        }
+
+        .tool-item .desc {
+            font-size: 12px;
+            color: #555;
+            flex: 1;
+        }
+
+        .tool-item.disabled {
+            opacity: 0.6;
+            background: #ececec;
+            border-color: #d5d5d5;
+        }
+
+        .tool-item.disabled:hover {
+            background: #e5e5e5;
+        }
+
+        #realtimeScreenPanel input[type="number"] {
+            padding: 6px 8px;
+            border: 1px solid #bbb;
+            border-radius: 4px;
+            background: #fff;
+            color: #1a1a1a;
+        }
+
+        #realtimeScreenPanel input[type="number"]:focus {
+            outline: none;
+            border-color: #0a5;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>模块管理控制台</h1>
+            <div class="header-actions">
+                <span id="gameModeLabel" class="game-mode-label" style="margin-right:8px;align-self:center;font-size:14px;">游戏模式: 关闭</span>
+                <button id="gameModeBtn" class="btn btn-secondary" onclick="toggleGameMode()" title="切换后：屏幕分析直接回复">游戏模式</button>
+                <div style="width: 1px; height: 24px; background: #444; margin: 0 10px; align-self: center;"></div>
+                <span id="presenceLabel" class="presence-label" style="margin-right:8px;align-self:center;font-size:14px;">用户在线</span>
+                <button id="presenceBtn" class="btn btn-secondary" onclick="togglePresence()" title="切换后：下线时不会主动发起无聊对话">上下线切换</button>
+                <div style="width: 1px; height: 24px; background: #444; margin: 0 10px; align-self: center;"></div>
+                <button class="btn btn-primary" onclick="startAllServices()">启动所有服务</button>
+                <button class="btn btn-danger" onclick="stopAllServices()">停止所有服务</button>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="sidebar">
+                <ul class="service-list" id="serviceList">
+                    <!-- 服务列表将通过 JavaScript 动态生成 -->
+                </ul>
+                <ul class="service-list" style="border-top: 1px solid #e0e0e0; margin-top: 8px;">
+                    <li class="service-item" id="sidebarToolAgent" onclick="selectToolAgentConfig()">
+                        <span class="service-name">工具模型</span>
+                        <span class="service-status stopped"></span>
+                    </li>
+                    <li class="service-item" id="sidebarRealtimeScreen" onclick="selectRealtimeScreenConfig()">
+                        <span class="service-name">实时屏幕分析</span>
+                        <span class="service-status stopped"></span>
+                    </li>
+                </ul>
+            </div>
+
+            <div class="content-area">
+                <div class="content-header">
+                    <h2 id="currentServiceName">请选择一个服务</h2>
+                    <div class="content-actions" id="contentActions" style="display: none;">
+                        <button class="btn btn-primary btn-small" onclick="startCurrentService()">启动</button>
+                        <button class="btn btn-danger btn-small" onclick="stopCurrentService()">停止</button>
+                    </div>
+                </div>
+                <div class="log-container" id="logContainer">
+                    <div class="empty-state">
+                        <h3>选择左侧服务查看日志</h3>
+                        <p>点击左侧服务名称可以查看该服务的实时日志输出</p>
+                    </div>
+                </div>
+                <div id="toolsConfigPanel" class="tools-section" style="display: none;">
+                    <h2>工具模型可调用工具</h2>
+                    <p class="hint">勾选允许工具模型（ToolAgent）调用的工具，未勾选的工具将不会出现在工具模型的 schema 中。保存后<strong>下次工具模型被调用时</strong>立即生效，无需重启 Thinking。</p>
+                    <div class="tools-actions">
+                        <button type="button" class="btn btn-primary btn-small" onclick="toggleAllTools(true)">全选</button>
+                        <button type="button" class="btn btn-small btn-secondary" onclick="toggleAllTools(false)">取消全选</button>
+                        <button type="button" class="btn btn-primary btn-small" onclick="saveToolAgentTools()">保存</button>
+                    </div>
+                    <div id="toolsConfigList"></div>
+                </div>
+                <div id="realtimeScreenPanel" class="tools-section" style="display: none;">
+                    <h2>实时屏幕分析</h2>
+                    <p class="hint">勾选启用并保存后，将<strong>自动启动</strong>实时屏幕分析脚本；取消勾选并保存后将<strong>自动停止</strong>脚本。主模型在收到用户消息时会把最新屏幕分析作为系统消息注入。</p>
+                    <div class="tools-actions" style="align-items: center; gap: 12px; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                            <input type="checkbox" id="realtimeScreenEnabled" onchange="realtimeScreenData.enabled = this.checked">
+                            <span>启用实时屏幕分析</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 6px;">
+                            <span>间隔（秒）</span>
+                            <input type="number" id="realtimeScreenInterval" min="3" max="120" value="10" style="width: 60px;">
+                        </label>
+                        <button type="button" class="btn btn-primary btn-small" onclick="saveRealtimeScreenConfig()">保存</button>
+                        <span id="realtimeScreenScriptStatus" style="color: #555; font-size: 13px;"></span>
+                    </div>
+                    <div style="margin-top: 16px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                            <span style="font-weight: 600; color: #333;">最近日志</span>
+                            <button type="button" class="btn btn-small btn-secondary" onclick="loadRealtimeScreenLog()">刷新日志</button>
+                        </div>
+                        <pre id="realtimeScreenLog" style="background: #1e1e1e; color: #d8d8d8; padding: 12px; border-radius: 6px; font-size: 12px; max-height: 200px; overflow-y: auto; margin: 0; white-space: pre-wrap; word-break: break-all; border: 1px solid #444;">加载中...</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentService = null;
+        let logUpdateInterval = null;
+        let statusUpdateInterval = null;
+        let logEventSource = null;  // Server-Sent Events 连接
+        let viewMode = 'service';   // 'service' | 'tools'
+        let toolAgentData = { all_tools: [], enabled: [] };
+        let realtimeScreenData = { enabled: false, interval_sec: 10 };
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadServices();
+            loadPresence();
+            loadGameMode();
+            statusUpdateInterval = setInterval(loadServices, 2000);
+        });
+
+        async function loadGameMode() {
+            try {
+                const res = await fetch('/api/game_mode');
+                const data = await res.json();
+                const el = document.getElementById('gameModeLabel');
+                const btn = document.getElementById('gameModeBtn');
+                if (el && btn) {
+                    el.textContent = data.enabled ? '游戏模式: 开启' : '游戏模式: 关闭';
+                    el.style.color = data.enabled ? '#0a5' : '#888';
+                    btn.textContent = data.enabled ? '关闭游戏模式' : '开启游戏模式';
+                    if (data.enabled) {
+                        btn.classList.add('btn-primary');
+                        btn.classList.remove('btn-secondary');
+                    } else {
+                        btn.classList.add('btn-secondary');
+                        btn.classList.remove('btn-primary');
+                    }
+                }
+            } catch (e) {
+                console.warn('loadGameMode error', e); 
+            }
+        }
+
+        async function toggleGameMode() {
+            try {
+                const getRes = await fetch('/api/game_mode');
+                const getData = await getRes.json();
+                const next = !getData.enabled;
+                const res = await fetch('/api/game_mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: next })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadGameMode();
+                    showNotification(data.enabled ? '游戏模式已开启' : '游戏模式已关闭', 'success');
+                } else {
+                    showNotification(data.message || '切换失败', 'error');
+                }
+            } catch (e) {
+                showNotification('切换失败: ' + e.message, 'error');
+            }
+        }
+
+        async function loadPresence() {
+            try {
+                const res = await fetch('/api/presence');
+                const data = await res.json();
+                const el = document.getElementById('presenceLabel');
+                const btn = document.getElementById('presenceBtn');
+                if (el && btn) {
+                    el.textContent = data.user_online ? '用户在线' : '用户下线';
+                    el.style.color = data.user_online ? '#0a5' : '#c00';
+                    btn.textContent = data.user_online ? '切换为下线' : '切换为上线';
+                }
+            } catch (e) { console.warn('loadPresence', e); }
+        }
+
+        async function togglePresence() {
+            try {
+                const getRes = await fetch('/api/presence');
+                const getData = await getRes.json();
+                const next = !getData.user_online;
+                const res = await fetch('/api/presence', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ online: next })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadPresence();
+                    showNotification(data.user_online ? '已切换为上线' : '已切换为下线', 'success');
+                } else {
+                    showNotification(data.message || '切换失败', 'error');
+                }
+            } catch (e) {
+                showNotification('切换失败: ' + e.message, 'error');
+            }
+        }
+
+        // 加载服务列表
+        async function loadServices() {
+            try {
+                const response = await fetch('/api/services');
+                const data = await response.json();
+                renderServiceList(data.services);
+            } catch (error) {
+                console.error('加载服务列表失败:', error);
+            }
+        }
+
+        // 渲染服务列表
+        function renderServiceList(services) {
+            const list = document.getElementById('serviceList');
+            const currentServiceName = currentService; // 保存当前选择的服务
+            
+            list.innerHTML = '';
+
+            services.forEach(service => {
+                const item = document.createElement('li');
+                item.className = 'service-item' + (currentServiceName === service.name ? ' active' : '');
+                item.onclick = () => selectService(service.name);
+
+                item.innerHTML = `
+                    <span class="service-name">${service.name}</span>
+                    <span class="service-status ${service.running ? 'running' : 'stopped'}"></span>
+                `;
+
+                list.appendChild(item);
+            });
+        }
+
+        // 选择服务
+        function selectService(serviceName) {
+            viewMode = 'service';
+            currentService = serviceName;
+            document.getElementById('currentServiceName').textContent = serviceName;
+            document.getElementById('contentActions').style.display = 'flex';
+            document.getElementById('logContainer').style.display = 'block';
+            document.getElementById('toolsConfigPanel').style.display = 'none';
+            document.getElementById('realtimeScreenPanel').style.display = 'none';
+            document.querySelectorAll('.service-item').forEach(el => {
+                if (el.id === 'sidebarToolAgent' || el.id === 'sidebarRealtimeScreen') el.classList.remove('active');
+            });
+            
+            // 更新列表中的活动项
+            document.querySelectorAll('.service-item').forEach(item => {
+                const serviceNameElement = item.querySelector('.service-name');
+                if (serviceNameElement && serviceNameElement.textContent === serviceName) {
+                    item.classList.add('active');
+                } else {
+                    item.classList.remove('active');
+                }
+            });
+
+            // 关闭之前的 SSE 连接
+            if (logEventSource) {
+                logEventSource.close();
+                logEventSource = null;
+            }
+            
+            // 清除轮询定时器
+            if (logUpdateInterval) {
+                clearInterval(logUpdateInterval);
+                logUpdateInterval = null;
+            }
+
+            loadLogs().then(() => {
+                startLogStream(serviceName);
+            });
+        }
+
+        // 选择「工具模型」配置页
+        function selectToolAgentConfig() {
+            viewMode = 'tools';
+            currentService = null;
+            if (logEventSource) {
+                logEventSource.close();
+                logEventSource = null;
+            }
+            if (logUpdateInterval) {
+                clearInterval(logUpdateInterval);
+                logUpdateInterval = null;
+            }
+            document.getElementById('currentServiceName').textContent = '工具模型可调用工具';
+            document.getElementById('contentActions').style.display = 'none';
+            document.getElementById('logContainer').style.display = 'none';
+            document.getElementById('toolsConfigPanel').style.display = 'block';
+            document.getElementById('realtimeScreenPanel').style.display = 'none';
+            document.querySelectorAll('.service-item').forEach(el => {
+                if (el.id !== 'sidebarToolAgent') el.classList.remove('active');
+            });
+            document.getElementById('sidebarToolAgent').classList.add('active');
+            loadToolAgentTools();
+        }
+
+        function selectRealtimeScreenConfig() {
+            viewMode = 'realtime_screen';
+            currentService = null;
+            if (logEventSource) { logEventSource.close(); logEventSource = null; }
+            if (logUpdateInterval) { clearInterval(logUpdateInterval); logUpdateInterval = null; }
+            document.getElementById('currentServiceName').textContent = '实时屏幕分析';
+            document.getElementById('contentActions').style.display = 'none';
+            document.getElementById('logContainer').style.display = 'none';
+            document.getElementById('toolsConfigPanel').style.display = 'none';
+            document.getElementById('realtimeScreenPanel').style.display = 'block';
+            document.querySelectorAll('.service-item').forEach(el => {
+                if (el.id !== 'sidebarRealtimeScreen') el.classList.remove('active');
+            });
+            document.getElementById('sidebarRealtimeScreen').classList.add('active');
+            loadRealtimeScreenConfig();
+        }
+
+        async function loadRealtimeScreenConfig() {
+            try {
+                const res = await fetch('/api/realtime_screen_config');
+                const data = await res.json();
+                realtimeScreenData = { enabled: !!data.enabled, interval_sec: Math.max(3, Math.min(120, parseInt(data.interval_sec, 10) || 10)) };
+                document.getElementById('realtimeScreenEnabled').checked = realtimeScreenData.enabled;
+                document.getElementById('realtimeScreenInterval').value = realtimeScreenData.interval_sec;
+                const statusEl = document.getElementById('realtimeScreenScriptStatus');
+                if (statusEl) statusEl.textContent = data.script_running ? '脚本状态: 运行中' : '脚本状态: 已停止';
+                loadRealtimeScreenLog();
+            } catch (e) {
+                console.error('加载实时屏幕配置失败:', e);
+            }
+        }
+
+        async function loadRealtimeScreenLog() {
+            const el = document.getElementById('realtimeScreenLog');
+            if (!el) return;
+            try {
+                const res = await fetch('/api/realtime_screen_log');
+                const data = await res.json();
+                const lines = data.log_lines || [];
+                el.textContent = lines.length ? lines.join('') : '（暂无日志，保存并启用后脚本输出会写入此处）';
+            } catch (e) {
+                el.textContent = '加载日志失败: ' + e.message;
+            }
+        }
+
+        async function saveRealtimeScreenConfig() {
+            realtimeScreenData.enabled = document.getElementById('realtimeScreenEnabled').checked;
+            realtimeScreenData.interval_sec = Math.max(3, Math.min(120, parseInt(document.getElementById('realtimeScreenInterval').value, 10) || 10));
+            try {
+                const res = await fetch('/api/realtime_screen_config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(realtimeScreenData)
+                });
+                const data = await res.json();
+                showNotification(data.message || (data.success ? '保存成功' : '保存失败'), data.success ? 'success' : 'error');
+                if (data.success) loadRealtimeScreenConfig();
+                else loadRealtimeScreenLog();
+            } catch (e) {
+                showNotification('保存失败: ' + e.message, 'error');
+            }
+        }
+
+        async function loadToolAgentTools() {
+            try {
+                const res = await fetch('/api/tool_agent_tools');
+                const data = await res.json();
+                const all_tools = data.all_tools || [];
+                toolAgentData = {
+                    all_tools,
+                    enabled: all_tools.filter(t => t.enabled !== false).map(t => t.name).filter(Boolean)
+                };
+                renderToolAgentTools();
+            } catch (e) {
+                console.error('加载工具配置失败:', e);
+                document.getElementById('toolsConfigList').innerHTML = '<div class="empty-state"><p>加载失败，请重试</p></div>';
+            }
+        }
+
+        function renderToolAgentTools() {
+            const list = document.getElementById('toolsConfigList');
+            const enabledSet = new Set(toolAgentData.enabled);
+            if (toolAgentData.all_tools.length === 0) {
+                list.innerHTML = '<div class="empty-state"><p>暂无工具列表（请确认 server/tool_agent_schema.json 存在且含 tools 数组）</p></div>';
+                return;
+            }
+            const sorted = [...toolAgentData.all_tools].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+            list.innerHTML = sorted.map(t => {
+                const name = t.name || '';
+                const desc = t.description || '';
+                const checked = t.enabled !== false && enabledSet.has(name);
+                const safeId = 'tool_' + name.replace(/[^a-zA-Z0-9_-]/g, '_');
+                return `<div class="tool-item ${checked ? '' : 'disabled'}">
+                    <input type="checkbox" id="${safeId}" data-name="${escapeHtml(name)}" ${checked ? 'checked' : ''} onchange="toggleToolItem(this)">
+                    <div>
+                        <span class="name">${escapeHtml(name)}</span>
+                        <div class="desc">${escapeHtml(desc)}</div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function toggleToolItem(checkboxEl) {
+            const name = checkboxEl.dataset.name;
+            const item = checkboxEl.closest('.tool-item');
+            if (checkboxEl.checked) {
+                if (!toolAgentData.enabled.includes(name)) toolAgentData.enabled.push(name);
+                item.classList.remove('disabled');
+            } else {
+                toolAgentData.enabled = toolAgentData.enabled.filter(x => x !== name);
+                item.classList.add('disabled');
+            }
+        }
+
+        function toggleAllTools(checked) {
+            toolAgentData.enabled = checked ? toolAgentData.all_tools.map(t => t.name).filter(Boolean) : [];
+            document.querySelectorAll('#toolsConfigList input[type="checkbox"][data-name]').forEach(cb => {
+                cb.checked = checked;
+                const item = cb.closest('.tool-item');
+                if (item) item.classList.toggle('disabled', !checked);
+            });
+        }
+
+        async function saveToolAgentTools() {
+            try {
+                const res = await fetch('/api/tool_agent_tools', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: toolAgentData.enabled })
+                });
+                const data = await res.json();
+                showNotification(data.message || (data.success ? '保存成功' : '保存失败'), data.success ? 'success' : 'error');
+            } catch (e) {
+                showNotification('保存失败: ' + e.message, 'error');
+            }
+        }
+        
+        // 启动实时日志流（Server-Sent Events）
+        function startLogStream(serviceName) {
+            if (!serviceName) return;
+            
+            const url = `/api/services/${encodeURIComponent(serviceName)}/logs/stream`;
+            logEventSource = new EventSource(url);
+            
+            logEventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.log) {
+                        // 添加新日志到显示区域
+                        appendLogLine(data.log);
+                    }
+                    // 忽略心跳消息
+                } catch (e) {
+                    console.error('解析日志数据失败:', e);
+                }
+            };
+            
+            logEventSource.onerror = function(event) {
+                console.error('日志流连接错误，切换到轮询模式');
+                // 如果 SSE 失败，回退到轮询模式
+                if (logEventSource) {
+                    logEventSource.close();
+                    logEventSource = null;
+                }
+                // 启动轮询作为后备方案
+                if (!logUpdateInterval) {
+                    logUpdateInterval = setInterval(loadLogs, 500);  // 更频繁的轮询
+                }
+            };
+        }
+        
+        // 追加单行日志到显示区域
+        function appendLogLine(log) {
+            const container = document.getElementById('logContainer');
+            
+            // 如果当前显示的是空状态，清除它
+            if (container.querySelector('.empty-state')) {
+                container.innerHTML = '';
+            }
+            
+            // 创建新的日志行
+            const logLine = document.createElement('div');
+            let className = 'log-line';
+            if (log.includes('ERROR') || log.includes('Error') || log.includes('错误') || log.includes('[STDERR]')) {
+                className += ' error';
+            } else if (log.includes('WARNING') || log.includes('Warning') || log.includes('警告')) {
+                className += ' warning';
+            } else if (log.includes('INFO') || log.includes('Info') || log.includes('信息')) {
+                className += ' info';
+            }
+            logLine.className = className;
+            logLine.textContent = log;
+            
+            container.appendChild(logLine);
+            
+            // 自动滚动到底部
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // 加载日志（用于初始加载和历史日志）
+        async function loadLogs() {
+            if (!currentService) return Promise.resolve();
+
+            try {
+                const response = await fetch(`/api/services/${encodeURIComponent(currentService)}/logs?max_lines=1000`);
+                const data = await response.json();
+                renderLogs(data.logs);
+                return Promise.resolve();
+            } catch (error) {
+                console.error('加载日志失败:', error);
+                // 如果服务不存在或已停止，显示空状态
+                const container = document.getElementById('logContainer');
+                container.innerHTML = '<div class="empty-state"><h3>无法加载日志</h3><p>服务可能已停止或不存在</p></div>';
+                return Promise.resolve();
+            }
+        }
+
+        // 渲染日志
+        function renderLogs(logs) {
+            const container = document.getElementById('logContainer');
+            
+            if (logs.length === 0) {
+                container.innerHTML = '<div class="empty-state"><h3>暂无日志</h3><p>服务启动后日志将显示在这里</p></div>';
+                return;
+            }
+
+            container.innerHTML = logs.map(log => {
+                let className = 'log-line';
+                if (log.includes('ERROR') || log.includes('Error') || log.includes('错误')) {
+                    className += ' error';
+                } else if (log.includes('WARNING') || log.includes('Warning') || log.includes('警告')) {
+                    className += ' warning';
+                } else if (log.includes('INFO') || log.includes('Info') || log.includes('信息')) {
+                    className += ' info';
+                }
+                return `<div class="${className}">${escapeHtml(log)}</div>`;
+            }).join('');
+
+            // 自动滚动到底部
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // 启动当前服务
+        async function startCurrentService() {
+            if (!currentService) return;
+
+            try {
+                const response = await fetch(`/api/services/${encodeURIComponent(currentService)}/start`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                showNotification(data.message, data.success ? 'success' : 'error');
+                loadServices();
+                // 如果启动成功，立即加载日志
+                if (data.success) {
+                    setTimeout(loadLogs, 500);
+                }
+            } catch (error) {
+                showNotification('启动服务失败: ' + error.message, 'error');
+            }
+        }
+
+        // 停止当前服务
+        async function stopCurrentService() {
+            if (!currentService) return;
+
+            if (!confirm(`确定要停止 ${currentService} 吗？`)) return;
+
+            try {
+                const response = await fetch(`/api/services/${encodeURIComponent(currentService)}/stop`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                showNotification(data.message, data.success ? 'success' : 'error');
+                loadServices();
+            } catch (error) {
+                showNotification('停止服务失败: ' + error.message, 'error');
+            }
+        }
+
+        // 启动所有服务
+        async function startAllServices() {
+            if (!confirm('确定要启动所有服务吗？')) return;
+
+            try {
+                const response = await fetch('/api/services/start-all', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                showNotification('正在启动所有服务...', 'success');
+                loadServices();
+            } catch (error) {
+                showNotification('启动所有服务失败: ' + error.message, 'error');
+            }
+        }
+
+        // 停止所有服务
+        async function stopAllServices() {
+            if (!confirm('确定要停止所有服务吗？')) return;
+
+            try {
+                const response = await fetch('/api/services/stop-all', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                showNotification('正在停止所有服务...', 'success');
+                loadServices();
+            } catch (error) {
+                showNotification('停止所有服务失败: ' + error.message, 'error');
+            }
+        }
+
+        // 显示通知
+        function showNotification(message, type) {
+            const notification = document.createElement('div');
+            notification.className = `notification ${type}`;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+
+            setTimeout(() => {
+                notification.style.animation = 'slideIn 0.3s ease-out reverse';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+
+        // HTML 转义
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>

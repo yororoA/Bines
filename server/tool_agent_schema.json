@@ -1,0 +1,129 @@
+{
+  "tools": [
+    {
+      "name": "add_moment",
+      "description": "发布一条动态（标题必填，正文可选）。",
+      "enabled": true
+    },
+    {
+      "name": "browser_search",
+      "description": "与浏览器相关的唯一入口：仅允许通过本工具进行浏览器操作，执行网页搜索。",
+      "enabled": true
+    },
+    {
+      "name": "comment_moment",
+      "description": "对指定动态发表评论。",
+      "enabled": true
+    },
+    {
+      "name": "control_netease_music",
+      "description": "控制网易云音乐播放（播放/暂停/上一首/下一首/音量等）。",
+      "enabled": true
+    },
+    {
+      "name": "fast_screen_analysis",
+      "description": "快速屏幕分析（游戏模式专用）。使用本地OCR和图像处理，延迟极低。",
+      "enabled": false
+    },
+    {
+      "name": "find_color_region",
+      "description": "在屏幕中查找特定颜色区域（用于游戏UI元素定位）。",
+      "enabled": true
+    },
+    {
+      "name": "get_moments",
+      "description": "获取当前用户动态草稿。uid/token 由配置读取。",
+      "enabled": true
+    },
+    {
+      "name": "get_playlist_name_in_netease",
+      "description": "获取网易云音乐中所有歌单名称列表。",
+      "enabled": true
+    },
+    {
+      "name": "get_qq_friend_list",
+      "description": "获取当前登录账号的QQ好友列表。",
+      "enabled": true
+    },
+    {
+      "name": "get_qq_group_list",
+      "description": "获取当前登录账号加入的QQ群列表。",
+      "enabled": true
+    },
+    {
+      "name": "broadcast_to_all_friends",
+      "description": "向所有QQ好友批量群发私聊消息。支持模板变量：{昵称}=好友昵称，{qq}或{qq号}=QQ号码，{备注}=好友备注名。例如'新年快乐{昵称}'会自动替换为每个好友的实际昵称。",
+      "enabled": true
+    },
+    {
+      "name": "broadcast_to_all_groups",
+      "description": "向所有已加入的QQ群批量群发消息。支持模板变量：{群名}=群名称，{群号}=群号码。例如'通知{群名}的各位'会自动替换为每个群的实际名称。",
+      "enabled": true
+    },
+    {
+      "name": "at_each_group_member",
+      "description": "在指定QQ群内依次艾特每个成员并发送个性化消息。支持模板变量：{昵称}=群昵称，{qq}或{qq号}=QQ号码，{群名片}或{card}=群名片。例如message='新年快乐{昵称}！你的QQ是{qq}'会为每个成员替换为实际信息。自动跳过机器人自身。",
+      "enabled": true
+    },
+    {
+      "name": "get_screen_info",
+      "description": "查看用户【当前】屏幕实时画面（仅限实时屏幕）。不可用于获取历史对话或记忆。调用时由调用方提供 focus_description 作为屏幕分析提示。",
+      "enabled": true
+    },
+    {
+      "name": "get_visual_info",
+      "description": "观察周围环境，获取视觉信息。调用时必须由调用方提供 focus 作为分析提示。",
+      "enabled": false
+    },
+    {
+      "name": "open_netease_music",
+      "description": "打开网易云音乐应用。",
+      "enabled": true
+    },
+    {
+      "name": "play_music_in_netease",
+      "description": "在网易云音乐中搜索并播放音乐。",
+      "enabled": true
+    },
+    {
+      "name": "play_song_from_playlist",
+      "description": "从指定歌单中播放特定歌曲。",
+      "enabled": true
+    },
+    {
+      "name": "search_music_in_netease",
+      "description": "在网易云音乐中搜索音乐。",
+      "enabled": true
+    },
+    {
+      "name": "send_qq_group_msg",
+      "description": "发送QQ群聊消息。需要传入 group_id, message, 可选 at_user_id (填 'all' 为全体)。",
+      "enabled": true
+    },
+    {
+      "name": "send_qq_private_msg",
+      "description": "发送QQ私聊消息。需要传入 recipient_qq (user_id) 和 message。",
+      "enabled": true
+    },
+    {
+      "name": "sing",
+      "description": "播放 static/music/cover 目录下的本地音频（如翻唱、BGM）。",
+      "enabled": true
+    },
+    {
+      "name": "switch_to_playlist",
+      "description": "切换到指定的网易云音乐歌单。",
+      "enabled": true
+    },
+    {
+      "name": "task_complete",
+      "description": "任务完成后必须调用本工具提交最终结果。",
+      "enabled": true
+    },
+    {
+      "name": "template_match",
+      "description": "模板匹配（用于快速识别游戏中的固定UI元素）。",
+      "enabled": true
+    }
+  ]
+}
