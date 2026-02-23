@@ -1,0 +1,36 @@
+cd D:\GPT-SoVITS-v3lora-20250228;
+runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
+
+cd E:\Desktop\desktop\work\coding\atri\thingking; .\thinking_venv\Scripts\Activate.ps1; $env:PIP_USER=0; python .\src\handle.py
+
+对上线前残余的短期记忆需要进行摘要, 摘要后清理掉该部分的短期记忆, 但要确保在上线后使用摘要期间该部分的记忆持续可见
+
+判断模块
+p9999用于筛选分发，结合ai判断是否需要调用各种工具
+{
+	"user_input": user_input,
+	"img_descr": img_descr
+}
+
+{cache...-->p9997
+	"reply_part": part_text
+
+...wav->cache}
+
+{...cache->p10000
+	"reply"
+	"wav"
+}
+
+思考模块
+p9998用于接收处理后的用户输入
+
+语音合成模块
+p9997用于接收机器的回答结果并向p9880输入
+p9880用于语音合成并向p9999|p9997返回语音数据
+
+视图模块
+p9996接收到请求后向p9999发送处理后的当前视图，由p9999将其与用户输入统一发送给p9998
+
+回复展示
+p10000接收回复文字语音并展示
