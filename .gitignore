@@ -33,11 +33,10 @@ qq_msg_buffer.json
 qq_msg_private_buffer.json
 saved_faces
 *.pkl
-object_models/object_test
-object_models/v8_world
-object_models/v4
-object_models/v8m/
-object_models/v8n
+v4
+v8_world
+v8m
+v8n
 coco.names
-object_models/export_custom.py
+export_custom.py
 object_models/t.py
