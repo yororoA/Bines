@@ -39,4 +39,4 @@ v8m
 v8n
 coco.names
 export_custom.py
-object_models/t.py
+visual/models/object_models/t.py
