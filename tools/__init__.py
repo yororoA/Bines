@@ -26,16 +26,11 @@ from .sing_tool import sing
 # QQ 工具
 from .qq_tool import send_qq_private_msg, send_qq_group_msg, get_qq_group_list, get_qq_friend_list, broadcast_to_all_friends, broadcast_to_all_groups, at_each_group_member
 
-# 动态（Moments）工具：get_moments, add_moment, comment_moment（uid/token 从 config 读取）
+# 动态（Moments）工具：get_moments（简化版便于大模型解析）, add_moment, comment_moment（uid/token 从环境变量读取）
 try:
-    import sys
-    from pathlib import Path
-    _bines = Path(__file__).resolve().parents[1]
-    if str(_bines) not in sys.path:
-        sys.path.insert(0, str(_bines))
-    from thingking.src.moments import get_moments, add_moment, comment_moment
+    from .moments_tool import get_moments_simple, add_moment, comment_moment
 except ImportError:
-    get_moments = add_moment = comment_moment = None
+    get_moments_simple = add_moment = comment_moment = None
 
 # 尝试导入快速屏幕工具（可选）
 try:
@@ -91,8 +86,8 @@ TOOLS_REGISTRY = {
     "broadcast_to_all_groups": broadcast_to_all_groups,
     "at_each_group_member": at_each_group_member,
 }
-if get_moments is not None:
-    TOOLS_REGISTRY["get_moments"] = get_moments
+if get_moments_simple is not None:
+    TOOLS_REGISTRY["get_moments"] = get_moments_simple
     TOOLS_REGISTRY["add_moment"] = add_moment
     TOOLS_REGISTRY["comment_moment"] = comment_moment
 

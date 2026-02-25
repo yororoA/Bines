@@ -34,6 +34,8 @@ from config import (
     DEEPSEEK_MODEL,
     DEEPSEEK_API_TIMEOUT,
     require_env,
+    MOMENTS_API_BASE_URL,
+    TOGGLE_STATUS_TOKEN,
 )
 # [工具迁移] relationship_state 的导入已移到 tools/memory_tool.py 中（延迟导入）
 
@@ -828,7 +830,7 @@ ALL_TOOLS_SCHEMA_FOR_AGENT = [
         "type": "function",
         "function": {
             "name": "get_moments",
-            "description": "获取已发布动态列表（与前端 getMoments 一致）。uid/token 由配置读取。Get published moments list.",
+            "description": "获取已发布动态列表（返回简化结构便于解析：每条含 id/title/content/username/createdAt/likes/views/comments_count/acknowledge/images 数组）。Get published moments list (simplified format).",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
@@ -2470,6 +2472,21 @@ if __name__ == "__main__":
                 start_rep.recv_string()
                 start_rep.send_string("ok")
                 print("[Thinking] 已收到正式启动信号，开始初始化记忆系统并上线", flush=True)
+                # 通知后端 Bines 在线状态
+                try:
+                    url = f"{MOMENTS_API_BASE_URL.rstrip('/')}/api/status/bines"
+                    r = requests.post(
+                        url,
+                        json={"online": True},
+                        headers={"X-Status-Secret": TOGGLE_STATUS_TOKEN or "", "Content-Type": "application/json"},
+                        timeout=10,
+                    )
+                    if r.ok:
+                        print("[Thinking] 已上报 Bines 在线状态 (online: true)", flush=True)
+                    else:
+                        print(f"[Thinking] 上报在线状态失败: {r.status_code}", flush=True)
+                except Exception as e:
+                    print(f"[Thinking] 上报在线状态失败（可忽略）: {e}", flush=True)
                 # 实时屏幕分析：在其他模块启动完成后根据保存的配置决定是否启动
                 try:
                     r = requests.get("http://127.0.0.1:5000/api/realtime_screen_ensure_from_config", timeout=3)
@@ -2492,6 +2509,21 @@ if __name__ == "__main__":
                     pass
         else:
             print("[Thinking] START_THINKING_REP 未配置，将直接启动", flush=True)
+            # 未使用 Classification 启动握手时，同样上报在线状态
+            try:
+                url = f"{MOMENTS_API_BASE_URL.rstrip('/')}/api/status/bines"
+                r = requests.post(
+                    url,
+                    json={"online": True},
+                    headers={"X-Status-Secret": TOGGLE_STATUS_TOKEN or "", "Content-Type": "application/json"},
+                    timeout=10,
+                )
+                if r.ok:
+                    print("[Thinking] 已上报 Bines 在线状态 (online: true)", flush=True)
+                else:
+                    print(f"[Thinking] 上报在线状态失败: {r.status_code}", flush=True)
+            except Exception as e:
+                print(f"[Thinking] 上报在线状态失败（可忽略）: {e}", flush=True)
         
         # 正式启动：初始化记忆系统（触发上线摘要/日记等），注册依赖，再启动监听
         # 在 __main__ 顶层赋值即更新模块级变量，无需 global
