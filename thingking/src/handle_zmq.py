@@ -62,6 +62,45 @@ from tools.screen_tool import get_screen_info_wrapper
 # [工具迁移] update_status 已迁移到 tools/memory_tool.py
 # 工具函数定义已移除，现在从 tools 包导入
 
+# --- Bines 在线状态 SSE 连接（替代一次性 POST online） ---
+_status_stream_thread = None
+
+
+def _status_stream_worker():
+    """
+    通过 SSE 连接 /api/status/bines/stream 维持在线状态：
+    - 连接成功即视为 online=true（由后端处理）
+    - 连接关闭时后端会自动设为 false，这里只做重连
+    """
+    url = f"{MOMENTS_API_BASE_URL.rstrip('/')}/api/status/bines/stream"
+    headers = {"X-Status-Secret": TOGGLE_STATUS_TOKEN or ""}
+    while True:
+        try:
+            print(f"[Thinking] 尝试建立状态 SSE 连接: {url}", flush=True)
+            with requests.get(url, headers=headers, stream=True, timeout=30) as resp:
+                if not resp.ok:
+                    print(f"[Thinking] 状态 SSE 连接失败: {resp.status_code}", flush=True)
+                    time.sleep(10)
+                    continue
+                print("[Thinking] 状态 SSE 连接已建立（online=true 由后端维护）", flush=True)
+                for _line in resp.iter_lines():
+                    # 仅保持连接存活；如需调试可打印心跳
+                    if _line is None:
+                        continue
+        except Exception as e:
+            print(f"[Thinking] 状态 SSE 连接异常，将在稍后重试: {e}", flush=True)
+        time.sleep(5)
+
+
+def _ensure_status_stream_started():
+    global _status_stream_thread
+    if _status_stream_thread is not None and _status_stream_thread.is_alive():
+        return
+    t = threading.Thread(target=_status_stream_worker, daemon=True)
+    _status_stream_thread = t
+    t.start()
+
+
 # --- 全局变量 ---
 CURRENT_VISUAL_INFO = "暂无视觉信息"
 SCREEN_MONITOR_ENABLED = True  # 屏幕监控开关
@@ -2472,21 +2511,8 @@ if __name__ == "__main__":
                 start_rep.recv_string()
                 start_rep.send_string("ok")
                 print("[Thinking] 已收到正式启动信号，开始初始化记忆系统并上线", flush=True)
-                # 通知后端 Bines 在线状态
-                try:
-                    url = f"{MOMENTS_API_BASE_URL.rstrip('/')}/api/status/bines"
-                    r = requests.post(
-                        url,
-                        json={"online": True},
-                        headers={"X-Status-Secret": TOGGLE_STATUS_TOKEN or "", "Content-Type": "application/json"},
-                        timeout=10,
-                    )
-                    if r.ok:
-                        print("[Thinking] 已上报 Bines 在线状态 (online: true)", flush=True)
-                    else:
-                        print(f"[Thinking] 上报在线状态失败: {r.status_code}", flush=True)
-                except Exception as e:
-                    print(f"[Thinking] 上报在线状态失败（可忽略）: {e}", flush=True)
+                # 建立到 Moments 的 SSE 连接，由后端维护 online 状态
+                _ensure_status_stream_started()
                 # 实时屏幕分析：在其他模块启动完成后根据保存的配置决定是否启动
                 try:
                     r = requests.get("http://127.0.0.1:5000/api/realtime_screen_ensure_from_config", timeout=3)
@@ -2509,21 +2535,8 @@ if __name__ == "__main__":
                     pass
         else:
             print("[Thinking] START_THINKING_REP 未配置，将直接启动", flush=True)
-            # 未使用 Classification 启动握手时，同样上报在线状态
-            try:
-                url = f"{MOMENTS_API_BASE_URL.rstrip('/')}/api/status/bines"
-                r = requests.post(
-                    url,
-                    json={"online": True},
-                    headers={"X-Status-Secret": TOGGLE_STATUS_TOKEN or "", "Content-Type": "application/json"},
-                    timeout=10,
-                )
-                if r.ok:
-                    print("[Thinking] 已上报 Bines 在线状态 (online: true)", flush=True)
-                else:
-                    print(f"[Thinking] 上报在线状态失败: {r.status_code}", flush=True)
-            except Exception as e:
-                print(f"[Thinking] 上报在线状态失败（可忽略）: {e}", flush=True)
+            # 未使用 Classification 启动握手时，同样建立状态 SSE 连接
+            _ensure_status_stream_started()
         
         # 正式启动：初始化记忆系统（触发上线摘要/日记等），注册依赖，再启动监听
         # 在 __main__ 顶层赋值即更新模块级变量，无需 global

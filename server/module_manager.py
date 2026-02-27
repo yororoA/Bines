@@ -13,14 +13,13 @@ from flask import Flask, render_template, jsonify, request, Response, stream_wit
 from flask_cors import CORS
 import json
 import zmq
-import requests
 
 # 确保可以从项目根目录导入 config
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from config import ZMQ_PORTS, PRESENCE_STATE_PATH, MOMENTS_API_BASE_URL, TOGGLE_STATUS_TOKEN
+from config import ZMQ_PORTS, PRESENCE_STATE_PATH
 
 app = Flask(__name__, template_folder=os.path.join(ROOT_DIR, "server", "templates"),
             static_folder=os.path.join(ROOT_DIR, "server", "static"))
@@ -39,29 +38,6 @@ try:
 except zmq.ZMQError:
     # Maybe another instance is running
     pass
-
-
-def _report_thinking_online_status(online: bool) -> None:
-    """
-    向 Moments 后端上报 Bines 在线/离线状态。
-    仅在 Thinking 启动/停止时调用。
-    """
-    try:
-        url = f"{MOMENTS_API_BASE_URL.rstrip('/')}/api/status/bines"
-        r = requests.post(
-            url,
-            json={"online": bool(online)},
-            headers={
-                "X-Status-Secret": TOGGLE_STATUS_TOKEN or "",
-                "Content-Type": "application/json",
-            },
-            timeout=5,
-        )
-        if not r.ok:
-            print(f"[ModuleManager] 上报 Bines 在线状态失败: {r.status_code}", flush=True)
-    except Exception as e:
-        # 不影响模块管理自身逻辑
-        print(f"[ModuleManager] 上报 Bines 在线状态异常（可忽略）: {e}", flush=True)
 
 @app.route("/api/game_mode", methods=["GET", "POST"])
 def game_mode_api():
@@ -433,10 +409,6 @@ def stop_process(name):
             return {"success": False, "message": f"{name} 未运行"}
         
         try:
-            # 如果是 Thinking 模块，被模块管理页显式停止时上报离线状态
-            if name == "Thinking":
-                _report_thinking_online_status(False)
-
             # 终止进程
             proc.terminate()
             # 等待最多5秒
