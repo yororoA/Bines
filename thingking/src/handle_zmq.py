@@ -410,6 +410,7 @@ _QQ_ALLOWED_TOOLS = {
     "at_each_group_member",
     "browser_search",
     "get_moments", "add_moment", "comment_moment",
+    "get_comments", "like_moment", "like_comment", "analyze_moment_images",
     "sing",
 }
 
@@ -865,11 +866,12 @@ ALL_TOOLS_SCHEMA_FOR_AGENT = [
         }
     },
     # 键鼠操作工具已移除；call_thinking_model 不挂在工具模型上，避免“工具模型再调思考模型”的递归，复杂任务由主模型直接 call_tool_agent 交给工具模型多轮执行即可
+    # 【动态工具·Buffer 约定】get_moments 调用一次后结果会写入模块缓冲区；comment_moment / get_comments / like_moment / like_comment / analyze_moment_images 必须使用该次返回的 data 中的 _id，禁止为获取 _id 重复调用 get_moments。
     {
         "type": "function",
         "function": {
             "name": "get_moments",
-            "description": "获取已发布动态列表（返回简化结构便于解析：每条含 id/title/content/username/createdAt/likes/views/comments_count/acknowledge/images 数组）。Get published moments list (simplified format).",
+            "description": "【仅需调用一次】获取已发布动态列表并写入缓冲区。返回 data 中每条含 _id, title, content, filenames, comments, likes, views, createdAt, username。后续评论/点赞/看评论/看图片时必须使用本次返回的 _id，禁止再次调用 get_moments 只为拿 _id。Call once to fetch moments; use returned _id for comment/like/get_comments/analyze_moment_images; do NOT call get_moments again for each operation.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
@@ -877,7 +879,7 @@ ALL_TOOLS_SCHEMA_FOR_AGENT = [
         "type": "function",
         "function": {
             "name": "add_moment",
-            "description": "发布一条动态（标题必填，正文可选）。直接发布，不存草稿。Publish a moment with title and optional content.",
+            "description": "发布一条新动态（标题必填，正文可选）。发布后会自动写入缓冲区，无需再调 get_moments 刷新。Publish a moment (title required, content optional); new moment is auto-cached.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -892,15 +894,79 @@ ALL_TOOLS_SCHEMA_FOR_AGENT = [
         "type": "function",
         "function": {
             "name": "comment_moment",
-            "description": "对指定动态发表评论。Comment on a moment.",
+            "description": "对某条动态或某条评论发表评论。moment_id 必须使用【上一次 get_moments 返回的 data 中】对应条目的 _id，禁止为获取 moment_id 再次调用 get_moments。回复某条评论时，belong 填该评论的 _id（可从 get_comments 返回或当前上下文获得）。Comment on a moment; moment_id must come from previous get_moments result; do NOT call get_moments again.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "moment_id": {"type": "string", "description": "动态 ID。Moment document id."},
+                    "moment_id": {"type": "string", "description": "源动态的 _id（必须来自已缓存的 get_moments 结果）。Moment _id from buffer/previous get_moments."},
                     "comment": {"type": "string", "description": "评论内容。Comment content."},
-                    "belong": {"type": "string", "description": "可选，归属标识。Optional belong identifier."}
+                    "belong": {"type": "string", "description": "可选。回复某条评论时填该评论的 _id。Optional: parent comment _id when replying to a comment."}
                 },
-                    "required": ["moment_id", "comment"]
+                "required": ["moment_id", "comment"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_comments",
+            "description": "根据评论 id 列表批量拉取评论详情。comment_ids 应来自【已缓存的 get_moments 结果】中某条的 comments 字段（id 列表）。拉取后缓冲区会更新该条动态的评论映射，便于后续 comment_moment(..., belong=评论_id)。Do NOT call get_moments again to get comment ids; use comments from previous get_moments.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "comment_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "评论 id 列表，来自 get_moments 返回的 data[].comments。Comment id list from buffer."
+                    }
+                },
+                "required": ["comment_ids"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "like_moment",
+            "description": "点赞或取消点赞某条动态。moment_id 必须使用【上一次 get_moments 返回的 data 中】对应条目的 _id，禁止再次调用 get_moments。Like/unlike a moment; moment_id from buffer only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "moment_id": {"type": "string", "description": "动态 _id（来自缓存的 get_moments 结果）。Moment _id from buffer."},
+                    "like": {"type": "boolean", "description": "True 点赞，False 取消。True to like, False to unlike."}
+                },
+                "required": ["moment_id", "like"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "like_comment",
+            "description": "点赞或取消点赞某条评论。comment_id 使用 get_comments 返回的 _id 或上下文中已有的评论 id，禁止为获取 id 调用 get_moments。Like/unlike a comment; comment_id from get_comments or context.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "comment_id": {"type": "string", "description": "评论 _id（来自 get_comments 或缓冲）。Comment _id from buffer."},
+                    "like": {"type": "boolean", "description": "True 点赞，False 取消。True to like, False to unlike."}
+                },
+                "required": ["comment_id", "like"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_moment_images",
+            "description": "识别某条动态中的图片并返回文字描述。moment_id 必须使用【上一次 get_moments 返回的 data 中】对应条目的 _id（且该条 filenames 非空），禁止再次调用 get_moments。Analyze moment images; moment_id from buffer only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "moment_id": {"type": "string", "description": "动态 _id（来自缓存的 get_moments 结果，且该条有图片）。Moment _id from buffer."},
+                    "max_images": {"type": "integer", "description": "可选，最多分析几张图，默认 3。Optional, default 3."},
+                    "timeout": {"type": "integer", "description": "可选，单张超时秒数，默认 25。Optional, default 25."}
+                },
+                "required": ["moment_id"]
             }
         }
     },
@@ -975,8 +1041,11 @@ def _get_tool_agent_schema_filtered():
         print(f"[Thinking] 读取 tool_agent_schema.json 失败: {e}，将使用全部工具", flush=True)
         return list(ALL_TOOLS_SCHEMA_FOR_AGENT)
     tools_conf = data.get("tools") or []
+    names_in_json = {str(t.get("name")) for t in tools_conf}
     enabled_names = {str(t.get("name")) for t in tools_conf if t.get("enabled") is True}
     code_names = {t.get("function", {}).get("name") for t in ALL_TOOLS_SCHEMA_FOR_AGENT}
+    # 代码中有但 JSON 中未列出的工具（如新增的 get_comments/like_moment 等）默认启用，避免每次加工具都要改 JSON
+    enabled_names = enabled_names | (code_names - names_in_json)
     missing = enabled_names - code_names
     if missing:
         print(f"[Thinking] schema 中启用的工具在代码中不存在，已忽略: {missing}", flush=True)

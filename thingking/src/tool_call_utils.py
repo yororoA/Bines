@@ -80,7 +80,7 @@ def execute_tool_calls(tool_calls_list: List[Dict], tool_call_map: Dict[str, Cal
                 print(f"[Tool Utils] 过滤屏幕信息时出错: {e}", flush=True)
         
         # moments 接口返回 { message, data } 时，对「data 为空」做友好说明，避免模型误判为失败
-        if func_name in ("get_moments", "add_moment", "comment_moment"):
+        if func_name in ("get_moments", "add_moment", "comment_moment", "get_comments", "like_moment", "like_comment", "analyze_moment_images"):
             result = _format_moments_result(result)
         
         # 截断日志显示，但保留完整结果

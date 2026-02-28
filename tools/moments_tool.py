@@ -69,7 +69,7 @@ def _headers() -> dict:
     """鉴权：Authorization Bearer + uid，从环境变量读取。"""
     h = {"Content-Type": "application/json", "uid": MOMENTS_UID or ""}
     if MOMENTS_TOKEN:
-        h["Authorization"] = f"Bearer {MOMENTS_TOKEN}"
+        h["Authorization"] = f"X-Token {MOMENTS_TOKEN}"
     return h
 
 

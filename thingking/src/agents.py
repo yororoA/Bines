@@ -588,6 +588,8 @@ class ToolAgent:
 
 【重要约束】你不具备访问对话历史或记忆的能力。如果任务要求检索过去的对话内容、聊天记录或记忆，请直接调用 task_complete 并回复"历史对话信息已在主模型上下文中，无需工具操作，请直接从上下文回答用户。"。get_screen_info 仅用于查看用户当前屏幕的实时画面，绝不可用于获取过去的对话内容。
 
+【动态（moments）工具】若任务涉及看动态、评论、点赞、看评论、看动态图片：必须先调用一次 get_moments 获取列表，后续 comment_moment、get_comments、like_moment、like_comment、analyze_moment_images 一律使用该次返回的 data 中的 _id（或 comments 中的 id），不得为获取 _id 重复调用 get_moments。
+
 请根据任务需要调用工具（工具说明以 API 传入的 schema 为准）。可自主连续多轮调用工具，根据结果再决定是否继续调用或调用 task_complete 提交最终结果。"""
         
         messages.append({

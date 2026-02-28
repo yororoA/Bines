@@ -178,7 +178,7 @@ class ThinkingModelHelper:
                         return idx, call_id, func_name, args_str, f"Error: Tool '{func_name}' not found in tool_call_map"
                     try:
                         tool_result = tool_function(**args)
-                        if func_name in ("get_moments", "add_moment", "comment_moment"):
+                        if func_name in ("get_moments", "add_moment", "comment_moment", "get_comments", "like_moment", "like_comment", "analyze_moment_images"):
                             result = _format_moments_result(tool_result)
                         else:
                             result = str(tool_result)
