@@ -17,6 +17,15 @@ from .music_tool import (
     switch_to_playlist
 )
 from .smart_automation_tool import find_element_and_click, find_element_and_type, analyze_and_operate, smart_click, smart_type
+from .pointer_tool import (
+    left_click,
+    left_double_click,
+    right_click,
+    left_drag,
+    right_drag,
+    type_text,
+    hotkey,
+)
 # 新增工具（从 handle_zmq.py 迁移）
 from .game_mode_tool import enable_game_mode, disable_game_mode
 from .memory_tool import update_status
@@ -79,6 +88,13 @@ TOOLS_REGISTRY = {
     "analyze_and_operate": analyze_and_operate,
     "smart_click": smart_click,
     "smart_type": smart_type,
+    "left_click": left_click,
+    "left_double_click": left_double_click,
+    "right_click": right_click,
+    "left_drag": left_drag,
+    "right_drag": right_drag,
+    "type_text": type_text,
+    "hotkey": hotkey,
     # 新增工具（从 handle_zmq.py 迁移）
     "enable_game_mode": enable_game_mode,
     "disable_game_mode": disable_game_mode,

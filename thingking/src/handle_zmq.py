@@ -62,43 +62,71 @@ from tools.screen_tool import get_screen_info_wrapper
 # [工具迁移] update_status 已迁移到 tools/memory_tool.py
 # 工具函数定义已移除，现在从 tools 包导入
 
-# --- Bines 在线状态 SSE 连接（替代一次性 POST online） ---
-_status_stream_thread = None
+# --- Bines 在线状态 WebSocket 连接（替代一次性 POST online） ---
+# 后端 ws://host/api/status/bines/ws?secret=<STATUS_TOGGLE_SECRET>，连接成功即 online=true，断开即 false，后端会发心跳
+_status_ws_thread = None
 
 
-def _status_stream_worker():
+def _bines_status_ws_url():
+    """根据 MOMENTS_API_BASE_URL 生成 WebSocket 地址：https -> wss，http -> ws，路径 /api/status/bines/ws?secret=..."""
+    from urllib.parse import quote
+    base = (MOMENTS_API_BASE_URL or "").rstrip("/")
+    if not base:
+        return None
+    if base.startswith("https://"):
+        ws_base = "wss://" + base[8:]
+    elif base.startswith("http://"):
+        ws_base = "ws://" + base[7:]
+    else:
+        ws_base = "wss://" + base
+    secret = (TOGGLE_STATUS_TOKEN or "").strip()
+    if secret:
+        return f"{ws_base}/api/status/bines/ws?secret={quote(secret, safe='')}"
+    return f"{ws_base}/api/status/bines/ws"
+
+
+def _status_ws_worker():
     """
-    通过 SSE 连接 /api/status/bines/stream 维持在线状态：
-    - 连接成功即视为 online=true（由后端处理）
-    - 连接关闭时后端会自动设为 false，这里只做重连
+    通过 WebSocket 连接 /api/status/bines/ws 维持在线状态：
+    - 连接成功时后端将 online 设为 true 并可能下发 status 消息
+    - 连接关闭/错误时后端自动将 online 设为 false，本端只负责重连
     """
-    url = f"{MOMENTS_API_BASE_URL.rstrip('/')}/api/status/bines/stream"
-    headers = {"X-Status-Secret": TOGGLE_STATUS_TOKEN or ""}
+    try:
+        import websocket
+    except ImportError:
+        print("[Thinking] 未安装 websocket-client，无法建立状态 WebSocket，请 pip install websocket-client", flush=True)
+        return
+
     while True:
+        url = _bines_status_ws_url()
+        if not url:
+            print("[Thinking] MOMENTS_API_BASE_URL 未配置，跳过状态 WebSocket", flush=True)
+            time.sleep(10)
+            continue
+
         try:
-            print(f"[Thinking] 尝试建立状态 SSE 连接: {url}", flush=True)
-            with requests.get(url, headers=headers, stream=True, timeout=30) as resp:
-                if not resp.ok:
-                    print(f"[Thinking] 状态 SSE 连接失败: {resp.status_code}", flush=True)
-                    time.sleep(10)
-                    continue
-                print("[Thinking] 状态 SSE 连接已建立（online=true 由后端维护）", flush=True)
-                for _line in resp.iter_lines():
-                    # 仅保持连接存活；如需调试可打印心跳
-                    if _line is None:
-                        continue
+            print(f"[Thinking] 尝试建立状态 WebSocket: {url.split('?')[0]}", flush=True)
+            ws = websocket.WebSocketApp(
+                url,
+                header={"X-Status-Secret": TOGGLE_STATUS_TOKEN or ""},
+                on_open=lambda w: print("[Thinking] 状态 WebSocket 已连接（online=true 由后端维护）", flush=True),
+                on_message=lambda w, m: None,  # 后端心跳等可忽略
+                on_error=lambda w, e: print(f"[Thinking] 状态 WebSocket 错误: {e}", flush=True),
+                on_close=lambda w, code, msg: print(f"[Thinking] 状态 WebSocket 已断开 (code={code})", flush=True),
+            )
+            ws.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as e:
-            print(f"[Thinking] 状态 SSE 连接异常，将在稍后重试: {e}", flush=True)
+            print(f"[Thinking] 状态 WebSocket 异常，将在稍后重试: {e}", flush=True)
         time.sleep(5)
 
 
 def _ensure_status_stream_started():
-    global _status_stream_thread
-    if _status_stream_thread is not None and _status_stream_thread.is_alive():
+    """启动 Bines 在线状态 WebSocket 连接（若尚未启动）。"""
+    global _status_ws_thread
+    if _status_ws_thread is not None and _status_ws_thread.is_alive():
         return
-    t = threading.Thread(target=_status_stream_worker, daemon=True)
-    _status_stream_thread = t
-    t.start()
+    _status_ws_thread = threading.Thread(target=_status_ws_worker, daemon=True)
+    _status_ws_thread.start()
 
 
 # --- 全局变量 ---
@@ -967,6 +995,121 @@ ALL_TOOLS_SCHEMA_FOR_AGENT = [
                     "timeout": {"type": "integer", "description": "可选，单张超时秒数，默认 25。Optional, default 25."}
                 },
                 "required": ["moment_id"]
+            }
+        }
+    },
+    # 指针与键盘工具集（坐标均为屏幕像素）
+    {
+        "type": "function",
+        "function": {
+            "name": "left_click",
+            "description": "在指定坐标左键单击，可连续多次。坐标为屏幕像素 (x, y)。Left click at (x,y), optional multiple times.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "横坐标（像素）。X coordinate in pixels."},
+                    "y": {"type": "integer", "description": "纵坐标（像素）。Y coordinate in pixels."},
+                    "times": {"type": "integer", "description": "连续点击次数，默认 1。Number of clicks, default 1."}
+                },
+                "required": ["x", "y"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "left_double_click",
+            "description": "在指定坐标左键双击，可连续多次。坐标为屏幕像素。Left double-click at (x,y).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "横坐标（像素）。"},
+                    "y": {"type": "integer", "description": "纵坐标（像素）。"},
+                    "times": {"type": "integer", "description": "连续双击次数，默认 1。"}
+                },
+                "required": ["x", "y"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "right_click",
+            "description": "在指定坐标右键单击，可连续多次。坐标为屏幕像素。Right click at (x,y).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "横坐标（像素）。"},
+                    "y": {"type": "integer", "description": "纵坐标（像素）。"},
+                    "times": {"type": "integer", "description": "连续点击次数，默认 1。"}
+                },
+                "required": ["x", "y"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "left_drag",
+            "description": "左键按下从起点拖拽到终点。参数为起点与终点坐标（屏幕像素）。Left-button drag from (start_x,start_y) to (end_x,end_y).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_x": {"type": "integer", "description": "起点横坐标（像素）。"},
+                    "start_y": {"type": "integer", "description": "起点纵坐标（像素）。"},
+                    "end_x": {"type": "integer", "description": "终点横坐标（像素）。"},
+                    "end_y": {"type": "integer", "description": "终点纵坐标（像素）。"}
+                },
+                "required": ["start_x", "start_y", "end_x", "end_y"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "right_drag",
+            "description": "右键按下从起点拖拽到终点。参数为起点与终点坐标（屏幕像素）。Right-button drag from start to end.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_x": {"type": "integer", "description": "起点横坐标（像素）。"},
+                    "start_y": {"type": "integer", "description": "起点纵坐标（像素）。"},
+                    "end_x": {"type": "integer", "description": "终点横坐标（像素）。"},
+                    "end_y": {"type": "integer", "description": "终点纵坐标（像素）。"}
+                },
+                "required": ["start_x", "start_y", "end_x", "end_y"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "type_text",
+            "description": "在当前焦点位置模拟键盘输入字符串。Type the given string at current focus.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "要输入的字符串。String to type."}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hotkey",
+            "description": "一次性按下组合键，如 Ctrl+C、Alt+Tab。参数为按键列表，按顺序按下后同时释放。Press a key combination, e.g. ['ctrl','c'] for Ctrl+C.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "按键列表，如 ['ctrl','c'] 表示 Ctrl+C。List of keys, e.g. ['ctrl','c']."
+                    }
+                },
+                "required": ["keys"]
             }
         }
     },
