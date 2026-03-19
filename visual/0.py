@@ -143,7 +143,7 @@ def camera_model():
     # --- DashScope VLM 调用 ---
     def call_dashscope_vlm(image_b64, focus_question=None):
         url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-        api_key = os.environ.get("DASHSCOPE_API_KEY", "sk-6d1ba1246b66420498c4c4c47c393be2")
+        api_key = os.environ.get("DASHSCOPE_API_KEY")
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
