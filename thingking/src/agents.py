@@ -50,6 +50,56 @@ UPDATE_STATUS_SCHEMA_FOR_DYNAMIC_MEMORY = [
 ]
 
 
+def _clean_messages_for_tool_history(messages: List[Dict], agent_label: str) -> List[Dict]:
+    """
+    清理消息历史，移除未完成的 tool_calls。
+
+    如果 assistant 消息包含 tool_calls，但后面没有对应的 tool 消息，
+    则移除该 assistant 消息的 tool_calls 字段。由于清理后 tool 会成为孤立消息，
+    因此统一不保留 role=tool 的消息。
+    """
+    if not messages:
+        return []
+
+    cleaned = []
+    pending_tool_call_ids = set()
+
+    for msg in messages:
+        role = msg.get("role")
+
+        if role == "assistant":
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                for tc in tool_calls:
+                    tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                    if tc_id:
+                        pending_tool_call_ids.add(tc_id)
+
+                cleaned_msg = msg.copy()
+                cleaned_msg.pop("tool_calls", None)
+                if cleaned_msg.get("content") or cleaned_msg.get("reasoning_content"):
+                    cleaned.append(cleaned_msg)
+            else:
+                cleaned.append(msg)
+
+        elif role == "tool":
+            tc_id = msg.get("tool_call_id")
+            if tc_id:
+                pending_tool_call_ids.discard(tc_id)
+            # 清理后不再保留 role=tool 消息，避免孤立 tool 报错
+
+        else:
+            cleaned.append(msg)
+
+    if pending_tool_call_ids:
+        print(
+            f"[{agent_label}] Warning: Found {len(pending_tool_call_ids)} incomplete tool_calls, removed them",
+            flush=True,
+        )
+
+    return cleaned
+
+
 class MainAgent:
     """
     主模型代理
@@ -508,57 +558,7 @@ class ToolAgent:
         ]
     
     def _clean_messages(self, messages: List[Dict]) -> List[Dict]:
-        """
-        清理消息历史，移除未完成的 tool_calls
-        
-        如果 assistant 消息包含 tool_calls，但后面没有对应的 tool 消息，
-        则移除该 assistant 消息的 tool_calls 字段，或者移除整个消息。
-        """
-        if not messages:
-            return []
-        
-        cleaned = []
-        pending_tool_call_ids = set()
-        
-        for msg in messages:
-            role = msg.get("role")
-            
-            if role == "assistant":
-                tool_calls = msg.get("tool_calls")
-                if tool_calls:
-                    # 记录所有 tool_call_id
-                    for tc in tool_calls:
-                        tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-                        if tc_id:
-                            pending_tool_call_ids.add(tc_id)
-                    
-                    # 创建清理后的消息（保留 content，移除 tool_calls）
-                    cleaned_msg = msg.copy()
-                    cleaned_msg.pop("tool_calls", None)
-                    if cleaned_msg.get("content") or cleaned_msg.get("reasoning_content"):
-                        cleaned.append(cleaned_msg)
-                else:
-                    # 没有 tool_calls，直接添加
-                    cleaned.append(msg)
-            
-            elif role == "tool":
-                # 若前面已把某条 assistant 的 tool_calls 移除了，则其对应的 tool 消息不能保留，
-                # 否则 API 会报错：Messages with role 'tool' must be a response to a preceding message with 'tool_calls'
-                tc_id = msg.get("tool_call_id")
-                if tc_id:
-                    pending_tool_call_ids.discard(tc_id)
-                # 清理后不再保留任何 tool 消息（assistant 的 tool_calls 已被移除，tool 会变成孤立消息）
-                # 不将 tool 消息加入 cleaned
-            
-            else:
-                # user, system 等其他角色，直接添加
-                cleaned.append(msg)
-        
-        # 如果还有未完成的 tool_calls，记录警告
-        if pending_tool_call_ids:
-            print(f"[ToolAgent] Warning: Found {len(pending_tool_call_ids)} incomplete tool_calls, removed them", flush=True)
-        
-        return cleaned
+        return _clean_messages_for_tool_history(messages, "ToolAgent")
     
     def handle_task(self, task_description: str, context: str, 
                    base_messages: List[Dict], progress_callback=None, interrupt_check=None) -> str:
@@ -697,57 +697,7 @@ class SummaryAgent:
         ]
     
     def _clean_messages(self, messages: List[Dict]) -> List[Dict]:
-        """
-        清理消息历史，移除未完成的 tool_calls
-        
-        如果 assistant 消息包含 tool_calls，但后面没有对应的 tool 消息，
-        则移除该 assistant 消息的 tool_calls 字段，或者移除整个消息。
-        """
-        if not messages:
-            return []
-        
-        cleaned = []
-        pending_tool_call_ids = set()
-        
-        for msg in messages:
-            role = msg.get("role")
-            
-            if role == "assistant":
-                tool_calls = msg.get("tool_calls")
-                if tool_calls:
-                    # 记录所有 tool_call_id
-                    for tc in tool_calls:
-                        tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-                        if tc_id:
-                            pending_tool_call_ids.add(tc_id)
-                    
-                    # 创建清理后的消息（保留 content，移除 tool_calls）
-                    cleaned_msg = msg.copy()
-                    cleaned_msg.pop("tool_calls", None)
-                    if cleaned_msg.get("content") or cleaned_msg.get("reasoning_content"):
-                        cleaned.append(cleaned_msg)
-                else:
-                    # 没有 tool_calls，直接添加
-                    cleaned.append(msg)
-            
-            elif role == "tool":
-                # 若前面已把某条 assistant 的 tool_calls 移除了，则其对应的 tool 消息不能保留，
-                # 否则 API 会报错：Messages with role 'tool' must be a response to a preceding message with 'tool_calls'
-                tc_id = msg.get("tool_call_id")
-                if tc_id:
-                    pending_tool_call_ids.discard(tc_id)
-                # 清理后不再保留任何 tool 消息（assistant 的 tool_calls 已被移除，tool 会变成孤立消息）
-                # 不将 tool 消息加入 cleaned
-            
-            else:
-                # user, system 等其他角色，直接添加
-                cleaned.append(msg)
-        
-        # 如果还有未完成的 tool_calls，记录警告
-        if pending_tool_call_ids:
-            print(f"[SummaryAgent] Warning: Found {len(pending_tool_call_ids)} incomplete tool_calls, removed them", flush=True)
-        
-        return cleaned
+        return _clean_messages_for_tool_history(messages, "SummaryAgent")
     
     def update_state(self, state_update_description: str, context: str,
                     base_messages: List[Dict]) -> str:

@@ -20,6 +20,14 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import ZMQ_PORTS, PRESENCE_STATE_PATH
+from process_registry import get_processes
+from port_cleanup import cleanup_ports
+from realtime_screen_config import (
+    DEFAULT_REALTIME_SCREEN_CONFIG,
+    load_realtime_screen_config,
+    normalize_realtime_screen_config,
+    save_realtime_screen_config as persist_realtime_screen_config,
+)
 
 app = Flask(__name__, template_folder=os.path.join(ROOT_DIR, "server", "templates"),
             static_folder=os.path.join(ROOT_DIR, "server", "static"))
@@ -64,62 +72,7 @@ def game_mode_api():
     
     return jsonify({"status": "unknown"})
 
-PROCESSES = [
-    {
-        "name": "Display",
-        "script": os.path.join(ROOT_DIR, "server", "gui_display.py"),
-        "interpreter": os.path.join(ROOT_DIR, "server", "server_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "server")
-    },
-    {
-        "name": "Speaking",
-        "script": os.path.join(ROOT_DIR, "speaking", "main.py"),
-        "interpreter": os.path.join(ROOT_DIR, "server", "server_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "speaking")
-    },
-    {
-        "name": "Visual",
-        "script": os.path.join(ROOT_DIR, "visual", "0.py"),
-        "interpreter": os.path.join(ROOT_DIR, "visual", "envs", "runtime_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "visual")
-    },
-    {
-        "name": "RAG Server",
-        "script": os.path.join(ROOT_DIR, "thingking", "rag_server.py"),
-        "interpreter": os.path.join(ROOT_DIR, "thingking", "thinking_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "thingking")
-    },
-    {
-        "name": "Thinking",
-        "script": os.path.join(ROOT_DIR, "thingking", "src", "handle_zmq.py"),
-        "interpreter": os.path.join(ROOT_DIR, "thingking", "thinking_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "thingking", "src")
-    },
-    {
-        "name": "Classification",
-        "script": os.path.join(ROOT_DIR, "server", "classification_server.py"),
-        "interpreter": os.path.join(ROOT_DIR, "server", "server_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "server")
-    },
-    {
-        "name": "Hearing",
-        "script": os.path.join(ROOT_DIR, "hearing", "1.py"),
-        "interpreter": os.path.join(ROOT_DIR, "hearing", "envs", "runtime_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "hearing")
-    },
-    {
-        "name": "Bored Detector",
-        "script": os.path.join(ROOT_DIR, "thingking", "src", "bored_detector.py"),
-        "interpreter": os.path.join(ROOT_DIR, "thingking", "thinking_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "thingking", "src")
-    },
-    {
-        "name": "ChatBot",
-        "script": os.path.join(ROOT_DIR, "chatBot", "main.py"),
-        "interpreter": os.path.join(ROOT_DIR, "server", "server_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "chatBot")
-    },
-]
+PROCESSES = get_processes(display_script="gui_display.py")
 
 # 服务名称到端口的映射（只包含该服务作为服务器/发布者绑定的端口）
 # 注意：只列出服务 bind() 的端口，不要列出服务 connect() 的端口
@@ -193,123 +146,6 @@ def log_output(process_name, pipe, log_queue, stream_type="STDOUT"):
         log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] 读取{stream_type}时出错: {error_msg}")
     finally:
         log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {stream_type} 输出流已关闭")
-
-def cleanup_ports(ports):
-    """清理占用端口的进程"""
-    if not ports:
-        return
-    
-    # 确保所有端口都是整数类型
-    ports = [int(p) for p in ports]
-    
-    log_message = f"🔍 检查并清理占用端口的进程: {ports}..."
-    print(log_message)
-    
-    # 将清理信息也记录到日志（如果有正在运行的服务）
-    try:
-        result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, encoding='utf-8', errors='ignore')
-        lines = result.stdout.splitlines()
-        pids_to_kill = set()
-        port_pid_map = {}  # 记录每个端口对应的PID
-        
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 5:
-                state_idx = -1
-                for i, part in enumerate(parts):
-                    if "LISTENING" in part.upper():
-                        state_idx = i
-                        break
-                
-                if state_idx > 0:
-                    local_addr = parts[1]  # 例如: "0.0.0.0:5556" 或 "127.0.0.1:5556"
-                    pid = parts[-1]
-                    
-                    # 尝试从地址中提取端口号
-                    if ":" in local_addr:
-                        try:
-                            addr_port = local_addr.split(":")[-1]
-                            addr_port_int = int(addr_port)
-                            
-                            # 检查是否匹配目标端口
-                            if addr_port_int in ports:
-                                if pid.isdigit() and pid != "0":
-                                    pids_to_kill.add(pid)
-                                    port_pid_map[addr_port_int] = pid
-                                    print(f"  ⚠️  端口 {addr_port_int} 被进程 PID {pid} 占用")
-                        except (ValueError, IndexError):
-                            # 如果解析失败，使用原来的字符串匹配方式作为后备
-                            for port in ports:
-                                port_str = f":{port}"
-                                if port_str in local_addr:
-                                    if pid.isdigit() and pid != "0":
-                                        pids_to_kill.add(pid)
-                                        port_pid_map[port] = pid
-                                        print(f"  ⚠️  端口 {port} 被进程 PID {pid} 占用")
-        
-        if not pids_to_kill:
-            print("  ✅ 所有目标端口都可用，无需清理")
-            time.sleep(0.5)
-            return
-        
-        print(f"  🔪 正在终止 {len(pids_to_kill)} 个占用端口的进程...")
-        killed_pids = []
-        for pid in pids_to_kill:
-            try:
-                result = subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    print(f"    ✓ 已终止进程 PID {pid}")
-                    killed_pids.append(pid)
-                else:
-                    error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
-                    print(f"    ⚠️  终止进程 PID {pid} 失败: {error_msg}")
-                time.sleep(0.5)  # 增加等待时间
-            except subprocess.TimeoutExpired:
-                print(f"    ⚠️  终止进程 PID {pid} 超时")
-            except Exception as e:
-                print(f"    ⚠️  终止进程 PID {pid} 失败: {e}")
-        
-        if killed_pids:
-            print(f"  ✓ 成功终止 {len(killed_pids)} 个进程")
-        
-        # 等待端口释放（增加等待时间，确保端口完全释放）
-        print("  ⏳ 等待端口释放...")
-        time.sleep(3.0)  # 增加到3秒，确保端口完全释放
-        
-        # 验证端口是否已释放
-        result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, encoding='utf-8', errors='ignore')
-        still_occupied = []
-        for port in ports:
-            for line in result.stdout.splitlines():
-                if ":" in line and "LISTENING" in line.upper():
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        local_addr = parts[1]
-                        if ":" in local_addr:
-                            try:
-                                addr_port = int(local_addr.split(":")[-1])
-                                if addr_port == port:
-                                    pid = parts[-1]
-                                    if pid.isdigit() and pid != "0":
-                                        still_occupied.append((port, pid))
-                                        break
-                            except (ValueError, IndexError):
-                                # 后备匹配方式
-                                if f":{port}" in local_addr:
-                                    pid = parts[-1]
-                                    if pid.isdigit() and pid != "0":
-                                        still_occupied.append((port, pid))
-                                        break
-        
-        if still_occupied:
-            print(f"  ⚠️  警告: 以下端口可能仍被占用: {[f'{p}(PID:{pid})' for p, pid in still_occupied]}")
-        else:
-            print(f"  ✅ 所有端口已成功释放")
-            
-    except Exception as e:
-        print(f"  ❌ 端口清理过程中出错: {e}")
-        import traceback
-        traceback.print_exc()
 
 def start_process(config, cleanup_ports_first=False, ports_to_cleanup=None):
     """启动进程（后台运行，不显示窗口）"""
@@ -799,15 +635,7 @@ def _realtime_screen_start():
 
 def _realtime_screen_ensure_from_config():
     """根据保存的配置决定是否启动实时屏幕分析（仅当 enabled 且未在运行时启动）。供其他模块就绪后调用。"""
-    data = {"enabled": False, "interval_sec": 10}
-    if os.path.exists(REALTIME_SCREEN_CONFIG_PATH):
-        try:
-            with open(REALTIME_SCREEN_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            data.setdefault("enabled", False)
-            data.setdefault("interval_sec", 10)
-        except Exception:
-            pass
+    data = load_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH)
 
     # 【新增】无论是否启动，都同步工具 schema 状态
     # 实时分析启用 -> 禁用 get_screen_info; 实时分析禁用 -> 启用 get_screen_info
@@ -835,16 +663,7 @@ def api_realtime_screen_ensure_from_config():
 @app.route('/api/realtime_screen_config', methods=['GET'])
 def get_realtime_screen_config():
     """获取实时屏幕分析开关、间隔、变化阈值及脚本是否在运行。"""
-    data = {"enabled": False, "interval_sec": 10, "min_change_ratio": 0.15, "script_running": False}
-    if os.path.exists(REALTIME_SCREEN_CONFIG_PATH):
-        try:
-            with open(REALTIME_SCREEN_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            data.setdefault("enabled", False)
-            data.setdefault("interval_sec", 10)
-            data.setdefault("min_change_ratio", 0.15)
-        except Exception:
-            pass
+    data = load_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH)
     data["script_running"] = _realtime_screen_is_running()
     return jsonify(data)
 
@@ -868,15 +687,11 @@ def save_realtime_screen_config():
     """保存配置；运行过程中根据本次保存的 enabled 状态启动或停止实时屏幕分析脚本。"""
     try:
         body = request.get_json() or {}
-        enabled = body.get("enabled", False)
-        interval_sec = int(body.get("interval_sec", 10))
-        interval_sec = max(3, min(120, interval_sec))
-        min_change_ratio = float(body.get("min_change_ratio", 0.15))
-        min_change_ratio = max(0.0, min(1.0, min_change_ratio))
-        config = {"enabled": bool(enabled), "interval_sec": interval_sec, "min_change_ratio": min_change_ratio}
-        os.makedirs(os.path.dirname(REALTIME_SCREEN_CONFIG_PATH), exist_ok=True)
-        with open(REALTIME_SCREEN_CONFIG_PATH, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+        merged = dict(DEFAULT_REALTIME_SCREEN_CONFIG)
+        merged.update(body)
+        config = normalize_realtime_screen_config(merged)
+        persist_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH, config)
+        enabled = config.get("enabled", False)
 
         # 【新增】状态切换时同步工具 schema
         _update_tool_enabled_in_schema("get_screen_info", not bool(enabled))

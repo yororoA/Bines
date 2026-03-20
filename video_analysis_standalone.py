@@ -27,6 +27,8 @@ except ImportError:
     print("请安装 requests: pip install requests", file=sys.stderr)
     sys.exit(1)
 
+from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
+
 # 与项目屏幕分析一致的 DashScope 配置（仅从环境变量读取，不引用 config）
 DASHSCOPE_API_URL = os.environ.get(
     "DASHSCOPE_API_URL",
@@ -87,37 +89,17 @@ def call_dashscope_vlm(image_b64: str, prompt: str) -> str:
     """调用 DashScope 视觉模型，返回文本描述。与屏幕分析使用同一 API 形态。"""
     if not DASHSCOPE_API_KEY:
         raise RuntimeError("请设置环境变量 DASHSCOPE_API_KEY")
-    url = DASHSCOPE_API_URL
-    image_content = f"data:image/jpeg;base64,{image_b64}"
-    payload = {
-        "model": DASHSCOPE_VISION_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_content}},
-                ],
-            }
-        ],
-    }
-    headers = {
-        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    resp = requests.post(
-        url,
-        headers=headers,
-        json=payload,
+    out = _call_dashscope_vlm(
+        image_b64,
+        prompt,
+        api_url=DASHSCOPE_API_URL,
+        api_key=DASHSCOPE_API_KEY,
+        model=DASHSCOPE_VISION_MODEL,
         timeout=DASHSCOPE_API_TIMEOUT,
         proxies={"http": None, "https": None},
+        empty_message="[VLM 返回解析错误]",
     )
-    if resp.status_code != 200:
-        return f"[VLM 请求失败 {resp.status_code}] {resp.text[:300]}"
-    try:
-        return (resp.json().get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
-    except (IndexError, KeyError, TypeError):
-        return "[VLM 返回解析错误]"
+    return out
 
 
 def build_prompt(segment_index: int, total_segments: int, time_sec: float, prev_summary: str | None) -> str:

@@ -27,6 +27,7 @@ from models.face_models.face_recognise import face_input
 from models.face_models.face_recognise import face_find
 from models.face_models.face_recognise import load_embeddings, save_embeddings
 from config import ZMQ_PORTS
+from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
 # from models.object_models.object_recognise_onnx import ObjectDetector
 # from models.gesture_models.gesture import HandInteractionSystem
 
@@ -142,19 +143,6 @@ def camera_model():
     
     # --- DashScope VLM 调用 ---
     def call_dashscope_vlm(image_b64, focus_question=None):
-        url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-        api_key = os.environ.get("DASHSCOPE_API_KEY")
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        # 确保 base64 前缀存在
-        if not image_b64.startswith("data:"):
-            image_content = f"data:image/jpeg;base64,{image_b64}"
-        else:
-            image_content = image_b64
-
         # 根据是否有 focus_question 生成提示词
         # 新规则：
         # - 如果上游调用方提供了 focus_question，则直接视为完整提示词，不再在此处固定模板；
@@ -163,43 +151,22 @@ def camera_model():
             prompt_text = str(focus_question).strip()
         else:
             prompt_text = "简要描述画面中的内容（50字以内），可适当关注人物的情绪和动作。"
-
-        payload = {
-            "model": "qwen3-vl-flash", # 用户指定模型
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt_text
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_content
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-        
-        try:
-            # print("Calling DashScope VLM...")
-            # VLM 推理比较慢，超时时间设长一点，且强制不走代理
-            response = requests.post(url, headers=headers, json=payload, timeout=10, proxies={"http": None, "https": None})
-            if response.status_code == 200:
-                res = response.json()
-                try:
-                    return res['choices'][0]['message']['content']
-                except:
-                    return ""
-            else:
-                print(f"DashScope error: {response.status_code} {response.text}")
-        except Exception as e:
-            print(f"DashScope call failed: {e}")
-        return ""
+        result = _call_dashscope_vlm(
+            image_b64,
+            prompt_text,
+            api_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            api_key=os.environ.get("DASHSCOPE_API_KEY"),
+            model="qwen3-vl-flash",
+            timeout=10,
+            proxies={"http": None, "https": None},
+            missing_key_message="",
+            empty_message="",
+            error_message_prefix="",
+        )
+        if result.startswith("[VLM 请求失败"):
+            print(f"DashScope error: {result}")
+            return ""
+        return result or ""
 
     # --- 4. 定义后台识别/服务线程 ---
     def recognition_loop():

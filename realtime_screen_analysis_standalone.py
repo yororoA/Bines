@@ -27,6 +27,9 @@ except ImportError:
     print("请安装 requests: pip install requests", file=sys.stderr)
     sys.exit(1)
 
+from realtime_screen_config import load_realtime_screen_config
+from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
+
 try:
     import mss
     import imagehash
@@ -110,20 +113,7 @@ def get_active_window_rect():
 
 def load_config():
     """读取 realtime_screen_config.json，缺省为未启用、间隔 10 秒、变化阈值 0.15。"""
-    if not CONFIG_PATH.exists():
-        return {"enabled": False, "interval_sec": 10, "min_change_ratio": 0.15}
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        ratio = float(data.get("min_change_ratio", 0.15))
-        ratio = max(0.0, min(1.0, ratio))
-        return {
-            "enabled": bool(data.get("enabled", False)),
-            "interval_sec": max(3, min(120, int(data.get("interval_sec", 10)))),
-            "min_change_ratio": ratio,
-        }
-    except Exception:
-        return {"enabled": False, "interval_sec": 10, "min_change_ratio": 0.15}
+    return load_realtime_screen_config(CONFIG_PATH)
 
 
 def compute_change_ratio(prev_pil, current_pil, sample_size=32):
@@ -267,53 +257,20 @@ def call_dashscope_vlm(image_b64_list, prompt: str) -> str:
     调用 DashScope 视觉模型，返回文本描述。
     支持传入单张图片 base64 字符串，或图片 base64 列表 (多图模式)。
     """
-    if not DASHSCOPE_API_KEY:
-        return "[未设置 DASHSCOPE_API_KEY]"
-    
-    # 兼容旧调用：如果是字符串，转为列表
-    if isinstance(image_b64_list, str):
-        image_b64_list = [image_b64_list]
-        
-    url = DASHSCOPE_API_URL
-    
-    # 构建 content 列表
-    content_list = [{"type": "text", "text": prompt}]
-    for i, img_b64 in enumerate(image_b64_list):
-        if i == 0:
-             content_list.append({"type": "text", "text": "图1：全屏概览"})
-        elif i == 1:
-             content_list.append({"type": "text", "text": "图2：当前活动窗口高分辨率详情"})
-             
-        content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}})
-
-    payload = {
-        "model": DASHSCOPE_VISION_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": content_list
-            }
-        ],
-    }
-    
-    headers = {
-        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    try:
-        resp = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=DASHSCOPE_API_TIMEOUT,
-            proxies={"http": None, "https": None},
-        )
-        if resp.status_code != 200:
-            return f"[VLM 请求失败 {resp.status_code}] {resp.text[:200]}"
-        out = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
-        return out or "[VLM 返回为空]"
-    except Exception as e:
-        return f"[VLM 异常] {e}"
+    labels = ["图1：全屏概览", "图2：当前活动窗口高分辨率详情"]
+    return _call_dashscope_vlm(
+        image_b64_list,
+        prompt,
+        api_url=DASHSCOPE_API_URL,
+        api_key=DASHSCOPE_API_KEY,
+        model=DASHSCOPE_VISION_MODEL,
+        timeout=DASHSCOPE_API_TIMEOUT,
+        proxies={"http": None, "https": None},
+        image_labels=labels,
+        missing_key_message="[未设置 DASHSCOPE_API_KEY]",
+        empty_message="[VLM 返回为空]",
+        error_message_prefix="[VLM 异常]",
+    )
 
 
 def build_composite_left_to_right(im1, im2, im3):

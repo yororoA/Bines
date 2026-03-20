@@ -5,6 +5,8 @@ import sys
 import ctypes
 from ctypes import wintypes
 from config import ZMQ_PORTS
+from process_registry import get_processes
+from port_cleanup import cleanup_ports
 
 # Define modules and their venv pythons
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,67 +18,8 @@ CONSOLE_HEIGHT = 25  # 窗口高度（行数），可以调整：20-50
 # 启动顺序：Classification 最先启动（先监听 MODULE_READY_REP）；
 # 然后 Display/Speaking/Visual/RAG Server/Hearing 启动并就绪后向 Classification 上报；
 # Classification 收齐后通知 Thinking，Thinking 最后启动（上线通知、摘要/日记等）。
-PROCESSES = [
-    {
-        "name": "Classification",
-        "script": os.path.join(ROOT_DIR, "server", "classification_server.py"),
-        "interpreter": os.path.join(ROOT_DIR, "server", "server_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "server")
-    },
-    {
-        "name": "Display",
-        "script": os.path.join(ROOT_DIR, "server", "display.py"),
-        "interpreter": os.path.join(ROOT_DIR, "server", "server_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "server")
-    },
-    {
-        "name": "Speaking",
-        "script": os.path.join(ROOT_DIR, "speaking", "main.py"),
-        "interpreter": os.path.join(ROOT_DIR, "server", "server_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "speaking")
-    },
-    {
-        "name": "Visual",
-        "script": os.path.join(ROOT_DIR, "visual", "0.py"),
-        "interpreter": os.path.join(ROOT_DIR, "visual", "envs", "runtime_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "visual")
-    },
-    {
-        "name": "RAG Server",
-        "script": os.path.join(ROOT_DIR, "thingking", "rag_server.py"),
-        "interpreter": os.path.join(ROOT_DIR, "thingking", "thinking_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "thingking")
-    },
-    {
-        "name": "Hearing",
-        "script": os.path.join(ROOT_DIR, "hearing", "1.py"),
-        "interpreter": os.path.join(ROOT_DIR, "hearing", "envs", "runtime_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "hearing")
-    },
-    {
-        "name": "Bored Detector",
-        "script": os.path.join(ROOT_DIR, "thingking", "src", "bored_detector.py"),
-        "interpreter": os.path.join(ROOT_DIR, "thingking", "thinking_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "thingking", "src")
-    },
-    {
-        "name": "Thinking",
-        "script": os.path.join(ROOT_DIR, "thingking", "src", "handle_zmq.py"),
-        "interpreter": os.path.join(ROOT_DIR, "thingking", "thinking_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "thingking", "src")
-    },
-    {
-        "name": "ChatBot",
-        "script": os.path.join(ROOT_DIR, "chatBot", "main.py"),
-        "interpreter": os.path.join(ROOT_DIR, "server", "server_venv", "Scripts", "python.exe"),
-        "cwd": os.path.join(ROOT_DIR, "chatBot")
-    },
-    # {
-    #     "name": "Ollama qwen3-vl:4b",
-    #     "command": ["ollama", "run", "qwen3-vl:4b"],
-    #     "cwd": ROOT_DIR
-    # }
-]
+# 控制台模式使用 display.py。
+PROCESSES = get_processes(display_script="display.py")
 
 processes = []
 
@@ -144,102 +87,6 @@ def set_console_size(pid, width=80, height=30):
     except Exception as e:
         # 静默失败，不影响启动流程
         return False
-
-def cleanup_ports(ports):
-    """
-    启动前清理占用端口的进程，防止 Address in use 错误
-    【优化】改进端口检测逻辑，更可靠地识别和清理占用端口的进程
-    """
-    print(f"🔍 检查并清理占用端口的进程: {ports}...")
-    try:
-        # 获取 netstat 输出
-        result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, encoding='utf-8', errors='ignore')
-        lines = result.stdout.splitlines()
-        pids_to_kill = set()
-        port_pid_map = {}  # 记录每个端口对应的PID
-        
-        for line in lines:
-            parts = line.split()
-            # TCP 127.0.0.1:5556 0.0.0.0:0 LISTENING 12345
-            # 格式通常是: Proto Local Address Foreign Address State PID
-            if len(parts) >= 5:
-                # 查找 LISTENING 状态（可能在parts[3]或parts[4]）
-                state_idx = -1
-                for i, part in enumerate(parts):
-                    if "LISTENING" in part.upper():
-                        state_idx = i
-                        break
-                
-                if state_idx > 0:
-                    local_addr = parts[1]
-                    pid = parts[-1]  # PID 通常在最后
-                    
-                    # 检查此行是否包含我们要清理的端口
-                    for port in ports:
-                        # 匹配格式: 127.0.0.1:5553 或 0.0.0.0:5553 或 [::]:5553 或 *:5553
-                        port_str = f":{port}"
-                        if port_str in local_addr:
-                            if pid.isdigit() and pid != "0":  # PID 0 是 System Idle Process
-                                pids_to_kill.add(pid)
-                                port_pid_map[port] = pid
-                                print(f"  ⚠️  端口 {port} 被进程 PID {pid} 占用")
-                        
-        if not pids_to_kill:
-            print("  ✅ 所有目标端口都可用，无需清理")
-            # 即使没有找到占用，也等待一下确保端口完全释放
-            time.sleep(0.5)
-            return
-
-        print(f"  🔪 正在终止 {len(pids_to_kill)} 个占用端口的进程...")
-        for pid in pids_to_kill:
-            try:
-                # 直接强制终止，更可靠
-                result = subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, text=True, timeout=3)
-                if result.returncode == 0:
-                    print(f"    ✓ 已终止进程 PID {pid}")
-                else:
-                    print(f"    ⚠️  终止进程 PID {pid} 失败: {result.stderr.strip()}")
-                time.sleep(0.3)
-            except subprocess.TimeoutExpired:
-                print(f"    ⚠️  终止进程 PID {pid} 超时")
-            except Exception as e:
-                print(f"    ⚠️  终止进程 PID {pid} 失败: {e}")
-            
-        # 【优化】增加等待时间，确保端口完全释放
-        print("  ⏳ 等待端口释放...")
-        time.sleep(2.0)  # 增加等待时间到2秒
-        
-        # 验证端口是否已释放（最多重试3次）
-        max_retries = 3
-        for retry in range(max_retries):
-            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, encoding='utf-8', errors='ignore')
-            still_occupied = []
-            for port in ports:
-                # 检查是否还有进程在监听该端口
-                for line in result.stdout.splitlines():
-                    if f":{port}" in line and "LISTENING" in line.upper():
-                        parts = line.split()
-                        if len(parts) >= 5:
-                            pid = parts[-1]
-                            if pid.isdigit() and pid != "0":
-                                still_occupied.append((port, pid))
-                                break
-            
-            if not still_occupied:
-                print(f"  ✅ 所有端口已成功释放")
-                break
-            else:
-                if retry < max_retries - 1:
-                    print(f"  ⚠️  仍有端口被占用: {[f'{p}(PID:{pid})' for p, pid in still_occupied]}，等待后重试...")
-                    time.sleep(1.0)
-                else:
-                    print(f"  ⚠️  警告: 以下端口可能仍被占用: {[f'{p}(PID:{pid})' for p, pid in still_occupied]}")
-                    print(f"  💡 提示: 如果启动失败，请手动终止这些进程")
-            
-    except Exception as e:
-        print(f"  ❌ 端口清理过程中出错: {e}")
-        import traceback
-        traceback.print_exc()
 
 def start_process(config):
     print(f"Starting {config['name']}...")

@@ -6,6 +6,21 @@
       "enabled": true
     },
     {
+      "name": "at_each_group_member",
+      "description": "在指定QQ群内依次艾特每个成员并发送个性化消息。支持模板变量：{昵称}=群昵称，{qq}或{qq号}=QQ号码，{群名片}或{card}=群名片。例如message='新年快乐{昵称}！你的QQ是{qq}'会为每个成员替换为实际信息。自动跳过机器人自身。",
+      "enabled": true
+    },
+    {
+      "name": "broadcast_to_all_friends",
+      "description": "向所有QQ好友批量群发私聊消息。支持模板变量：{昵称}=好友昵称，{qq}或{qq号}=QQ号码，{备注}=好友备注名。例如'新年快乐{昵称}'会自动替换为每个好友的实际昵称。",
+      "enabled": true
+    },
+    {
+      "name": "broadcast_to_all_groups",
+      "description": "向所有已加入的QQ群批量群发消息。支持模板变量：{群名}=群名称，{群号}=群号码。例如'通知{群名}的各位'会自动替换为每个群的实际名称。",
+      "enabled": true
+    },
+    {
       "name": "browser_search",
       "description": "与浏览器相关的唯一入口：仅允许通过本工具进行浏览器操作，执行网页搜索。",
       "enabled": true
@@ -23,7 +38,7 @@
     {
       "name": "fast_screen_analysis",
       "description": "快速屏幕分析（游戏模式专用）。使用本地OCR和图像处理，延迟极低。",
-      "enabled": false
+      "enabled": true
     },
     {
       "name": "find_color_region",
@@ -48,21 +63,6 @@
     {
       "name": "get_qq_group_list",
       "description": "获取当前登录账号加入的QQ群列表。",
-      "enabled": true
-    },
-    {
-      "name": "broadcast_to_all_friends",
-      "description": "向所有QQ好友批量群发私聊消息。支持模板变量：{昵称}=好友昵称，{qq}或{qq号}=QQ号码，{备注}=好友备注名。例如'新年快乐{昵称}'会自动替换为每个好友的实际昵称。",
-      "enabled": true
-    },
-    {
-      "name": "broadcast_to_all_groups",
-      "description": "向所有已加入的QQ群批量群发消息。支持模板变量：{群名}=群名称，{群号}=群号码。例如'通知{群名}的各位'会自动替换为每个群的实际名称。",
-      "enabled": true
-    },
-    {
-      "name": "at_each_group_member",
-      "description": "在指定QQ群内依次艾特每个成员并发送个性化消息。支持模板变量：{昵称}=群昵称，{qq}或{qq号}=QQ号码，{群名片}或{card}=群名片。例如message='新年快乐{昵称}！你的QQ是{qq}'会为每个成员替换为实际信息。自动跳过机器人自身。",
       "enabled": true
     },
     {
