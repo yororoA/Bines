@@ -9,7 +9,6 @@ import random
 import time
 import sys
 import traceback
-import copy
 import threading
 import queue
 from pathlib import Path
@@ -18,6 +17,7 @@ from layered_memory import LayeredMemorySystem
 from thinking_model_helper import ThinkingModelHelper
 from tool_call_utils import execute_tool_calls, has_async_tools, should_use_thinking_model
 from agents import MainAgent, ToolAgent, SummaryAgent, DynamicMemoryToolAgent
+from tool_agent_schema import get_tool_agent_schema_filtered
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1157,58 +1157,9 @@ REALTIME_SCREEN_ANALYSIS_PATH = PROJECT_ROOT / "server" / "realtime_screen_analy
 REALTIME_SCREEN_CONTEXT_PATH = PROJECT_ROOT / "server" / "realtime_screen_context.json"
 
 
-def _bootstrap_tool_agent_schema_if_missing():
-    """若 schema 文件不存在，则从 ALL_TOOLS_SCHEMA_FOR_AGENT 生成初始文件（全部 enabled: true）。"""
-    if TOOL_AGENT_SCHEMA_PATH.exists():
-        return
-    try:
-        TOOL_AGENT_SCHEMA_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tools = sorted(
-            [{"name": t.get("function", {}).get("name", ""), "description": (t.get("function") or {}).get("description", ""), "enabled": True} for t in ALL_TOOLS_SCHEMA_FOR_AGENT],
-            key=lambda x: x.get("name", "")
-        )
-        with open(TOOL_AGENT_SCHEMA_PATH, "w", encoding="utf-8") as f:
-            json.dump({"tools": tools}, f, ensure_ascii=False, indent=2)
-        print(f"[Thinking] 已生成初始 tool_agent_schema.json（共 {len(tools)} 项，全部启用）", flush=True)
-    except Exception as e:
-        print(f"[Thinking] 生成 tool_agent_schema.json 失败: {e}", flush=True)
-
-
 def _get_tool_agent_schema_filtered():
-    """从 server/tool_agent_schema.json 读取 tools[].enabled，只挂载 enabled 为 true 的工具（与 ALL_TOOLS_SCHEMA_FOR_AGENT 按 name 对齐）。sing 的 filename 动态注入 cover 目录下的文件枚举。"""
-    _bootstrap_tool_agent_schema_if_missing()
-    try:
-        with open(TOOL_AGENT_SCHEMA_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        print(f"[Thinking] 读取 tool_agent_schema.json 失败: {e}，将使用全部工具", flush=True)
-        return list(ALL_TOOLS_SCHEMA_FOR_AGENT)
-    tools_conf = data.get("tools") or []
-    names_in_json = {str(t.get("name")) for t in tools_conf}
-    enabled_names = {str(t.get("name")) for t in tools_conf if t.get("enabled") is True}
-    code_names = {t.get("function", {}).get("name") for t in ALL_TOOLS_SCHEMA_FOR_AGENT}
-    # 代码中有但 JSON 中未列出的工具（如新增的 get_comments/like_moment 等）默认启用，避免每次加工具都要改 JSON
-    enabled_names = enabled_names | (code_names - names_in_json)
-    missing = enabled_names - code_names
-    if missing:
-        print(f"[Thinking] schema 中启用的工具在代码中不存在，已忽略: {missing}", flush=True)
-    if not enabled_names:
-        return []
-    filtered = [t for t in ALL_TOOLS_SCHEMA_FOR_AGENT if t.get("function", {}).get("name") in enabled_names]
-    result = copy.deepcopy(filtered)
-    for t in result:
-        if t.get("function", {}).get("name") == "sing":
-            try:
-                from tools.sing_tool import get_sing_list
-                choices = get_sing_list()
-            except Exception:
-                choices = []
-            params = (t.get("function") or {}).get("parameters") or {}
-            props = params.get("properties") or {}
-            if "filename" in props and choices:
-                props["filename"] = {**props["filename"], "enum": choices}
-            break
-    return result
+    """读取工具 schema 并返回可挂载到工具代理的过滤结果。"""
+    return get_tool_agent_schema_filtered(TOOL_AGENT_SCHEMA_PATH, ALL_TOOLS_SCHEMA_FOR_AGENT)
 
 
 main_agent.set_tools_schema(ROUTER_TOOLS_SCHEMA)
