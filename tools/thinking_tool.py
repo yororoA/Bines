@@ -3,6 +3,7 @@
 用于调用思考模式大模型进行复杂工具调用
 """
 from .dependencies import deps
+from thingking.src.tool_schema_defs import browser_search_tool_schema
 
 
 def _is_simple_open_task(text: str) -> bool:
@@ -478,21 +479,7 @@ def call_thinking_model(task_description, context=""):
         thinking_tools.extend(music_tools_definitions)
 
         # 主模型 TOOLS_SCHEMA 已不包含 browser_search，call_thinking_model 内思考模型需单独加入
-        _browser_search_schema = {
-            "type": "function",
-            "function": {
-                "name": "browser_search",
-                "description": "与浏览器相关的唯一入口：仅允许通过本工具（浏览器自动化/Selenium）进行浏览器操作，不依赖屏幕坐标。启动浏览器并执行网页搜索，返回搜索结果文本。当任务涉及「打开浏览器」「用浏览器搜索」「在网上搜一下」「查一下」等时必须调用本工具。禁止用 automate_action/automate_sequence 或屏幕坐标操作浏览器。Execute web search via browser (Selenium) only; no screen coordinates. MUST use for any browser-related task. Do NOT use automate_action, automate_sequence or coordinates for browser.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "搜索关键词。Search query."}
-                    },
-                    "required": ["query"]
-                }
-            }
-        }
-        thinking_tools.append(_browser_search_schema)
+        thinking_tools.append(browser_search_tool_schema())
 
         # 【新增】对于“音乐相关任务”，完全禁用所有屏幕/视觉分析类工具，
         # 避免因为过时上下文导致频繁调用 get_screen_info / fast_screen_analysis 等，
