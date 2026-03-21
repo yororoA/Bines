@@ -7,6 +7,7 @@ from ctypes import wintypes
 from config import ZMQ_PORTS
 from process_registry import get_processes
 from port_cleanup import cleanup_ports
+from process_runtime import resolve_process_command
 
 # Define modules and their venv pythons
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -91,12 +92,9 @@ def set_console_size(pid, width=80, height=30):
 def start_process(config):
     print(f"Starting {config['name']}...")
     try:
-        if 'command' in config:
-            cmd = config['command']
-        else:
-            if not os.path.exists(config['interpreter']):
-                 print(f"Warning: Interpreter not found for {config['name']}: {config['interpreter']}")
-            cmd = [config['interpreter'], config['script']]
+        if 'command' not in config and not os.path.exists(config['interpreter']):
+             print(f"Warning: Interpreter not found for {config['name']}: {config['interpreter']}")
+        cmd = resolve_process_command(config)
 
         # CREATE_NEW_CONSOLE = 16
         p = subprocess.Popen(
