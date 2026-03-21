@@ -3,12 +3,10 @@ import requests
 import os
 import time
 from pathlib import Path
-import sys
+from path_setup import ensure_project_root
 
 # 确保可以从项目根目录导入 config（兼容从不同工作目录运行 speaking 模块）
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = ensure_project_root(__file__, 1)
 
 from config import TTS_HTTP_BASE_URL
 
@@ -52,6 +50,36 @@ def get_ref_audio_config(target_lang):
 
 
 # ================= 功能函数 =================
+
+_TTS_BASE_OPTIONS = {
+    "aux_ref_audio_paths": [],
+    "text_split_method": "cut0",
+    "speed_factor": 1.0,
+    "fragment_interval": 0.4,
+    "batch_size": 1,
+    "parallel_infer": True,
+    "top_k": 5,
+    "top_p": 1.0,
+    "temperature": 0.8,
+    "repetition_penalty": 1.35,
+    "media_type": "wav",
+}
+
+
+def _build_tts_payload(target_text: str, target_lang: str, streaming_mode: bool) -> dict:
+    """统一构建 TTS 请求体，避免多处参数漂移。"""
+    ref_config = get_ref_audio_config(target_lang)
+    payload = {
+        "text": target_text,
+        "text_lang": target_lang,
+        "ref_audio_path": ref_config['ref_audio_path'],
+        "prompt_text": ref_config['prompt_text'],
+        "prompt_lang": ref_config['prompt_lang'],
+        "streaming_mode": streaming_mode,
+        "seed": ref_config['seed'],
+    }
+    payload.update(_TTS_BASE_OPTIONS)
+    return payload
 
 def append_temple(origin_path, temple_txt, temple_lang, append):
     """将生成的语音作为模板放入对应的已生成语音文件夹"""
@@ -112,28 +140,7 @@ def tts_generate_streaming(target_text, target_lang, chunk_callback=None):
         bytes: 完整的音频数据（如果不需要完整数据，可以忽略返回值）
     """
     url = f"{BASE_URL}/tts"
-    ref_config = get_ref_audio_config(target_lang)
-    
-    payload = {
-        "text": target_text,
-        "text_lang": target_lang,
-        "ref_audio_path": ref_config['ref_audio_path'],
-        "prompt_text": ref_config['prompt_text'],
-        "prompt_lang": ref_config['prompt_lang'],
-        "aux_ref_audio_paths": [],
-        "text_split_method": "cut0",
-        "speed_factor": 1.0,
-        "fragment_interval": 0.4,
-        "batch_size": 1,
-        "parallel_infer": True,
-        "top_k": 5,
-        "top_p": 1.0,
-        "temperature": 0.8,
-        "repetition_penalty": 1.35,
-        "media_type": "wav",
-        "streaming_mode": True,
-        "seed": ref_config['seed']
-    }
+    payload = _build_tts_payload(target_text, target_lang, streaming_mode=True)
     
     preview_text = target_text[:20] if target_text and len(target_text) > 20 else (target_text or "[空文本]")
     print(f"🎤 开始流式合成: {preview_text}...")
@@ -198,39 +205,7 @@ def tts_generate(target_text, target_lang, append=True, use_streaming=True):
         bytes: 完整的音频数据，如果失败返回None
     """
     url = f"{BASE_URL}/tts"
-
-    # 根据语种获取参考音频配置
-    ref_config = get_ref_audio_config(target_lang)
-
-    # 构建全参数 Payload
-    payload = {
-        # --- 核心内容 ---
-        "text": target_text,  # 目标文本
-        "text_lang": target_lang,  # 目标语言
-        "ref_audio_path": ref_config['ref_audio_path'],  # 主参考音频
-        "prompt_text": ref_config['prompt_text'],  # 参考文本
-        "prompt_lang": ref_config['prompt_lang'],  # 参考语言
-        "aux_ref_audio_paths": [],  # 辅参考音频列表（已移除）
-
-        # --- 切分与速度 ---
-        "text_split_method": "cut0",
-        "speed_factor": 1.0,  # 语速
-        "fragment_interval": 0.4,  # 分段间隔(秒)
-
-        # --- 高级参数 (对应WebUI截图) ---
-        "batch_size": 1,  # 【注意】显卡好可设为 4-8，显卡一般建议 1
-        "parallel_infer": True,  # 开启并行推理 (配合 batch_size > 1 使用)
-        "top_k": 5,  # 采样率
-        "top_p": 1.0,  # 采样率
-        "temperature": 0.8,  # 温度 (0.8-1.0)
-        "repetition_penalty": 1.35,  # 重复惩罚 (防止复读机)
-
-        # --- 其他 ---
-        "media_type": "wav",  # 返回音频格式
-        "streaming_mode": use_streaming,  # 是否流式返回（与use_streaming参数保持一致）
-
-        "seed": ref_config['seed']  # 根据语种使用对应的随机种子
-    }
+    payload = _build_tts_payload(target_text, target_lang, streaming_mode=use_streaming)
 
     # 安全地截取文本用于显示（避免空文本或过短文本的问题）
     preview_text = target_text[:20] if target_text and len(target_text) > 20 else (target_text or "[空文本]")

@@ -32,12 +32,12 @@ from listener_helpers import (
     is_user_online,
     build_bored_prompt,
 )
+from path_setup import ensure_project_root
 from runtime_wiring import register_tool_dependencies, bind_pub_socket_with_retry
+from tool_schema_sync import sync_agent_schema_with_registry
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = ensure_project_root(__file__, 2)
 
 from config import (
     ROOT_DIR,
@@ -61,9 +61,6 @@ if sys.platform.startswith('win'):
     except (AttributeError, OSError):
         pass
 # -------------------------------------------------------------------
-
-# 将项目根目录加入 path 以便导入 tools
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from tools import call_tool, TOOLS_REGISTRY
 from tools.dependencies import deps
 # 导入从 handle_zmq.py 迁移的工具函数（现在在 tools 包中）
@@ -1083,6 +1080,13 @@ ALL_TOOLS_SCHEMA_FOR_AGENT = [
         }
     }
 ]
+
+# 用注册表补齐遗漏工具，避免 schema 与 registry 双改不一致
+ALL_TOOLS_SCHEMA_FOR_AGENT = sync_agent_schema_with_registry(
+    ALL_TOOLS_SCHEMA_FOR_AGENT,
+    TOOLS_REGISTRY,
+    excluded_names={"update_status", "call_summary_agent"},
+)
 
 # 分层记忆系统：收到 Classification「所有模块就绪」后再初始化，并执行上线摘要/日记等
 memory_system = None

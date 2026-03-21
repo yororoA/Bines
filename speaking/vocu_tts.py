@@ -1,11 +1,8 @@
 import requests
-from pathlib import Path
-import sys
+from path_setup import ensure_project_root
 
 # 确保可以从项目根目录导入 config（兼容从不同工作目录运行 speaking 模块）
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = ensure_project_root(__file__, 1)
 
 from config import VOCU_BASE_URL, VOCU_API_KEY, VOCU_MODEL_ID
 

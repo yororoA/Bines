@@ -9,15 +9,12 @@
 import json
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
-from pathlib import Path
-import sys
+from path_setup import ensure_project_root
 
 import zmq
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = ensure_project_root(__file__, 2)
 
 from config import ZMQ_HOST, ZMQ_PORTS
 
