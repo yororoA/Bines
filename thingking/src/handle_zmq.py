@@ -32,6 +32,7 @@ from listener_helpers import (
     is_user_online,
     build_bored_prompt,
 )
+from runtime_wiring import register_tool_dependencies, bind_pub_socket_with_retry
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1090,14 +1091,12 @@ memory_system = None
 context = zmq.Context()
 
 # [依赖注入] 注册工具依赖，避免循环导入（memory_system 在正式启动时注册）
-deps.register_zmq_context(context)
-deps.register_thinking_model_helper(thinking_model_helper)
-
-# [依赖注入] 注册工具定义和注册表的访问器（用于 thinking_tool.py）
-# 使用 lambda 函数延迟访问，避免在模块级别导入时出现问题
-deps.register_tools_accessors(
+register_tool_dependencies(
+    deps,
+    context,
+    thinking_model_helper,
     get_tools_schema=lambda: TOOLS_SCHEMA,
-    get_tools_registry=lambda: TOOLS_REGISTRY
+    get_tools_registry=lambda: TOOLS_REGISTRY,
 )
 
 # 工具模型可调用工具：单一 schema 文件 server/tool_agent_schema.json，每项含 name/description/enabled；不依赖 Thinking 启动即可在模块管理页显示与修改
@@ -1115,48 +1114,34 @@ main_agent.set_tools_schema(ROUTER_TOOLS_SCHEMA)
 tool_agent.set_tools_schema(_get_tool_agent_schema_filtered())
 
 # PUB: 发送思考结果到TTS（音频请求）
-pub_socket = context.socket(zmq.PUB)
-# 【修复】添加重试机制，处理端口占用问题
 max_bind_retries = 3
 bind_retry_delay = 1.0
-for retry in range(max_bind_retries):
-    try:
-        pub_socket.bind(f"tcp://*:{ZMQ_PUB_PORT}")
-        break
-    except zmq.ZMQError as e:
-        if retry < max_bind_retries - 1:
-            print(f"[Thinking] 端口 {ZMQ_PUB_PORT} 绑定失败，等待 {bind_retry_delay} 秒后重试...", flush=True)
-            time.sleep(bind_retry_delay)
-        else:
-            raise
+pub_socket = bind_pub_socket_with_retry(
+    context,
+    ZMQ_PUB_PORT,
+    "THINKING_TTS_PUB",
+    max_retries=max_bind_retries,
+    retry_delay=bind_retry_delay,
+)
 
 # PUB: 发送文本到Display（直接发送文本，不经过TTS）
-pub_text_socket = context.socket(zmq.PUB)
-# 【修复】添加重试机制，处理端口占用问题
-for retry in range(max_bind_retries):
-    try:
-        pub_text_socket.bind(f"tcp://*:{ZMQ_PUB_TEXT_PORT}")
-        break
-    except zmq.ZMQError as e:
-        if retry < max_bind_retries - 1:
-            print(f"[Thinking] 端口 {ZMQ_PUB_TEXT_PORT} 绑定失败，等待 {bind_retry_delay} 秒后重试...", flush=True)
-            time.sleep(bind_retry_delay)
-        else:
-            raise
+pub_text_socket = bind_pub_socket_with_retry(
+    context,
+    ZMQ_PUB_TEXT_PORT,
+    "THINKING_TEXT_PUB",
+    max_retries=max_bind_retries,
+    retry_delay=bind_retry_delay,
+)
 
 # PUB: 播放本地音频（sing 工具）发往 Display
 ZMQ_AUDIO_PLAY_PUB_PORT = ZMQ_PORTS.get("AUDIO_PLAY_PUB", 5563)
-audio_play_pub_socket = context.socket(zmq.PUB)
-for retry in range(max_bind_retries):
-    try:
-        audio_play_pub_socket.bind(f"tcp://*:{ZMQ_AUDIO_PLAY_PUB_PORT}")
-        break
-    except zmq.ZMQError as e:
-        if retry < max_bind_retries - 1:
-            print(f"[Thinking] 端口 {ZMQ_AUDIO_PLAY_PUB_PORT} (AUDIO_PLAY_PUB) 绑定失败，等待 {bind_retry_delay} 秒后重试...", flush=True)
-            time.sleep(bind_retry_delay)
-        else:
-            raise
+audio_play_pub_socket = bind_pub_socket_with_retry(
+    context,
+    ZMQ_AUDIO_PLAY_PUB_PORT,
+    "AUDIO_PLAY_PUB",
+    max_retries=max_bind_retries,
+    retry_delay=bind_retry_delay,
+)
 try:
     from tools.dependencies import deps
     deps.register_audio_play_pub_socket(audio_play_pub_socket)

@@ -1,11 +1,11 @@
 import base64
-import requests
 import io
 import time
 import os
 import json
 import threading
 from pathlib import Path
+from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
 from config import (
     DASHSCOPE_API_URL,
     DASHSCOPE_API_KEY,
@@ -209,15 +209,8 @@ def get_screen_info(simple_recognition=True, only_mouse_area=False, focus_descri
         screenshot.save(buff, format="JPEG", quality=jpeg_quality, optimize=True)
         img_b64 = base64.b64encode(buff.getvalue()).decode('utf-8')
         
-        # 5. 调用 DashScope VLM
-        url = DASHSCOPE_API_URL
+        # 5. 调用 DashScope VLM（统一走 vlm_client 封装）
         api_key = require_env("DASHSCOPE_API_KEY", DASHSCOPE_API_KEY)
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        image_content = f"data:image/jpeg;base64,{img_b64}"
         
         # 提示词：明确网格数字就是真实坐标
         scale_info = ""
@@ -241,49 +234,36 @@ def get_screen_info(simple_recognition=True, only_mouse_area=False, focus_descri
             scale_info = ""
         
         enhanced_prompt = f"{prompt_text}\n\n{scale_info}"
+        description = _call_dashscope_vlm(
+            img_b64,
+            enhanced_prompt,
+            api_url=DASHSCOPE_API_URL,
+            api_key=api_key,
+            model=DASHSCOPE_VISION_MODEL,
+            timeout=DASHSCOPE_API_TIMEOUT,
+            proxies={"http": None, "https": None},
+            missing_key_message="Error: Missing DASHSCOPE_API_KEY",
+            empty_message="VLM response parsing error.",
+        )
 
-        payload = {
-            "model": DASHSCOPE_VISION_MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": enhanced_prompt
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_content
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-        
-        response = requests.post(url, headers=headers, json=payload, timeout=DASHSCOPE_API_TIMEOUT, proxies={"http": None, "https": None})
-        if response.status_code == 200:
-            res = response.json()
-            try:
-                description = res['choices'][0]['message']['content']
-                prefix = "屏幕区域描述" if only_mouse_area else "屏幕描述"
-                if not simple_recognition: prefix += "(含鼠标)"
-                
-                result = f"{prefix}: {description}"
-                # 附加缩放和裁剪信息供 smart_automation_tool 解析
-                scale_info_str = f"[SCALE_INFO:original={original_width}x{original_height},thumbnail={screenshot.width}x{screenshot.height},scale_x={scale_x:.4f},scale_y={scale_y:.4f}"
-                if crop_offset_x != 0 or crop_offset_y != 0:
-                    scale_info_str += f",crop_offset_x={crop_offset_x},crop_offset_y={crop_offset_y}"
-                scale_info_str += "]"
-                result += f"\n{scale_info_str}"
-                
-                return result
-            except (KeyError, IndexError, TypeError):
-                 return "VLM response parsing error."
-        else:
-            return f"Error: DashScope returned status {response.status_code}"
+        if isinstance(description, str) and description.startswith("[VLM 请求失败"):
+            return f"Error: {description}"
+        if isinstance(description, str) and description.startswith("[VLM 异常]"):
+            return f"Error capturing screen: {description}"
+
+        prefix = "屏幕区域描述" if only_mouse_area else "屏幕描述"
+        if not simple_recognition:
+            prefix += "(含鼠标)"
+
+        result = f"{prefix}: {description}"
+        # 附加缩放和裁剪信息供 smart_automation_tool 解析
+        scale_info_str = f"[SCALE_INFO:original={original_width}x{original_height},thumbnail={screenshot.width}x{screenshot.height},scale_x={scale_x:.4f},scale_y={scale_y:.4f}"
+        if crop_offset_x != 0 or crop_offset_y != 0:
+            scale_info_str += f",crop_offset_x={crop_offset_x},crop_offset_y={crop_offset_y}"
+        scale_info_str += "]"
+        result += f"\n{scale_info_str}"
+
+        return result
             
     except Exception as e:
         return f"Error capturing screen: {e}"
