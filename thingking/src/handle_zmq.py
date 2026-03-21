@@ -43,6 +43,8 @@ from message_flow_utils import (
 )
 from rag_client import RAGServerClient
 from thinking_stream_runner import run_main_agent_rounds
+from qq_reply_flow import handle_qq_reply_if_needed
+from interrupt_flow import submit_pending_interrupt
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = ensure_project_root(__file__, 2)
@@ -1717,35 +1719,14 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
 
         # [QQ回复] 独立于 _is_only_action_or_empty 判断，确保 QQ 消息始终被发送
         # 但如果是被打断的截断回复，则不发送（避免发送不完整的半句话）
-        if source == "QQ" and extra_data and to_save and to_save.strip() and not exited_due_to_interrupt:
-            try:
-                qq_ctx = extra_data.get("qq_context") or extra_data
-                reply_msg = send_qq_reply(to_save, qq_ctx)
-                if reply_msg:
-                    group_id = qq_ctx.get("group_id")
-
-                    # [新增] 将 bot 自己的 QQ 回复也存入 Buffer
-                    try:
-                        buf_mgr = get_qq_buffer_manager()
-                        bot_meta = {
-                            "timestamp": time.time(),
-                            "sender": "Self(Bot)",
-                            "group_id": qq_ctx.get("group_id"),
-                            "user_id": qq_ctx.get("user_id"),
-                            "is_group": bool(qq_ctx.get("group_id"))
-                        }
-                        if group_id:
-                            bot_content = f"[QQ群回复][Bot]: {reply_msg}"
-                        else:
-                            bot_content = f"[QQ私聊回复][Bot]: {reply_msg}"
-                        buf_mgr.add_message(bot_content, bot_meta)
-                        print(f"[Thinking] Bot QQ 回复已存入 Buffer", flush=True)
-                    except Exception as buf_err:
-                        print(f"[Thinking] Bot 回复存入 Buffer 失败: {buf_err}", flush=True)
-
-            except Exception as e:
-                print(f"[Thinking] Failed to send QQ reply: {e}", flush=True)
-                traceback.print_exc()
+        handle_qq_reply_if_needed(
+            source=source,
+            extra_data=extra_data,
+            to_save=to_save,
+            exited_due_to_interrupt=exited_due_to_interrupt,
+            send_qq_reply_func=send_qq_reply,
+            get_qq_buffer_manager_func=get_qq_buffer_manager,
+        )
 
         origin_for_display = "" if _is_only_action_or_empty(to_save) else to_save
         zmq_send("", lang="zh", cough="end", origin=origin_for_display, enable_audio=enable_audio)
@@ -1777,26 +1758,15 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             pending = PENDING_INTERRUPT_INPUT
             INTERRUPT_REQUESTED = False
             PENDING_INTERRUPT_INPUT = None
-        if pending and _EXECUTOR_FOR_INTERRUPT is not None:
-            with PROCESSING_LOCK:
-                PROCESSING_STATE["is_processing"] = False
-            if len(pending) == 4:
-                new_user_input, new_img_descr, new_source, new_extra = pending
-            else:
-                new_user_input, new_img_descr, new_source = pending
-                new_extra = None
-            def process_pending():
-                with PROCESSING_LOCK:
-                    if PROCESSING_STATE["is_processing"]:
-                        return
-                    PROCESSING_STATE["is_processing"] = True
-                try:
-                    process_message(new_user_input, new_img_descr, source=new_source, extra_data=new_extra)
-                finally:
-                    with PROCESSING_LOCK:
-                        PROCESSING_STATE["is_processing"] = False
-            _EXECUTOR_FOR_INTERRUPT.submit(process_pending)
-            print(f"[Thinking] 已提交打断后的新输入: {new_user_input[:30]}...", flush=True)
+        submitted_input = submit_pending_interrupt(
+            pending=pending,
+            executor=_EXECUTOR_FOR_INTERRUPT,
+            processing_lock=PROCESSING_LOCK,
+            processing_state=PROCESSING_STATE,
+            process_message=process_message,
+        )
+        if submitted_input:
+            print(f"[Thinking] 已提交打断后的新输入: {submitted_input[:30]}...", flush=True)
 
 
 def screen_monitor_thread():
