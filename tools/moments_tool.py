@@ -9,16 +9,17 @@ import json
 from pathlib import Path
 from typing import Optional, Any, Dict, List
 from datetime import datetime
-import sys
+try:
+    from .path_setup import ensure_project_root
+except ImportError:
+    from path_setup import ensure_project_root
 
 try:
     import requests
 except ImportError:
     requests = None
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = ensure_project_root(__file__, 1)
 
 from config import (
     MOMENTS_UID,

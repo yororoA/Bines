@@ -12,6 +12,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import ZMQ_HOST, ZMQ_PORTS
+from common.zmq_rpc import zmq_req_string
 
 # --- 关键修复 ---
 if sys.platform.startswith('win'):
@@ -88,22 +89,18 @@ def module_ready_collector():
         # 收齐后通知 Thinking
         start_port = ZMQ_PORTS.get("START_THINKING_REP")
         if start_port:
-            req = context.socket(zmq.REQ)
-            req.setsockopt(zmq.LINGER, 2000)
-            req.setsockopt(zmq.RCVTIMEO, 10000)
-            req.setsockopt(zmq.SNDTIMEO, 2000)
             try:
-                req.connect(f"tcp://127.0.0.1:{start_port}")
-                req.send_string("start")
-                req.recv_string()
+                zmq_req_string(
+                    context,
+                    f"tcp://127.0.0.1:{start_port}",
+                    "start",
+                    recv_timeout_ms=10000,
+                    send_timeout_ms=2000,
+                    linger_ms=2000,
+                )
                 print("[Classification] 已通知 Thinking 正式启动（上线、摘要/日记等）", flush=True)
             except Exception as e:
                 print(f"[Classification] 通知 Thinking 失败: {e}", flush=True)
-            finally:
-                try:
-                    req.close()
-                except Exception:
-                    pass
         else:
             print("[Classification] START_THINKING_REP 未配置，未通知 Thinking", flush=True)
     except Exception as e:

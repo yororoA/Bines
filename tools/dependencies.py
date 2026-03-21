@@ -18,6 +18,16 @@ class ToolDependencies:
         # 用于获取工具定义和注册表的回调函数（避免循环导入）
         self.get_tools_schema = None
         self.get_tools_registry = None
+
+    def _set_once(self, attr_name, value, label):
+        current = getattr(self, attr_name)
+        if current is None:
+            setattr(self, attr_name, value)
+            return
+        # 允许重复注册同一对象，防止初始化流程重复调用时报错
+        if current is value:
+            return
+        raise RuntimeError(f"{label} 已注册，禁止重复覆盖")
     
     def register_memory_system(self, memory_system):
         """注册记忆系统"""
@@ -25,15 +35,15 @@ class ToolDependencies:
     
     def register_zmq_context(self, context):
         """注册 ZMQ 上下文"""
-        self.zmq_context = context
+        self._set_once("zmq_context", context, "ZMQ context")
 
     def register_audio_play_pub_socket(self, socket):
         """注册用于播放本地音频的 PUB socket（sing 工具发往 Display）"""
-        self.audio_play_pub_socket = socket
+        self._set_once("audio_play_pub_socket", socket, "audio_play_pub_socket")
     
     def register_thinking_model_helper(self, helper):
         """注册思考模型助手"""
-        self.thinking_model_helper = helper
+        self._set_once("thinking_model_helper", helper, "thinking_model_helper")
     
     def set_game_mode(self, enabled, interval=0.1):
         """设置游戏模式状态"""
@@ -50,8 +60,15 @@ class ToolDependencies:
             get_tools_schema: 返回 TOOLS_SCHEMA 的函数
             get_tools_registry: 返回 TOOLS_REGISTRY 的函数
         """
-        self.get_tools_schema = get_tools_schema
-        self.get_tools_registry = get_tools_registry
+        if self.get_tools_schema is None:
+            self.get_tools_schema = get_tools_schema
+        elif self.get_tools_schema is not get_tools_schema:
+            raise RuntimeError("get_tools_schema 已注册，禁止重复覆盖")
+
+        if self.get_tools_registry is None:
+            self.get_tools_registry = get_tools_registry
+        elif self.get_tools_registry is not get_tools_registry:
+            raise RuntimeError("get_tools_registry 已注册，禁止重复覆盖")
 
 # 全局依赖实例
 deps = ToolDependencies()

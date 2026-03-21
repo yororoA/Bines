@@ -16,11 +16,10 @@ import datetime
 import re
 import random
 from pathlib import Path
+from path_setup import ensure_project_root
 
 # 确保可以从项目根目录导入 config
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = ensure_project_root(__file__, 2)
 
 from config import (
     ZMQ_HOST,
@@ -41,6 +40,7 @@ from relationship_state import (
     collapse_relationship_level,
     DEFAULT_SOFTNESS
 )
+from common.zmq_rpc import zmq_req_json
 
 # --- [修复补丁] 强制设置 Windows 控制台编码，防止 print 中文卡死 ---
 if sys.platform.startswith('win'):
@@ -166,14 +166,18 @@ def _fetch_visual_snapshot():
     向视觉模块发起一次 REQ，获取当前场景（物体、人脸、手势、场景描述）。
     返回 dict 或 None（超时/不可达时返回 None）。
     """
-    req_socket = None
     try:
-        req_socket = context.socket(zmq.REQ)
-        req_socket.setsockopt(zmq.RCVTIMEO, 15000)
-        req_socket.setsockopt(zmq.SNDTIMEO, 5000)
-        req_socket.connect(f"tcp://{HOST}:{VISUAL_REQREP_PORT}")
-        req_socket.send_json({"command": "look", "focus": "简要列出场景中的物体、人物手中的物品、穿着或环境变化，用于检测是否有新出现的内容。"})
-        response = req_socket.recv_json()
+        response = zmq_req_json(
+            context,
+            f"tcp://{HOST}:{VISUAL_REQREP_PORT}",
+            {
+                "command": "look",
+                "focus": "简要列出场景中的物体、人物手中的物品、穿着或环境变化，用于检测是否有新出现的内容。",
+            },
+            recv_timeout_ms=15000,
+            send_timeout_ms=5000,
+            linger_ms=1000,
+        )
         if isinstance(response, dict) and "scene_image" in response:
             response = dict(response)
             del response["scene_image"]
@@ -181,12 +185,6 @@ def _fetch_visual_snapshot():
     except Exception as e:
         print(f"[Bored Detector] 视觉拉取失败: {e}", flush=True)
         return None
-    finally:
-        if req_socket:
-            try:
-                req_socket.close()
-            except Exception:
-                pass
 
 
 def _check_visual_stimulus(now):

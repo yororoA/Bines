@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 import zmq
 from config import ZMQ_HOST, ZMQ_PORTS
+from common.zmq_rpc import zmq_req_json
 
 
 def notify_module_ready(module_name: str) -> None:
@@ -25,22 +26,18 @@ def notify_module_ready(module_name: str) -> None:
         print(f"[{module_name}] MODULE_READY_REP 未配置，跳过就绪上报", flush=True)
         return
     ctx = zmq.Context.instance()
-    req = ctx.socket(zmq.REQ)
-    req.setsockopt(zmq.LINGER, 2000)
-    req.setsockopt(zmq.RCVTIMEO, 5000)
-    req.setsockopt(zmq.SNDTIMEO, 2000)
     try:
-        req.connect(f"tcp://{ZMQ_HOST}:{port}")
-        req.send_json({"action": "module_ready", "module": module_name})
-        rep = req.recv_json()
+        rep = zmq_req_json(
+            ctx,
+            f"tcp://{ZMQ_HOST}:{port}",
+            {"action": "module_ready", "module": module_name},
+            recv_timeout_ms=5000,
+            send_timeout_ms=2000,
+            linger_ms=2000,
+        )
         if rep.get("ok"):
             print(f"[{module_name}] 已向 Classification 上报就绪", flush=True)
         else:
             print(f"[{module_name}] 就绪上报响应异常: {rep}", flush=True)
     except Exception as e:
         print(f"[{module_name}] 就绪上报失败: {e}", flush=True)
-    finally:
-        try:
-            req.close()
-        except Exception:
-            pass

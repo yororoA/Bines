@@ -137,6 +137,22 @@ class MainAgent:
         # 主模型工具列表由 handle_zmq 通过 set_tools_schema(TOOLS_SCHEMA) 注入，此处仅占位
         self.tools_schema = []
 
+    def _build_headers(self) -> Dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+    def _post_chat_completion(self, payload: Dict, stream: bool = False):
+        return requests.post(
+            self.api_url,
+            headers=self._build_headers(),
+            json=payload,
+            stream=stream,
+            timeout=self.timeout,
+        )
+
     def set_tools_schema(self, tools_schema: List[Dict]):
         """设置主模型可见的工具 schema（由 handle_zmq 的 TOOLS_SCHEMA 注入）。"""
         self.tools_schema = list(tools_schema) if tools_schema else []
@@ -158,7 +174,6 @@ class MainAgent:
         仅文本流式、不传 tools，保留用于兼容。主流程请使用 run_one_turn_streaming。
         返回: (generator, holder)，holder["message"] 仅含 content（无 tool_calls）。
         """
-        import requests as _requests
         holder = {}
         msgs = self._ensure_router_prompt(messages)
         payload = {
@@ -171,19 +186,8 @@ class MainAgent:
             "temperature": 0.7,
             "top_p": 1,
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
         try:
-            response = _requests.post(
-                self.api_url,
-                headers=headers,
-                json=payload,
-                stream=True,
-                timeout=self.timeout,
-            )
+            response = self._post_chat_completion(payload, stream=True)
             if response.status_code != 200:
                 holder["error"] = f"HTTP {response.status_code}: {response.text[:500]}"
                 return iter([]), holder
@@ -232,7 +236,6 @@ class MainAgent:
         返回: (generator, holder)
         holder 在流结束后包含: message = {role, content, tool_calls?}, 可选 error, interrupted
         """
-        import requests as _requests
         holder = {}
         msgs = self._ensure_system_prompt(messages)
         # 若上文含「仅内部参考」的思考过程，在首条 system 后插入提醒，减少对人设的干扰
@@ -258,19 +261,8 @@ class MainAgent:
             "tools": self.tools_schema,
             "tool_choice": "auto",
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
         try:
-            response = _requests.post(
-                self.api_url,
-                headers=headers,
-                json=payload,
-                stream=True,
-                timeout=self.timeout,
-            )
+            response = self._post_chat_completion(payload, stream=True)
             if response.status_code != 200:
                 holder["error"] = f"HTTP {response.status_code}: {response.text[:500]}"
                 return iter([]), holder
@@ -388,20 +380,9 @@ class MainAgent:
             "tool_choice": "auto",
             "stream": False
         }
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'Authorization': f'Bearer {self.api_key}'
-        }
-        
+
         try:
-            response = requests.post(
-                self.api_url,
-                headers=headers,
-                json=payload,
-                timeout=self.timeout
-            )
+            response = self._post_chat_completion(payload, stream=False)
             response.raise_for_status()
             result = response.json()
             
@@ -495,20 +476,9 @@ class MainAgent:
             "max_tokens": 2048,
             "stream": False
         }
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'Authorization': f'Bearer {self.api_key}'
-        }
-        
+
         try:
-            response = requests.post(
-                self.api_url,
-                headers=headers,
-                json=payload,
-                timeout=self.timeout
-            )
+            response = self._post_chat_completion(payload, stream=False)
             response.raise_for_status()
             result = response.json()
             return result["choices"][0]["message"]["content"]

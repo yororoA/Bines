@@ -22,6 +22,8 @@ if str(ROOT_DIR) not in sys.path:
 from config import ZMQ_PORTS, PRESENCE_STATE_PATH
 from process_registry import get_processes
 from port_cleanup import cleanup_ports
+from process_runtime import resolve_process_command, build_python_runtime_env
+from zmq_topology import SERVICE_BIND_PORTS
 from realtime_screen_config import (
     DEFAULT_REALTIME_SCREEN_CONFIG,
     load_realtime_screen_config,
@@ -74,43 +76,7 @@ def game_mode_api():
 
 PROCESSES = get_processes(display_script="gui_display.py")
 
-# 服务名称到端口的映射（只包含该服务作为服务器/发布者绑定的端口）
-# 注意：只列出服务 bind() 的端口，不要列出服务 connect() 的端口
-# 只有绑定端口的服务才会在 netstat 中显示为 LISTENING，需要清理
-SERVICE_PORTS = {
-    "Display": [
-        ZMQ_PORTS["CONTROL_PUB"],  # Display 绑定 CONTROL_PUB (gui_display.py line 96)
-    ],
-    "Speaking": [
-        ZMQ_PORTS["TTS_AUDIO_PUB"],  # Speaking 绑定 TTS_AUDIO_PUB (speaking/main.py line 16)
-    ],
-    "Visual": [
-        ZMQ_PORTS["VISUAL_PUB"],  # Visual 绑定 VISUAL_PUB (visual/0.py line 114)
-        ZMQ_PORTS["VISUAL_REQREP"],  # Visual 绑定 VISUAL_REQREP (visual/0.py line 118)
-    ],
-    "RAG Server": [
-        ZMQ_PORTS["RAG_SERVER_REQREP"],  # RAG Server 绑定 RAG_SERVER_REQREP (rag_server.py line 432)
-    ],
-    "Thinking": [
-        ZMQ_PORTS["THINKING_TTS_PUB"],  # Thinking 绑定 THINKING_TTS_PUB (handle_zmq.py line 620)
-        ZMQ_PORTS["THINKING_TEXT_PUB"],  # Thinking 绑定 THINKING_TEXT_PUB (handle_zmq.py line 634)
-        ZMQ_PORTS["CONTROL_PUB_THINKING"],  # Thinking 绑定 CONTROL_PUB_THINKING (handle_zmq.py line 727)
-        ZMQ_PORTS["START_THINKING_REP"],    # Thinking 绑定 START_THINKING_REP（等待 Classification 通知后正式启动）
-    ],
-    "Classification": [
-        ZMQ_PORTS["CLASSIFICATION_PUB"],  # Classification 绑定 CLASSIFICATION_PUB (classification_server.py line 46)
-        ZMQ_PORTS["MODULE_READY_REP"],    # Classification 绑定 MODULE_READY_REP（接收各模块就绪上报）
-    ],
-    "Hearing": [
-        ZMQ_PORTS["HEARING_ASR_PUB"],  # Hearing 绑定 HEARING_ASR_PUB (hearing/1.py line 40)
-    ],
-    "Bored Detector": [
-        ZMQ_PORTS["BORED_PUB"],  # Bored Detector 绑定 BORED_PUB (bored_detector.py line 72)
-    ],
-    "ChatBot": [
-        ZMQ_PORTS["QQ_PUB"],  # ChatBot 绑定 QQ_PUB
-    ],
-}
+SERVICE_PORTS = SERVICE_BIND_PORTS
 
 # 全局状态：存储所有进程和日志
 processes = {}  # {name: {"process": subprocess.Popen, "log_queue": queue.Queue, "logs": list}}
@@ -179,18 +145,12 @@ def start_process(config, cleanup_ports_first=False, ports_to_cleanup=None):
             cleanup_ports(ports_to_cleanup)
         
         try:
-            if 'command' in config:
-                cmd = config['command']
-            else:
-                if not os.path.exists(config['interpreter']):
-                    return {"success": False, "message": f"解释器不存在: {config['interpreter']}"}
-                cmd = [config['interpreter'], config['script']]
+            if 'command' not in config and not os.path.exists(config['interpreter']):
+                return {"success": False, "message": f"解释器不存在: {config['interpreter']}"}
+            cmd = resolve_process_command(config)
             
             # 准备环境变量，确保使用 UTF-8 编码
-            env = os.environ.copy()
-            env['PYTHONIOENCODING'] = 'utf-8'  # 强制 Python 使用 UTF-8 输出
-            if sys.platform == 'win32':
-                env['PYTHONUTF8'] = '1'  # Python 3.7+ 支持，启用 UTF-8 模式
+            env = build_python_runtime_env(os.environ)
             
             # 使用 PIPE 捕获输出，不创建新窗口
             # 注意：在 Windows 上，需要设置 universal_newlines=True 和适当的编码
