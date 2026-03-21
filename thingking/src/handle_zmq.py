@@ -35,6 +35,7 @@ from listener_helpers import (
 from path_setup import ensure_project_root
 from runtime_wiring import register_tool_dependencies, bind_pub_socket_with_retry
 from tool_schema_sync import sync_agent_schema_with_registry
+from qq_merge_coordinator import QQMergeCoordinator
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = ensure_project_root(__file__, 2)
@@ -102,15 +103,42 @@ PROCESSING_STATE = {"is_processing": False}
 
 # 【QQ 消息合并缓冲】按来源分离的合并缓冲区，避免不同群/用户消息互相干扰
 _QQ_MERGE_WINDOW_SEC = 3.0  # 合并窗口时间（秒）
-_QQ_MERGE_LOCK = threading.Lock()
-# key = (group_id, user_id) 的元组
-# value = {"texts": [str], "timer": Timer|None, "context": (img_descr, source, qq_context)|None}
-_QQ_MERGE_SLOTS: dict = {}
 
 # 【双 Chat】模型 B 任务 ID：若用户打断则取消当前 B，丢弃其输出
 _CURRENT_B_TASK_ID = None
 _CANCELLED_B_TASK_IDS = set()
 _B_TASK_LOCK = threading.Lock()
+
+
+def _qq_merge_set_pending(user_input, img_descr, source, qq_context):
+    """将消息设为 PENDING_INTERRUPT_INPUT（模块级 global 操作，避免嵌套函数 global 问题）"""
+    global INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT
+    with INTERRUPT_LOCK:
+        INTERRUPT_REQUESTED = True
+        if PENDING_INTERRUPT_INPUT is not None:
+            prev_text = PENDING_INTERRUPT_INPUT[0] if len(PENDING_INTERRUPT_INPUT) >= 1 else ""
+            PENDING_INTERRUPT_INPUT = (prev_text + "\n" + user_input, img_descr or "", source, qq_context)
+        else:
+            PENDING_INTERRUPT_INPUT = (user_input, img_descr or "", source, qq_context)
+
+
+def _is_processing_dialogue() -> bool:
+    with IS_PROCESSING_DIALOGUE_LOCK:
+        return IS_PROCESSING_DIALOGUE
+
+
+def _cancel_current_b_task() -> None:
+    with _B_TASK_LOCK:
+        if _CURRENT_B_TASK_ID:
+            _CANCELLED_B_TASK_IDS.add(_CURRENT_B_TASK_ID)
+
+
+qq_merge_coordinator = QQMergeCoordinator(
+    merge_window_sec=_QQ_MERGE_WINDOW_SEC,
+    set_pending_interrupt=_qq_merge_set_pending,
+    is_processing_dialogue=_is_processing_dialogue,
+    cancel_current_b_task=_cancel_current_b_task,
+)
 
 # [工具迁移] get_visual_info 已迁移到 tools/visual_tool.py
 # [工具迁移] get_screen_info_wrapper 已迁移到 tools/screen_tool.py
@@ -1491,140 +1519,19 @@ def _analyze_qq_images(image_urls, timeout=25):
 # ─── QQ 消息合并缓冲 ──────────────────────────────────────────────
 # 同一用户短时间内连续发送的多条QQ消息，先缓冲再合并为一条处理
 
-def _qq_merge_set_pending(user_input, img_descr, source, qq_context):
-    """将消息设为 PENDING_INTERRUPT_INPUT（模块级 global 操作，避免嵌套函数 global 问题）"""
-    global INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT
-    with INTERRUPT_LOCK:
-        INTERRUPT_REQUESTED = True
-        if PENDING_INTERRUPT_INPUT is not None:
-            prev_text = PENDING_INTERRUPT_INPUT[0] if len(PENDING_INTERRUPT_INPUT) >= 1 else ""
-            PENDING_INTERRUPT_INPUT = (prev_text + "\n" + user_input, img_descr or "", source, qq_context)
-        else:
-            PENDING_INTERRUPT_INPUT = (user_input, img_descr or "", source, qq_context)
-
-def _qq_merge_source_key(qq_context: dict) -> tuple:
-    """根据 qq_context 生成合并缓冲的来源 key：(group_id, user_id)。同一群/同一用户私聊的消息才合并。"""
-    inner = qq_context.get("qq_context", qq_context) if qq_context else {}
-    gid = inner.get("group_id")
-    uid = inner.get("user_id")
-    return (gid, uid)
-
-
 def _qq_merge_enqueue(user_input: str, img_descr: str, source: str, qq_context: dict,
                       executor, processing_lock, processing_state):
-    """
-    将一条 QQ 消息放入**按来源分离**的合并缓冲区。
-    - 每个 (group_id, user_id) 拥有独立的缓冲槽和定时器
-    - 同一来源的连续消息合并，不同来源互不干扰、独立提交
-    """
-    key = _qq_merge_source_key(qq_context)
-    
-    with _QQ_MERGE_LOCK:
-        slot = _QQ_MERGE_SLOTS.get(key)
-        if slot is None:
-            slot = {"texts": [], "timer": None, "context": None}
-            _QQ_MERGE_SLOTS[key] = slot
-        
-        slot["texts"].append(user_input)
-        
-        # 保存第一条消息的上下文，后续消息复用
-        if slot["context"] is None:
-            slot["context"] = (img_descr, source, qq_context)
-        else:
-            # 如果后续消息也有图片，合并图片URL
-            if qq_context and qq_context.get("qq_context", {}).get("image_urls"):
-                prev_qq = slot["context"][2] or {}
-                prev_inner = prev_qq.get("qq_context", prev_qq)
-                existing_urls = prev_inner.get("image_urls", [])
-                new_urls = qq_context.get("qq_context", qq_context).get("image_urls", [])
-                if new_urls:
-                    combined_urls = existing_urls + new_urls
-                    if "qq_context" in prev_qq:
-                        prev_qq["qq_context"]["image_urls"] = combined_urls
-                    else:
-                        prev_qq["image_urls"] = combined_urls
-        
-        # 取消之前的定时器并重新设置（滑动窗口）
-        if slot["timer"] is not None:
-            slot["timer"].cancel()
-        
-        buf_count = len(slot["texts"])
-        print(f"[QQ Merge] [{key}] 消息入缓冲 ({buf_count} 条待合并)，{_QQ_MERGE_WINDOW_SEC}s 后提交: {user_input[:40]}...", flush=True)
-        
-        slot["timer"] = threading.Timer(
-            _QQ_MERGE_WINDOW_SEC,
-            _qq_merge_flush,
-            args=(key, executor, processing_lock, processing_state)
-        )
-        slot["timer"].daemon = True
-        slot["timer"].start()
-
-
-def _qq_merge_flush(key: tuple, executor, processing_lock, processing_state):
-    """
-    某个来源的合并窗口到期：将该来源缓冲区内的所有消息合并为一条，提交到 process_message。
-    如果当前正在处理中，则作为 PENDING_INTERRUPT_INPUT 暂存（不会丢失）。
-    每个来源独立 flush，互不干扰。
-    """
-    global INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT
-    
-    with _QQ_MERGE_LOCK:
-        slot = _QQ_MERGE_SLOTS.pop(key, None)
-        if not slot or not slot["texts"]:
-            return
-        
-        merged_texts = list(slot["texts"])
-        ctx = slot["context"]
-    
-    # 合并消息文本：多条消息用换行连接
-    if len(merged_texts) == 1:
-        merged_input = merged_texts[0]
-    else:
-        merged_input = "\n".join(merged_texts)
-        print(f"[QQ Merge] [{key}] 已合并 {len(merged_texts)} 条消息: {merged_input[:60]}...", flush=True)
-    
-    img_descr = ctx[0] if ctx else ""
-    source = ctx[1] if ctx else "QQ"
-    qq_context = ctx[2] if ctx else {}
-    
-    # 检查是否正在处理中
-    with IS_PROCESSING_DIALOGUE_LOCK:
-        is_processing = IS_PROCESSING_DIALOGUE
-    
-    if is_processing:
-        # 当前正在处理另一条消息，作为 pending 暂存（打断当前处理）
-        with INTERRUPT_LOCK:
-            INTERRUPT_REQUESTED = True
-            if PENDING_INTERRUPT_INPUT is not None:
-                # 已有 pending，追加到已有文本后面
-                prev = PENDING_INTERRUPT_INPUT
-                prev_text = prev[0] if len(prev) >= 1 else ""
-                PENDING_INTERRUPT_INPUT = (prev_text + "\n" + merged_input, img_descr or "", source, qq_context)
-            else:
-                PENDING_INTERRUPT_INPUT = (merged_input, img_descr or "", source, qq_context)
-        with _B_TASK_LOCK:
-            if _CURRENT_B_TASK_ID:
-                _CANCELLED_B_TASK_IDS.add(_CURRENT_B_TASK_ID)
-        print(f"[QQ Merge] [{key}] 当前正在处理中，合并消息已暂存为 Pending: {merged_input[:40]}...", flush=True)
-    else:
-        # 当前空闲，直接提交处理
-        def process_qq_merged(u=merged_input, i=img_descr, s=source, e=qq_context):
-            audio_flag = (s not in ["QQ", "qq"])
-            print(f"[QQ Merge] [{key}] 提交合并后的QQ消息处理: source={s}, enable_audio={audio_flag}", flush=True)
-            with processing_lock:
-                if processing_state["is_processing"]:
-                    # 极端竞态：刚好有另一个消息开始处理了，改为 pending
-                    _qq_merge_set_pending(u, i, s, e)
-                    print(f"[QQ Merge] [{key}] 竞态：转为 Pending", flush=True)
-                    return
-                processing_state["is_processing"] = True
-            try:
-                process_message(u, i, source=s, extra_data=e)
-            finally:
-                with processing_lock:
-                    processing_state["is_processing"] = False
-        
-        executor.submit(process_qq_merged)
+    """将 QQ 消息放入按来源分离的合并协调器。"""
+    qq_merge_coordinator.enqueue(
+        user_input=user_input,
+        img_descr=img_descr,
+        source=source,
+        qq_context=qq_context,
+        executor=executor,
+        processing_lock=processing_lock,
+        processing_state=processing_state,
+        process_message=process_message,
+    )
 
 
 def process_message(user_input, img_descr, source=None, extra_data=None):
