@@ -18,6 +18,7 @@ from thinking_model_helper import ThinkingModelHelper
 from tool_call_utils import execute_tool_calls, has_async_tools, should_use_thinking_model
 from agents import MainAgent, ToolAgent, SummaryAgent, DynamicMemoryToolAgent
 from tool_agent_schema import get_tool_agent_schema_filtered
+from status_ws import ensure_status_stream_started
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -64,69 +65,6 @@ from tools.screen_tool import get_screen_info_wrapper
 
 # --- Bines 在线状态 WebSocket 连接（替代一次性 POST online） ---
 # 后端 ws://host/api/status/bines/ws?secret=<STATUS_TOGGLE_SECRET>，连接成功即 online=true，断开即 false，后端会发心跳
-_status_ws_thread = None
-
-
-def _bines_status_ws_url():
-    """根据 MOMENTS_API_BASE_URL 生成 WebSocket 地址：https -> wss，http -> ws，路径 /api/status/bines/ws?secret=..."""
-    from urllib.parse import quote
-    base = (MOMENTS_API_BASE_URL or "").rstrip("/")
-    if not base:
-        return None
-    if base.startswith("https://"):
-        ws_base = "wss://" + base[8:]
-    elif base.startswith("http://"):
-        ws_base = "ws://" + base[7:]
-    else:
-        ws_base = "wss://" + base
-    secret = (TOGGLE_STATUS_TOKEN or "").strip()
-    if secret:
-        return f"{ws_base}/api/status/bines/ws?secret={quote(secret, safe='')}"
-    return f"{ws_base}/api/status/bines/ws"
-
-
-def _status_ws_worker():
-    """
-    通过 WebSocket 连接 /api/status/bines/ws 维持在线状态：
-    - 连接成功时后端将 online 设为 true 并可能下发 status 消息
-    - 连接关闭/错误时后端自动将 online 设为 false，本端只负责重连
-    """
-    try:
-        import websocket
-    except ImportError:
-        print("[Thinking] 未安装 websocket-client，无法建立状态 WebSocket，请 pip install websocket-client", flush=True)
-        return
-
-    while True:
-        url = _bines_status_ws_url()
-        if not url:
-            print("[Thinking] MOMENTS_API_BASE_URL 未配置，跳过状态 WebSocket", flush=True)
-            time.sleep(10)
-            continue
-
-        try:
-            print(f"[Thinking] 尝试建立状态 WebSocket: {url.split('?')[0]}", flush=True)
-            ws = websocket.WebSocketApp(
-                url,
-                header={"X-Status-Secret": TOGGLE_STATUS_TOKEN or ""},
-                on_open=lambda w: print("[Thinking] 状态 WebSocket 已连接（online=true 由后端维护）", flush=True),
-                on_message=lambda w, m: None,  # 后端心跳等可忽略
-                on_error=lambda w, e: print(f"[Thinking] 状态 WebSocket 错误: {e}", flush=True),
-                on_close=lambda w, code, msg: print(f"[Thinking] 状态 WebSocket 已断开 (code={code})", flush=True),
-            )
-            ws.run_forever(ping_interval=20, ping_timeout=10)
-        except Exception as e:
-            print(f"[Thinking] 状态 WebSocket 异常，将在稍后重试: {e}", flush=True)
-        time.sleep(5)
-
-
-def _ensure_status_stream_started():
-    """启动 Bines 在线状态 WebSocket 连接（若尚未启动）。"""
-    global _status_ws_thread
-    if _status_ws_thread is not None and _status_ws_thread.is_alive():
-        return
-    _status_ws_thread = threading.Thread(target=_status_ws_worker, daemon=True)
-    _status_ws_thread.start()
 
 
 # --- 全局变量 ---
@@ -2675,7 +2613,7 @@ if __name__ == "__main__":
                 start_rep.send_string("ok")
                 print("[Thinking] 已收到正式启动信号，开始初始化记忆系统并上线", flush=True)
                 # 建立到 Moments 的 SSE 连接，由后端维护 online 状态
-                _ensure_status_stream_started()
+                ensure_status_stream_started(MOMENTS_API_BASE_URL, TOGGLE_STATUS_TOKEN)
                 # 实时屏幕分析：在其他模块启动完成后根据保存的配置决定是否启动
                 try:
                     r = requests.get("http://127.0.0.1:5000/api/realtime_screen_ensure_from_config", timeout=3)
@@ -2699,7 +2637,7 @@ if __name__ == "__main__":
         else:
             print("[Thinking] START_THINKING_REP 未配置，将直接启动", flush=True)
             # 未使用 Classification 启动握手时，同样建立状态 SSE 连接
-            _ensure_status_stream_started()
+            ensure_status_stream_started(MOMENTS_API_BASE_URL, TOGGLE_STATUS_TOKEN)
         
         # 正式启动：初始化记忆系统（触发上线摘要/日记等），注册依赖，再启动监听
         # 在 __main__ 顶层赋值即更新模块级变量，无需 global
