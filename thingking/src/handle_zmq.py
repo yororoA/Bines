@@ -19,6 +19,12 @@ from tool_call_utils import execute_tool_calls, has_async_tools, should_use_thin
 from agents import MainAgent, ToolAgent, SummaryAgent, DynamicMemoryToolAgent
 from tool_agent_schema import get_tool_agent_schema_filtered
 from status_ws import ensure_status_stream_started
+from realtime_screen_bridge import (
+    build_realtime_screen_paths,
+    read_realtime_screen_analysis_if_enabled,
+    write_realtime_screen_context_if_enabled,
+    send_realtime_screen_flush_signal,
+)
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1090,9 +1096,7 @@ deps.register_tools_accessors(
 # 工具模型可调用工具：单一 schema 文件 server/tool_agent_schema.json，每项含 name/description/enabled；不依赖 Thinking 启动即可在模块管理页显示与修改
 TOOL_AGENT_SCHEMA_PATH = PROJECT_ROOT / "server" / "tool_agent_schema.json"
 # 实时屏幕分析：配置与结果文件由 realtime_screen_analysis_standalone.py 与模块管理页维护
-REALTIME_SCREEN_CONFIG_PATH = PROJECT_ROOT / "server" / "realtime_screen_config.json"
-REALTIME_SCREEN_ANALYSIS_PATH = PROJECT_ROOT / "server" / "realtime_screen_analysis.txt"
-REALTIME_SCREEN_CONTEXT_PATH = PROJECT_ROOT / "server" / "realtime_screen_context.json"
+REALTIME_SCREEN_PATHS = build_realtime_screen_paths(PROJECT_ROOT)
 
 
 def _get_tool_agent_schema_filtered():
@@ -1798,19 +1802,11 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
 
         # 实时屏幕分析：若启用则把最新分析作为系统消息注入，与用户输入一起发给主模型
         is_realtime_screen_active = False
-        try:
-            if REALTIME_SCREEN_CONFIG_PATH.exists():
-                with open(REALTIME_SCREEN_CONFIG_PATH, "r", encoding="utf-8") as f:
-                    rt_cfg = json.load(f)
-                if rt_cfg.get("enabled") and REALTIME_SCREEN_ANALYSIS_PATH.exists():
-                    with open(REALTIME_SCREEN_ANALYSIS_PATH, "r", encoding="utf-8") as f:
-                        rt_text = f.read().strip()
-                    if rt_text:
-                        # 【修改】强化 Prompt，明确告知模型已获得最新画面，无需再次调用工具
-                        context_messages.append({"role": "system", "content": f"【实时屏幕分析（已是最新画面）】\n{rt_text}\n(系统提示：上述内容即为当前用户屏幕的实时画面分析结果。你已拥有最新的视觉信息，**严禁**重复调用 get_screen_info / get_visual_info / call_tool_agent(visual_tool) 等工具来获取屏幕内容，直接使用上述信息回答即可。)"})
-                        is_realtime_screen_active = True
-        except Exception as e:
-            print(f"[Thinking] 读取实时屏幕分析失败: {e}", flush=True)
+        rt_text = read_realtime_screen_analysis_if_enabled(REALTIME_SCREEN_PATHS)
+        if rt_text:
+            # 【修改】强化 Prompt，明确告知模型已获得最新画面，无需再次调用工具
+            context_messages.append({"role": "system", "content": f"【实时屏幕分析（已是最新画面）】\n{rt_text}\n(系统提示：上述内容即为当前用户屏幕的实时画面分析结果。你已拥有最新的视觉信息，**严禁**重复调用 get_screen_info / get_visual_info / call_tool_agent(visual_tool) 等工具来获取屏幕内容，直接使用上述信息回答即可。)"})
+            is_realtime_screen_active = True
         
         # 消息体构建
         # 仅当有有效的视觉描述时才附加到 Prompt 中
@@ -2026,20 +2022,9 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             print("[Thinking] 打断收尾完成，待处理的新输入将在 finally 中提交", flush=True)
 
         # 若启用实时屏幕分析，将本轮用户输入与助手输出写入 context，供脚本作为 VLM 关注点
-        try:
-            if REALTIME_SCREEN_CONFIG_PATH.exists():
-                with open(REALTIME_SCREEN_CONFIG_PATH, "r", encoding="utf-8") as f:
-                    rt_cfg = json.load(f)
-                if rt_cfg.get("enabled"):
-                    final_output = (full_raw_response or "").strip() if exited_due_to_interrupt else (to_save or "")
-                    REALTIME_SCREEN_CONTEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
-                    with open(REALTIME_SCREEN_CONTEXT_PATH, "w", encoding="utf-8") as f:
-                        json.dump(
-                            {"user_input": user_input, "assistant_output": final_output},
-                            f, ensure_ascii=False, indent=2,
-                        )
-        except Exception as e:
-            print(f"[Thinking] 写入实时屏幕 context 失败: {e}", flush=True)
+        final_output = (full_raw_response or "").strip() if exited_due_to_interrupt else (to_save or "")
+        if not write_realtime_screen_context_if_enabled(REALTIME_SCREEN_PATHS, user_input, final_output):
+            pass
 
     except Exception as e:
         print(f"[Thinking] [Error] {str(e)}", flush=True)
@@ -2332,14 +2317,10 @@ def start_zmq_listener():
                                 
                                 # 触发屏幕分析刷新
                                 try:
-                                    flush_signal_path = ROOT_DIR / "server" / "realtime_screen_flush.signal"
-                                    # 确保父目录存在（通常已由 screen analysis 创建）
-                                    if not flush_signal_path.parent.exists():
-                                         flush_signal_path.parent.mkdir(parents=True, exist_ok=True)
-                                    
-                                    # 创建或更新 modify time
-                                    flush_signal_path.touch()
-                                    print(f"[Thinking] Sent flush signal to Realtime Screen Analysis. Waiting for update...", flush=True)
+                                    if send_realtime_screen_flush_signal(REALTIME_SCREEN_PATHS):
+                                        print(f"[Thinking] Sent flush signal to Realtime Screen Analysis. Waiting for update...", flush=True)
+                                    else:
+                                        print(f"[Thinking] Failed to send flush signal", flush=True)
 
                                     # [优化] 等待分析脚本响应：
                                     # 分析脚本是轮询的，可能需要一点时间来感知信号并写入文件。
@@ -2531,60 +2512,48 @@ def start_zmq_listener():
                     # 1. 只要内容变化就推送
                     # 2. 若正在处理(is_processing)或正在播放(is_player_busy)，则跳过本次推送（等待空闲时再试，或者等下一次内容更新）
                     
-                    if REALTIME_SCREEN_CONFIG_PATH.exists() and REALTIME_SCREEN_ANALYSIS_PATH.exists():
-                        try:
-                            # 即使没开enabled，也检查文件是否存在以便清理等。但这里只处理enabled的情况
-                            # 优化：先读取配置
-                            with open(REALTIME_SCREEN_CONFIG_PATH, "r", encoding="utf-8") as f:
-                                rt_cfg = json.load(f)
-                            
-                            if rt_cfg.get("enabled"):
-                                # 读取文件内容
-                                try:
-                                    with open(REALTIME_SCREEN_ANALYSIS_PATH, "r", encoding="utf-8") as rf:
-                                        screen_content = rf.read().strip()
-                                except:
-                                    screen_content = ""
-                                
-                                # 核心逻辑：内容发生变化
-                                if screen_content and screen_content != last_pushed_screen_content:
-                                    # [修改] 引入游戏模式判断逻辑
-                                    # 1. 如果游戏模式启用 (deps.game_mode_enabled)：允许直接通过 process_screen_only_async 主动回复
-                                    # 2. 如果游戏模式未启用：只更新 last_pushed_screen_content 和 last_realtime_screen_push_mtime，
-                                    #    但不触发 process_screen_only_async。这样最新的内容只会被动地在下一次用户输入时作为 System Prompt 带入。
-                                    
-                                    # 无论是否游戏模式，都先更新状态，避免重复检测
-                                    last_pushed_screen_content = screen_content
-                                    last_realtime_screen_push_mtime = time.time()
-                                    
-                                    if deps.game_mode_enabled:
-                                        # 检查过滤条件：大模型忙 或 播放忙
-                                        if is_processing or is_player_busy:
-                                            # 忙碌中，跳过本次推送（等下一帧新变化再试）
-                                            pass
-                                        else:
-                                            # 系统空闲且游戏模式开启，主动推送更新
-                                            synthetic_prompt = f"[系统：实时屏幕分析已更新] 当前屏幕发生显著变化。内容如下：\n{screen_content}\n请判断是否需要对用户当前的屏幕操作做出反应。如果不需要，请直接输出空字符串或不输出任何内容；如果需要，请简短评论。不要输出无意义的动作描述。"
-                                            
-                                            def process_screen_only_async():
-                                                with processing_lock:
-                                                    if processing_state["is_processing"]:
-                                                        return
-                                                    processing_state["is_processing"] = True
-                                                try:
-                                                    process_message(synthetic_prompt, "")
-                                                finally:
-                                                    with processing_lock:
-                                                        processing_state["is_processing"] = False
-                                            
-                                            executor.submit(process_screen_only_async)
-                                            print(f"[Thinking] 已推送实时屏幕分析（内容变化，游戏模式: ON）", flush=True)
-                                    else:
-                                        # 游戏模式关闭：仅更新缓存，不主动推送给大模型（下次用户输入时会作为系统提示带入）
-                                        pass
+                    try:
+                        screen_content = read_realtime_screen_analysis_if_enabled(REALTIME_SCREEN_PATHS)
 
-                        except Exception as e:
-                            print(f"[Thinking] 检查/推送实时屏幕分析失败: {e}", flush=True)
+                        # 核心逻辑：内容发生变化
+                        if screen_content and screen_content != last_pushed_screen_content:
+                            # [修改] 引入游戏模式判断逻辑
+                            # 1. 如果游戏模式启用 (deps.game_mode_enabled)：允许直接通过 process_screen_only_async 主动回复
+                            # 2. 如果游戏模式未启用：只更新 last_pushed_screen_content 和 last_realtime_screen_push_mtime，
+                            #    但不触发 process_screen_only_async。这样最新的内容只会被动地在下一次用户输入时作为 System Prompt 带入。
+
+                            # 无论是否游戏模式，都先更新状态，避免重复检测
+                            last_pushed_screen_content = screen_content
+                            last_realtime_screen_push_mtime = time.time()
+
+                            if deps.game_mode_enabled:
+                                # 检查过滤条件：大模型忙 或 播放忙
+                                if is_processing or is_player_busy:
+                                    # 忙碌中，跳过本次推送（等下一帧新变化再试）
+                                    pass
+                                else:
+                                    # 系统空闲且游戏模式开启，主动推送更新
+                                    synthetic_prompt = f"[系统：实时屏幕分析已更新] 当前屏幕发生显著变化。内容如下：\n{screen_content}\n请判断是否需要对用户当前的屏幕操作做出反应。如果不需要，请直接输出空字符串或不输出任何内容；如果需要，请简短评论。不要输出无意义的动作描述。"
+
+                                    def process_screen_only_async():
+                                        with processing_lock:
+                                            if processing_state["is_processing"]:
+                                                return
+                                            processing_state["is_processing"] = True
+                                        try:
+                                            process_message(synthetic_prompt, "")
+                                        finally:
+                                            with processing_lock:
+                                                processing_state["is_processing"] = False
+
+                                    executor.submit(process_screen_only_async)
+                                    print(f"[Thinking] 已推送实时屏幕分析（内容变化，游戏模式: ON）", flush=True)
+                            else:
+                                # 游戏模式关闭：仅更新缓存，不主动推送给大模型（下次用户输入时会作为系统提示带入）
+                                pass
+
+                    except Exception as e:
+                        print(f"[Thinking] 检查/推送实时屏幕分析失败: {e}", flush=True)
                 pass 
 
         except KeyboardInterrupt:
