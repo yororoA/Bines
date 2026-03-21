@@ -10,7 +10,6 @@ import time
 import sys
 import traceback
 import threading
-import queue
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from layered_memory import LayeredMemorySystem
@@ -43,6 +42,7 @@ from message_flow_utils import (
     update_screen_monitor_rejection_state,
 )
 from rag_client import RAGServerClient
+from thinking_stream_runner import run_main_agent_rounds
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = ensure_project_root(__file__, 2)
@@ -1680,115 +1680,33 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         messages = context_messages.copy()
         messages.append({"role": "user", "content": current_content})
 
-        full_raw_response = ""  # 用于打断时判断是否有完整输出
         # === 原生 Tool Calling：主模型挂载 call_tool_agent / call_summary_agent / get_time，根据 tool_calls 执行并循环 ===
         def _interrupt_check():
             with INTERRUPT_LOCK:
                 return INTERRUPT_REQUESTED
 
-        MAX_TOOL_ROUNDS = 5
-        round_idx = 0
-        while round_idx < MAX_TOOL_ROUNDS:
-            round_idx += 1
-            print(f"[Thinking] 主模型流式请求 (round {round_idx})...", flush=True)
-            content_gen = None
-            holder = {}
-            for attempt in range(3):
-                content_gen, holder = main_agent.run_one_turn_streaming(messages, interrupt_check=_interrupt_check)
-                if not holder.get("error"):
-                    break
-                err = holder.get("error", "")
-                if any(x in str(err) for x in ("500", "502", "503")) and attempt < 2:
-                    print(f"[Thinking] DeepSeek 服务端异常，3 秒后重试 ({attempt + 1}/3)...", flush=True)
-                    time.sleep(3)
-                    continue
-                print(f"[Thinking] [Error] {err}", flush=True)
-                if "500" in str(err) or "502" in str(err) or "503" in str(err):
-                    zmq_send("DeepSeek 服务暂时异常，请稍后再试。", lang="zh", cough="end", enable_audio=enable_audio)
-                else:
-                    zmq_send("请求出错，请稍后再试。", lang="zh", cough="end", enable_audio=enable_audio)
-                break
-            if holder.get("error"):
-                break
-            if not content_gen:
-                zmq_send("系统错误，无法连接大脑。", lang="zh", cough="end", enable_audio=enable_audio)
-                break
+        def _execute_router_tools_adapter(msgs, tool_calls, interrupt_cb, src):
+            _execute_router_tool_calls_and_append(
+                msgs,
+                tool_calls,
+                msgs,
+                interrupt_callback=interrupt_cb,
+                source=src,
+            )
 
-            full_raw_response = ""
-            content_buffer = ""
-            is_first_packet = True
-            line_queue = queue.Queue()
-
-            def _stream_producer():
-                try:
-                    for chunk in content_gen:
-                        line_queue.put(chunk)
-                finally:
-                    line_queue.put(None)
-
-            threading.Thread(target=_stream_producer, daemon=True).start()
-            stream_done = False
-            while not stream_done:
-                try:
-                    chunk = line_queue.get(timeout=0.35)
-                except queue.Empty:
-                    with INTERRUPT_LOCK:
-                        if INTERRUPT_REQUESTED:
-                            exited_due_to_interrupt = True
-                            stream_done = True
-                            break
-                    continue
-                if chunk is None:
-                    stream_done = True
-                    break
-                full_raw_response += chunk
-                if holder.get("has_tool_calls"):
-                    continue
-                for c in chunk:
-                    # [修改] 改为检测双空格分句
-                    # 缓冲区逻辑：
-                    # 如果遇到空格：
-                    # 1. 检查是否上一个也是空格 (content_buffer 最后一个字符是空格)
-                    # 2. 如果是，说明遇到了 "  "，触发分句
-                    # 3. 如果不是，仅追加空格，等待下一个
-                    
-                    if c == " ":
-                        if content_buffer.endswith(" "):
-                            # 已有一个空格在 buffer 末尾，现在又来一个，构成双空格
-                            seg = content_buffer[:-1].strip() # 去掉那个暂存的空格
-                            if seg:
-                                if not _is_only_action_or_empty(seg):
-                                    cough_val = "start" if is_first_packet else None
-                                    zmq_send(seg, lang="zh", cough=cough_val, enable_audio=enable_audio)
-                                    is_first_packet = False
-                            content_buffer = "" # 清空
-                        else:
-                            content_buffer += c # 第一个空格，暂存
-                    else:
-                        content_buffer += c
-
-            if holder.get("interrupted"):
-                exited_due_to_interrupt = True
-            if exited_due_to_interrupt:
-                if content_buffer.strip():
-                    seg = content_buffer.strip()
-                    if not _is_only_action_or_empty(seg):
-                        cough_val = "start" if is_first_packet else None
-                        zmq_send(seg, lang="zh", cough=cough_val, enable_audio=enable_audio)
-                break
-            if content_buffer.strip():
-                seg = content_buffer.strip()
-                if not _is_only_action_or_empty(seg):
-                    cough_val = "start" if is_first_packet else None
-                    zmq_send(seg, lang="zh", cough=cough_val, enable_audio=enable_audio)
-            print("", flush=True)
-
-            tool_calls = (holder.get("message") or {}).get("tool_calls")
-            if not tool_calls or not list(tool_calls):
-                break
-            messages.append(holder["message"])
-            _execute_router_tool_calls_and_append(messages, tool_calls, messages, interrupt_callback=_interrupt_check, source=source)
-            full_raw_response = (full_raw_response or "").strip()
+        stream_result = run_main_agent_rounds(
+            messages=messages,
+            main_agent=main_agent,
+            execute_router_tool_calls=_execute_router_tools_adapter,
+            zmq_send=zmq_send,
+            is_only_action_or_empty=_is_only_action_or_empty,
+            enable_audio=enable_audio,
+            source=source,
+            interrupt_requested=_interrupt_check,
+            max_tool_rounds=5,
+        )
+        full_raw_response = stream_result.get("full_raw_response", "")
+        exited_due_to_interrupt = stream_result.get("exited_due_to_interrupt", False)
 
         to_save = full_raw_response or ""
         if not _is_only_action_or_empty(to_save):
