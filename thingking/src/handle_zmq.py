@@ -36,6 +36,13 @@ from path_setup import ensure_project_root
 from runtime_wiring import register_tool_dependencies, bind_pub_socket_with_retry
 from tool_schema_sync import sync_agent_schema_with_registry
 from qq_merge_coordinator import QQMergeCoordinator
+from message_flow_utils import (
+    compute_enable_audio,
+    sanitize_user_input,
+    build_time_gap_instruction,
+    update_screen_monitor_rejection_state,
+)
+from rag_client import RAGServerClient
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = ensure_project_root(__file__, 2)
@@ -1543,14 +1550,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
     
     exited_due_to_interrupt = False  # 是否因用户打断而退出本轮
     
-    # QQ消息不发送TTS语音，同时支持 "QQ" 和 "qq"
-    # 如果 source 是 QQ/qq，则 disable audio
-    # 【修复】增加更健壮的判断，去除可能的空格，并显式处理 None
-    source_str = str(source).strip() if source else ""
-    enable_audio = (source_str not in ["QQ", "qq"])
-    # 强制修正：如果 source 为 ASR/MANUAL，必须开启 audio
-    if source_str in ["ASR", "MANUAL"]:
-        enable_audio = True
+    # QQ消息不发送TTS语音，同时支持 "QQ" 和 "qq"；ASR/MANUAL 强制开启
+    enable_audio = compute_enable_audio(source)
 
     # 定义中断检查函数，供 ToolAgent 和 MainAgent 在长时间运行时回调
     def _interrupt_check():
@@ -1558,34 +1559,13 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             return INTERRUPT_REQUESTED
     
     try:
-        # [修复] 增加 flush=True 确保日志即时输出
         # [安全修复] 清洗用户输入，防止 Prompt 注入和系统事件伪造
-        # 移除用户输入中的系统事件标记，防止恶意用户伪造系统事件
-        cleaned_user_input = user_input
-        if user_input:
-            # 移除系统事件标记（不区分大小写）
-            system_markers = [
-            "[system event:",
-            "[system event :",
-            "system event:",
-            "[screen monitor]",
-            "[screen monitor:",
-            "screen monitor:",
-            ]
-            for marker in system_markers:
-                # 不区分大小写地移除标记
-                import re
-                cleaned_user_input = re.sub(re.escape(marker), "", cleaned_user_input, flags=re.IGNORECASE)
-                cleaned_user_input = cleaned_user_input.strip()
-            
-            # 如果清洗后内容为空，使用原始输入（避免完全丢失用户消息）
-            if not cleaned_user_input:
-                cleaned_user_input = user_input
-                print(f"[Security] 警告：用户输入包含系统事件标记，已清洗但保留原始内容", flush=True)
-            elif cleaned_user_input != user_input:
-                print(f"[Security] 已清洗用户输入中的系统事件标记", flush=True)
-        
-        user_input = cleaned_user_input  # 使用清洗后的输入
+        cleaned_user_input, changed, reverted = sanitize_user_input(user_input)
+        if reverted:
+            print(f"[Security] 警告：用户输入包含系统事件标记，已清洗但保留原始内容", flush=True)
+        elif changed:
+            print(f"[Security] 已清洗用户输入中的系统事件标记", flush=True)
+        user_input = cleaned_user_input
         
         print(f"\n[Thinking] Processing: {user_input} (IMG: {len(img_descr)} chars)", flush=True)
         
@@ -1606,51 +1586,27 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         
         formatted_user_input = f"[{current_date_str}]: [{user_input}]"
         
-        time_gap_instruction = ""
-        try:
-            history = memory_system.short_term.get_messages()
-            last_date_obj = None
-            
-            for msg in reversed(history):
-                if msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    match = re.search(r"\[(\d{4}/\d{1,2}/\d{1,2})\]:", content)
-                    if match:
-                        try:
-                            last_date_obj = datetime.datetime.strptime(match.group(1), "%Y/%m/%d")
-                            break
-                        except ValueError:
-                            pass
-            
-            if last_date_obj:
-                delta_days = (current_date_obj - last_date_obj).days
-                wakeup_words = ["你好", "在吗", "醒醒", "启动", "喂", "hi", "hello"]
-                is_wakeup = any(w in user_input.lower() for w in wakeup_words)
-                
-                if delta_days >= 1 and (is_wakeup or random.random() < 0.3):
-                    # (完全保留原提示词)
-                    time_gap_instruction = (
-                        f"\nSystem Context: The last conversation was on {last_date_obj.strftime('%Y/%m/%d')}, "
-                        f"which is {delta_days} days ago. "
-                        "Since the user has been gone for a while, you should playfully complain "
-                        "about their long absence or the gap in time based on your persona."
-                    )
-        except Exception as e:
-            print(f"Date check error: {e}", flush=True)
+        time_gap_instruction = build_time_gap_instruction(memory_system, user_input, current_date_obj)
+        if not isinstance(time_gap_instruction, str):
+            time_gap_instruction = ""
 
         # 【修复】检查用户是否明确拒绝屏幕监控
         global SCREEN_MONITOR_USER_REJECTED, SCREEN_MONITOR_REJECT_EXPIRE_TIME
-        reject_keywords = ["不看", "不要看", "别看了", "不用看", "不需要看", "ignore", "don't look", "stop watching", 
-                          "不要分析", "不用分析", "别分析", "不需要分析"]
-        user_input_lower = user_input.lower()
-        if any(keyword in user_input_lower for keyword in reject_keywords):
-            SCREEN_MONITOR_USER_REJECTED = True
-            SCREEN_MONITOR_REJECT_EXPIRE_TIME = time.time() + 300  # 5分钟后自动恢复
+        now_ts = time.time()
+        (
+            SCREEN_MONITOR_USER_REJECTED,
+            SCREEN_MONITOR_REJECT_EXPIRE_TIME,
+            set_rejected,
+            recovered,
+        ) = update_screen_monitor_rejection_state(
+            user_input,
+            SCREEN_MONITOR_USER_REJECTED,
+            SCREEN_MONITOR_REJECT_EXPIRE_TIME,
+            now_ts,
+        )
+        if set_rejected:
             print(f"[Screen Monitor] 检测到用户拒绝屏幕监控，将在5分钟后自动恢复", flush=True)
-        
-        # 检查拒绝状态是否过期
-        if SCREEN_MONITOR_USER_REJECTED and time.time() > SCREEN_MONITOR_REJECT_EXPIRE_TIME:
-            SCREEN_MONITOR_USER_REJECTED = False
+        if recovered:
             print(f"[Screen Monitor] 拒绝状态已过期，恢复屏幕监控", flush=True)
         
         # 获取上下文（不擅长/拒绝逻辑已移至 MainAgent.get_system_prompt，由模型按语义判断）
@@ -2002,45 +1958,6 @@ def screen_monitor_thread():
             traceback.print_exc()
             time.sleep(5)
 
-
-class RAGServerClient:
-    """Simple ZMQ Client for RAG Server"""
-    def __init__(self, zmq_context, host, port):
-        self.ctx = zmq_context
-        self.host = host
-        self.port = port
-        print(f"[RAGClient] Initialized: {host}:{port}", flush=True)
-
-    def _req(self, method, **params):
-        try:
-            # 使用上下文管理器创建 socket，确保正确关闭
-            s = self.ctx.socket(zmq.REQ)
-            # 增加超时以支持 LLM 调用，30s
-            s.setsockopt(zmq.RCVTIMEO, 30000) 
-            s.setsockopt(zmq.SNDTIMEO, 5000)
-            s.setsockopt(zmq.LINGER, 0)
-            
-            s.connect(f"tcp://{self.host}:{self.port}")
-            s.send_json({"method": method, "params": params})
-            res = s.recv_json()
-            s.close()
-            return res
-        except zmq.error.Again:
-             print(f"[RAGClient] Timeout calling {method}", flush=True)
-             try: s.close()
-             except: pass
-             return None
-        except Exception as e:
-            print(f"[RAGClient] Request failed ({method}): {e}", flush=True)
-            try: s.close()
-            except: pass
-            return None
-
-    def add_to_summary_buffer(self, content, meta=None, importance_score=7):
-        return self._req("add_to_summary_buffer", content=content, meta=meta, importance_score=importance_score)
-
-    def add_qq_log(self, content, meta=None):
-        return self._req("add_qq_log", content=content, meta=meta)
 
 # Global QQ Buffer Manager
 _qq_buffer_manager_instance = None
