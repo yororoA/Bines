@@ -25,6 +25,7 @@ from realtime_screen_bridge import (
     write_realtime_screen_context_if_enabled,
     send_realtime_screen_flush_signal,
 )
+from qq_reply import send_qq_reply
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1943,49 +1944,9 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         if source == "QQ" and extra_data and to_save and to_save.strip() and not exited_due_to_interrupt:
             try:
                 qq_ctx = extra_data.get("qq_context") or extra_data
-                # [修改] 剥离动作描述（如(微笑)）后发送
-                # 但如果整条消息只有动作描述，则保留原文发送（总比不回复好）
-                reply_msg = re.sub(r'[（(][^）)]*[）)]', '', to_save).strip()
-                if not reply_msg:
-                    reply_msg = to_save.strip()  # fallback: 纯动作也发送
-                
+                reply_msg = send_qq_reply(to_save, qq_ctx)
                 if reply_msg:
-                    from tools.qq_tool import send_qq_private_msg, send_qq_group_msg
-                    user_id = qq_ctx.get("user_id")
                     group_id = qq_ctx.get("group_id")
-                    
-                    # [修改] 智能分段逻辑
-                    # 1. 尝试按双空格分段 (标准协议)
-                    segments = [s.strip() for s in reply_msg.split('  ') if s.strip()]
-                    
-                    # 2. 如果分段失败(只有1段)且文本较长，尝试按标点符号+空格分段 (兼容模型输出不规范)
-                    if len(segments) <= 1 and len(reply_msg) > 30:
-                        import re
-                        fallback_segments = re.split(r'(?<=[。？！])\s*', reply_msg)
-                        fallback_segments = [s.strip() for s in fallback_segments if s.strip()]
-                        if len(fallback_segments) > 1:
-                            segments = fallback_segments
-                    
-                    for i, seg in enumerate(segments):
-                        if group_id:
-                            try:
-                                gid = int(group_id)
-                                sender_uid = user_id
-                                print(f"[Thinking] Sending QQ Group Reply to {gid} (At: {sender_uid}) (Seg {i+1}/{len(segments)}): {seg}", flush=True)
-                                current_at = sender_uid if i == 0 else None
-                                send_qq_group_msg(gid, seg, at_user_id=current_at)
-                            except ValueError:
-                                print(f"[Thinking] Invalid group_id for QQ reply: {group_id}", flush=True)
-                        elif user_id:
-                            try:
-                                uid = int(user_id)
-                                print(f"[Thinking] Sending QQ Private Reply to {uid} (Seg {i+1}/{len(segments)}): {seg}", flush=True)
-                                send_qq_private_msg(uid, seg)
-                            except ValueError:
-                                pass
-
-                        if i < len(segments) - 1:
-                            time.sleep(0.8)
 
                     # [新增] 将 bot 自己的 QQ 回复也存入 Buffer
                     try:
