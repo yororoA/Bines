@@ -26,6 +26,7 @@ from realtime_screen_bridge import (
     send_realtime_screen_flush_signal,
 )
 from qq_reply import send_qq_reply
+from realtime_idle_push import should_run_idle_check, evaluate_idle_realtime_push
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -2464,8 +2465,7 @@ def start_zmq_listener():
             else:
                 # Timeout / Idle：无用户输入时，若启用实时屏幕分析且分析文件有更新，将分析内容单独发给大模型
                 now = time.time()
-                if (now - last_realtime_screen_check_time) >= REALTIME_SCREEN_IDLE_CHECK_INTERVAL:
-                    last_realtime_screen_check_time = now
+                if should_run_idle_check(now, last_realtime_screen_check_time, REALTIME_SCREEN_IDLE_CHECK_INTERVAL):
                     with processing_lock:
                         is_processing = processing_state["is_processing"]
 
@@ -2476,42 +2476,37 @@ def start_zmq_listener():
                     try:
                         screen_content = read_realtime_screen_analysis_if_enabled(REALTIME_SCREEN_PATHS)
 
-                        # 核心逻辑：内容发生变化
-                        if screen_content and screen_content != last_pushed_screen_content:
-                            # [修改] 引入游戏模式判断逻辑
-                            # 1. 如果游戏模式启用 (deps.game_mode_enabled)：允许直接通过 process_screen_only_async 主动回复
-                            # 2. 如果游戏模式未启用：只更新 last_pushed_screen_content 和 last_realtime_screen_push_mtime，
-                            #    但不触发 process_screen_only_async。这样最新的内容只会被动地在下一次用户输入时作为 System Prompt 带入。
+                        update = evaluate_idle_realtime_push(
+                            now=now,
+                            last_check_time=last_realtime_screen_check_time,
+                            last_pushed_content=last_pushed_screen_content,
+                            last_push_mtime=last_realtime_screen_push_mtime,
+                            screen_content=screen_content,
+                            game_mode_enabled=deps.game_mode_enabled,
+                            is_processing=is_processing,
+                            is_player_busy=is_player_busy,
+                        )
 
-                            # 无论是否游戏模式，都先更新状态，避免重复检测
-                            last_pushed_screen_content = screen_content
-                            last_realtime_screen_push_mtime = time.time()
+                        last_realtime_screen_check_time = float(update["last_check_time"])
+                        last_pushed_screen_content = str(update["last_pushed_content"] or "")
+                        last_realtime_screen_push_mtime = float(update["last_push_mtime"] or 0.0)
 
-                            if deps.game_mode_enabled:
-                                # 检查过滤条件：大模型忙 或 播放忙
-                                if is_processing or is_player_busy:
-                                    # 忙碌中，跳过本次推送（等下一帧新变化再试）
-                                    pass
-                                else:
-                                    # 系统空闲且游戏模式开启，主动推送更新
-                                    synthetic_prompt = f"[系统：实时屏幕分析已更新] 当前屏幕发生显著变化。内容如下：\n{screen_content}\n请判断是否需要对用户当前的屏幕操作做出反应。如果不需要，请直接输出空字符串或不输出任何内容；如果需要，请简短评论。不要输出无意义的动作描述。"
+                        if update.get("should_trigger"):
+                            synthetic_prompt = str(update.get("synthetic_prompt") or "")
 
-                                    def process_screen_only_async():
-                                        with processing_lock:
-                                            if processing_state["is_processing"]:
-                                                return
-                                            processing_state["is_processing"] = True
-                                        try:
-                                            process_message(synthetic_prompt, "")
-                                        finally:
-                                            with processing_lock:
-                                                processing_state["is_processing"] = False
+                            def process_screen_only_async():
+                                with processing_lock:
+                                    if processing_state["is_processing"]:
+                                        return
+                                    processing_state["is_processing"] = True
+                                try:
+                                    process_message(synthetic_prompt, "")
+                                finally:
+                                    with processing_lock:
+                                        processing_state["is_processing"] = False
 
-                                    executor.submit(process_screen_only_async)
-                                    print(f"[Thinking] 已推送实时屏幕分析（内容变化，游戏模式: ON）", flush=True)
-                            else:
-                                # 游戏模式关闭：仅更新缓存，不主动推送给大模型（下次用户输入时会作为系统提示带入）
-                                pass
+                            executor.submit(process_screen_only_async)
+                            print(f"[Thinking] 已推送实时屏幕分析（内容变化，游戏模式: ON）", flush=True)
 
                     except Exception as e:
                         print(f"[Thinking] 检查/推送实时屏幕分析失败: {e}", flush=True)
