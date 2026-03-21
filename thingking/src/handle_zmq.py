@@ -27,6 +27,11 @@ from realtime_screen_bridge import (
 )
 from qq_reply import send_qq_reply
 from realtime_idle_push import should_run_idle_check, evaluate_idle_realtime_push
+from listener_helpers import (
+    update_player_busy_from_control_payload,
+    is_user_online,
+    build_bored_prompt,
+)
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -2235,12 +2240,7 @@ def start_zmq_listener():
                         topic = parts[0].decode('utf-8')
                         if topic == "control":
                             msg_bytes = parts[1]
-                            data = json.loads(msg_bytes.decode('utf-8'))
-                            cough_status = data.get("cough")
-                            if cough_status == "start":
-                                is_player_busy = True
-                            elif cough_status == "end":
-                                is_player_busy = False
+                            is_player_busy = update_player_busy_from_control_payload(msg_bytes, is_player_busy)
                 except Exception as e:
                     print(f"[Thinking] Error processing control message: {e}", flush=True)
 
@@ -2254,14 +2254,8 @@ def start_zmq_listener():
                             msg_bytes = parts[1]
                             data = json.loads(msg_bytes.decode('utf-8'))
                             # 用户下线状态下忽略 bored，不发起主动对话
-                            try:
-                                if PRESENCE_STATE_PATH.exists():
-                                    with open(PRESENCE_STATE_PATH, "r", encoding="utf-8") as pf:
-                                        presence = json.load(pf)
-                                    if not presence.get("user_online", True):
-                                        continue
-                            except (json.JSONDecodeError, OSError):
-                                pass
+                            if not is_user_online(PRESENCE_STATE_PATH):
+                                continue
                             # 检查是否正在处理对话
                             with IS_PROCESSING_DIALOGUE_LOCK:
                                 is_processing = IS_PROCESSING_DIALOGUE
@@ -2269,13 +2263,8 @@ def start_zmq_listener():
                             if is_processing:
                                 print(f"[Thinking] Received bored message but currently processing dialogue, rejecting...", flush=True)
                             else:
-                                visual_reason = data.get("visual_stimulus") if isinstance(data, dict) else None
-                                if visual_reason:
-                                    print(f"[Thinking] Received bored message (视觉刺激): {visual_reason[:60]}...", flush=True)
-                                    bored_prompt = f"[System Event: Bored - Visual Stimulus] (You were zoning out, then you noticed: {visual_reason}. You want to say something about this new discovery. Initiate a short, natural conversation about what you just saw—e.g. comment on what they're holding, wearing, or the scene change. Do not repeat the description verbatim; react in character. You may use QQ tools if relevant.)"
-                                else:
-                                    print(f"[Thinking] Received bored message, triggering active dialogue...", flush=True)
-                                    bored_prompt = "[System Event: Bored] (You feel bored and want to initiate a conversation. You can act curious, check camera/screen, check or post dynamics (get_moments/add_moment/comment_moment via call_tool_agent), send QQ message (via send_qq_group_msg/send_qq_private_msg in call_tool_agent), or start a casual conversation.)"
+                                bored_log, bored_prompt = build_bored_prompt(data)
+                                print(bored_log, flush=True)
                                 
                                 # 触发屏幕分析刷新
                                 try:
