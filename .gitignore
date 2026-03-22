@@ -44,3 +44,4 @@ visual/models/object_models/t.py
 DEPENDENCIES.md
 
 node_modules
+.env.example
