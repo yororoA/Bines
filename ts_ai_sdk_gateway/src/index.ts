@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { generateText } from 'ai';
+import { generateText, generateObject, streamText } from 'ai';
+import { z } from 'zod';
 import { createDeepSeek } from '@ai-sdk/deepseek';
 
 declare const process: any;
@@ -127,6 +128,89 @@ app.post('/api/chat/main', createRoleHandler('main'));
 app.post('/api/chat/tool', createRoleHandler('tool'));
 app.post('/api/chat/summary', createRoleHandler('summary'));
 app.post('/api/chat/bored', createRoleHandler('bored'));
+
+app.post('/api/chat/main/stream', async (req: any, res: any) => {
+  try {
+    const role: Role = 'main';
+    const cfg = roleConfigs[role];
+    const deepseek = createDeepSeek({ apiKey: cfg.apiKey });
+
+    const { messages, model, temperature = 0.7, maxTokens = 1024, tools } = req.body || {};
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages is required' });
+    }
+
+    const normalizedMessages = normalizeMessages(messages);
+    if (normalizedMessages.length === 0) {
+      return res.status(400).json({ error: 'no valid messages' });
+    }
+
+    const finalModel = model || cfg.model;
+    const result = await streamText({
+      model: deepseek(finalModel) as any,
+      messages: normalizedMessages,
+      temperature,
+    });
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    for await (const chunk of result.textStream) {
+      res.write(chunk);
+    }
+    res.end();
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || String(error) });
+  }
+});
+
+app.post('/api/filter_tools', async (req: any, res: any) => {
+  try {
+    const role: Role = 'summary'; // 使用摘要模型
+    const cfg = roleConfigs[role];
+    const deepseek = createDeepSeek({ apiKey: cfg.apiKey });
+
+    const {
+      main_output,
+      messages,
+      allowed_tools,
+      model,
+      temperature = 0.1,
+    } = req.body;
+
+    if (!Array.isArray(allowed_tools) || !main_output) {
+      return res.status(400).json({ error: 'main_output and allowed_tools are required' });
+    }
+
+    const finalModel = model || cfg.model;
+    const contextStr = (messages || []).map((m: any) => `${m.role}: ${m.content}`).join('\n');
+    const prompt = `You are a tool filtering agent. Based on the dialogue context and the main model's output, determine if any actions (tools) need to be executed.
+Only select tools from the allowed list: ${allowed_tools.join(', ')}.
+If no tools are needed, return an empty array.
+
+Context:
+${contextStr}
+
+Main Model Output:
+${main_output}
+`;
+
+    const result = await generateObject({
+      model: deepseek(finalModel) as any,
+      schema: z.object({
+        schema: z.array(z.string()).describe("List of tool names to be called"),
+      }),
+      prompt,
+      temperature,
+    });
+
+    res.json({
+      selected_tools: result.object.schema,
+      model: finalModel,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || String(error) });
+  }
+});
 
 app.listen(port, () => {
   console.log(`[TS AI Gateway] listening on http://127.0.0.1:${port}`);

@@ -236,24 +236,9 @@ _QQ_ALLOWED_TOOLS = {
     "sing",
 }
 
-# 主模型路由层：仅挂载 get_time + call_tool_agent + call_summary_agent，弃用 <ACTION>，用原生 Tool Calling + tool_calls 判断
+# 主模型路由层：仅保留 get_time + call_summary_agent
 ROUTER_TOOLS_SCHEMA = [
     get_time_tool_schema(),
-    {
-        "type": "function",
-        "function": {
-            "name": "call_tool_agent",
-            "description": "调用工具代理执行操作（浏览器搜索、屏幕分析、视觉识别、打开应用、音乐控制等）。用户需要执行任何操作时必须调用本工具，不要编造结果。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_description": {"type": "string", "description": "需要执行的任务描述，包括目标与约束。"},
-                    "context": {"type": "string", "description": "可选。当前上下文或已对用户说的场面话。"}
-                },
-                "required": ["task_description"]
-            }
-        }
-    },
     {
         "type": "function",
         "function": {

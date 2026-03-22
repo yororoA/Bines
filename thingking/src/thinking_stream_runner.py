@@ -116,6 +116,29 @@ def run_main_agent_rounds(
 
         tool_calls = (holder.get("message") or {}).get("tool_calls")
         if not tool_calls or not list(tool_calls):
+            # [主模型输出结束，进行工具筛选]
+            try:
+                import requests
+                # 获取允许挂载的工具列表 (从 schema 中提取)
+                from tool_schema_collections import ALL_TOOLS_SCHEMA_FOR_AGENT
+                allowed_tools = [t["function"]["name"] for t in ALL_TOOLS_SCHEMA_FOR_AGENT]
+                
+                filter_payload = {
+                    "main_output": full_raw_response,
+                    "messages": messages,
+                    "allowed_tools": allowed_tools
+                }
+                print("\n[Thinking] 正在通过 AI SDK 筛选必要工具...", flush=True)
+                filter_resp = requests.post("http://127.0.0.1:3100/api/filter_tools", json=filter_payload, timeout=10)
+                if filter_resp.status_code == 200:
+                    selected_tools = filter_resp.json().get("selected_tools", [])
+                    print(f"[Thinking] 工具筛选结果: {selected_tools}", flush=True)
+                    # 此处根据要求仅作筛选，其他的等待后续指示
+                else:
+                    print(f"[Thinking] 工具筛选请求失败: {filter_resp.text}", flush=True)
+            except Exception as e:
+                print(f"[Thinking] 工具筛选过程发生异常: {e}", flush=True)
+            
             break
 
         messages.append(holder["message"])
