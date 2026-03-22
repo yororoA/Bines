@@ -6,20 +6,9 @@
 ## 能力
 
 - `GET /health`：健康检查
-- `POST /api/chat`：通用调用（可传 `role: main|tool|summary|bored`）
-- `POST /api/chat/main`
-- `POST /api/chat/tool`
-- `POST /api/chat/summary`
-- `POST /api/chat/bored`
+- `POST /api/chat`：非流式文本调用（适合分类、布尔判断、摘要）
 
 > 当前版本先用于“非工具调用场景”。
-
-路由到 key 的规则：
-
-- `main` -> `DEEPSEEK_API_KEY_MAIN`（回退 `DEEPSEEK_API_KEY`）
-- `tool` -> `DEEPSEEK_API_KEY_TOOL`（回退 `DEEPSEEK_API_KEY`）
-- `summary` -> `DEEPSEEK_API_KEY_SUMMARY`（回退 `DEEPSEEK_API_KEY`）
-- `bored` -> `DEEPSEEK_API_KEY_BORED`（回退 `DEEPSEEK_API_KEY`）
 
 
 ## 启动
@@ -41,7 +30,6 @@
 
 ```json
 {
-  "role": "bored",
   "messages": [
     {"role": "system", "content": "You are a classifier."},
     {"role": "user", "content": "Say True or False only."}

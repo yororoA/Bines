@@ -4,7 +4,6 @@
 import json
 import requests
 import time
-import re
 from typing import Dict, List, Optional, Tuple
 from config import (
     DEEPSEEK_API_URL,
@@ -15,7 +14,6 @@ from config import (
     DEEPSEEK_SUMMARY_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_DYNAMIC_MEMORY_MODEL,
-    TS_AI_SDK_GATEWAY_URL,
     require_env,
 )
 from thinking_model_helper import ThinkingModelHelper
@@ -638,11 +636,6 @@ class SummaryAgent:
     def __init__(self):
         # 使用思考模式大模型作为摘要代理
         self.thinking_helper = ThinkingModelHelper()
-        self.gateway_url = (TS_AI_SDK_GATEWAY_URL or "").rstrip("/")
-        if self.gateway_url:
-            print(f"[SummaryAgent] TS 网关已启用: {self.gateway_url}", flush=True)
-        else:
-            print("[SummaryAgent] TS 网关未配置，默认走 Python 直连", flush=True)
         
         # 摘要代理只能调用状态更新工具
         self.tools_schema = [
@@ -672,44 +665,6 @@ class SummaryAgent:
                 }
             }
         ]
-
-    def _call_summary_gateway(self, messages: List[Dict], temperature: float = 0.3, max_tokens: int = 1024) -> str:
-        """调用 TS 网关 summary 路由，返回文本内容。失败抛异常由上层回退。"""
-        if not self.gateway_url:
-            raise RuntimeError("TS_AI_SDK_GATEWAY_URL not configured")
-        payload = {
-            "messages": messages,
-            "temperature": temperature,
-            "maxTokens": max_tokens,
-        }
-        resp = requests.post(f"{self.gateway_url}/api/chat/summary", json=payload, timeout=DEEPSEEK_API_TIMEOUT)
-        resp.raise_for_status()
-        j = resp.json()
-        print("[SummaryAgent] [TSGW] 使用 TS 网关 /api/chat/summary", flush=True)
-        return (j.get("content") or "").strip()
-
-    @staticmethod
-    def _extract_json_object(text: str) -> Optional[Dict]:
-        """从模型输出中提取 JSON 对象，兼容 ```json 包裹。"""
-        if not text:
-            return None
-        s = text.strip()
-        if s.startswith("```"):
-            s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
-            s = re.sub(r"\s*```$", "", s)
-        try:
-            obj = json.loads(s)
-            return obj if isinstance(obj, dict) else None
-        except Exception:
-            pass
-        m = re.search(r"\{[\s\S]*\}", s)
-        if not m:
-            return None
-        try:
-            obj = json.loads(m.group(0))
-            return obj if isinstance(obj, dict) else None
-        except Exception:
-            return None
     
     def _clean_messages(self, messages: List[Dict]) -> List[Dict]:
         return _clean_messages_for_tool_history(messages, "SummaryAgent")
@@ -730,7 +685,7 @@ class SummaryAgent:
         # 构建消息
         # 【修复】清理消息历史，移除未完成的 tool_calls
         messages = self._clean_messages(base_messages) if base_messages else []
-
+        
         # 添加状态更新描述
         update_prompt = f"""你需要更新以下状态：
 {state_update_description}
@@ -744,57 +699,6 @@ class SummaryAgent:
             "role": "user",
             "content": update_prompt
         })
-
-        # 优先走 TS 网关（summary 路由）：输出结构化 JSON，然后本地执行 update_status
-        if self.gateway_url:
-            try:
-                gateway_messages = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是状态抽取器。请根据对话与更新描述，输出一个 JSON 对象，字段必须是 update_status 可接受的键。"
-                            "仅输出 JSON，不要解释。若无变化返回 {}。"
-                            "可用字段：current_time,current_location,relationship_delta,add_item,remove_item,active_quest,"
-                            "npc_name,npc_attire,npc_visual_status,npc_activity,add_memory_highlight,remove_memory_highlight,important_thing"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"状态更新描述：{state_update_description}\n"
-                            f"上下文：{context or '无'}\n"
-                            f"最近消息：{json.dumps(messages[-8:], ensure_ascii=False)}"
-                        ),
-                    },
-                ]
-                gateway_text = self._call_summary_gateway(gateway_messages, temperature=0.1, max_tokens=800)
-                obj = self._extract_json_object(gateway_text)
-                if obj is None:
-                    raise RuntimeError(f"Summary gateway 未返回有效 JSON: {gateway_text[:200]}")
-
-                allowed_keys = {
-                    "current_time", "current_location", "relationship_delta", "add_item", "remove_item", "active_quest",
-                    "npc_name", "npc_attire", "npc_visual_status", "npc_activity", "add_memory_highlight",
-                    "remove_memory_highlight", "important_thing",
-                }
-                payload = {k: v for k, v in obj.items() if k in allowed_keys and v not in (None, "")}
-                if "relationship_delta" in payload:
-                    try:
-                        payload["relationship_delta"] = int(payload["relationship_delta"])
-                    except Exception:
-                        payload.pop("relationship_delta", None)
-
-                if not payload:
-                    return "状态无明显变化，无需更新"
-
-                update_fn = TOOLS_REGISTRY.get("update_status")
-                if not update_fn:
-                    return "状态更新工具未注册"
-                tool_result = update_fn(**payload)
-                print("[SummaryAgent] [TSGW] 状态 JSON -> 本地 update_status 执行成功", flush=True)
-                return str(tool_result)
-            except Exception as gw_err:
-                print(f"[SummaryAgent] TS 网关更新状态失败，回退原逻辑: {gw_err}", flush=True)
         
         # 使用思考模式大模型执行状态更新
         try:
@@ -805,7 +709,6 @@ class SummaryAgent:
                 turn=1,
                 task_goal="更新状态和记忆"
             )
-            print("[SummaryAgent] [PY-FALLBACK] 使用 Python 直连摘要模型+工具调用", flush=True)
             
             # 【新增】将思考过程包含在返回结果中（如果需要的话）
             result = final_content or "状态更新完成"
@@ -839,14 +742,7 @@ class SummaryAgent:
         ]
         
         try:
-            # 优先走 TS 网关（summary 路由）
-            if self.gateway_url:
-                gateway_out = self._call_summary_gateway(messages, temperature=0.3, max_tokens=1024)
-                if gateway_out:
-                    return gateway_out
-
             # 使用助手类内部的 client
-            print("[SummaryAgent] [PY-FALLBACK] summarize_content 使用 Python 直连", flush=True)
             response = self.thinking_helper.client.chat.completions.create(
                 model=self.thinking_helper.model, # 使用配置的模型
                 messages=messages,
