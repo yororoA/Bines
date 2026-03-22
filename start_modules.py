@@ -3,8 +3,12 @@ import time
 import os
 import sys
 import ctypes
+import shutil
+import urllib.request
+import urllib.error
+from urllib.parse import urlparse
 from ctypes import wintypes
-from config import ZMQ_PORTS
+from config import ZMQ_PORTS, TS_AI_SDK_GATEWAY_URL
 from process_registry import get_processes
 from port_cleanup import cleanup_ports
 from process_runtime import resolve_process_command
@@ -23,6 +27,124 @@ CONSOLE_HEIGHT = 25  # 窗口高度（行数），可以调整：20-50
 PROCESSES = get_processes(display_script="display.py")
 
 processes = []
+
+TS_GATEWAY_DIR = os.path.join(ROOT_DIR, "ts_ai_sdk_gateway")
+TS_GATEWAY_BASE_URL = (os.environ.get("TS_AI_SDK_GATEWAY_URL") or TS_AI_SDK_GATEWAY_URL or "http://127.0.0.1:3100").rstrip("/")
+TS_GATEWAY_HEALTH_URL = f"{TS_GATEWAY_BASE_URL}/health"
+
+
+def _get_ts_gateway_port() -> int:
+    """从网关 URL 解析端口，解析失败时回退到 3100。"""
+    try:
+        parsed = urlparse(TS_GATEWAY_BASE_URL)
+        if parsed.port:
+            return int(parsed.port)
+    except Exception:
+        pass
+    return 3100
+
+
+def is_ts_gateway_alive(timeout=1.5):
+    """检测 TS AI 网关是否已就绪。"""
+    try:
+        with urllib.request.urlopen(TS_GATEWAY_HEALTH_URL, timeout=timeout) as resp:
+            return resp.getcode() == 200
+    except Exception:
+        return False
+
+
+def is_ts_gateway_compatible(timeout=3):
+    """检测网关是否可正常处理 summary 请求（避免旧进程健康但不兼容）。"""
+    try:
+        probe_payload = b'{"messages":[{"role":"system","content":"probe"},{"role":"user","content":"ok"}],"maxTokens":8,"temperature":0.1}'
+        req = urllib.request.Request(
+            f"{TS_GATEWAY_BASE_URL}/api/chat/summary",
+            data=probe_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+            return "\"content\"" in text
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="ignore")
+            if "Unsupported model version" in body:
+                return False
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
+
+
+def _kill_processes_on_port(port: int):
+    """Windows 下按端口杀进程，避免旧网关占用端口。"""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        cmd = (
+            "Get-NetTCPConnection -LocalPort " + str(port) +
+            " -State Listen -ErrorAction SilentlyContinue | "
+            "Select-Object -ExpandProperty OwningProcess -Unique"
+        )
+        out = subprocess.check_output(["powershell", "-NoProfile", "-Command", cmd], text=True)
+        pids = [x.strip() for x in out.splitlines() if x.strip().isdigit()]
+        for pid in pids:
+            try:
+                subprocess.run(["taskkill", "/PID", pid, "/F"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"⚠️ 已结束占用 {port} 端口的旧进程 PID={pid}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def ensure_ts_gateway_started():
+    """确保 TS AI 网关已启动；若未启动则尝试自动拉起。"""
+    if is_ts_gateway_alive():
+        if is_ts_gateway_compatible():
+            print("✓ TS AI Gateway 已在线且兼容")
+            return True
+        print("⚠️ TS AI Gateway 已在线但不兼容，尝试重启...")
+        _kill_processes_on_port(_get_ts_gateway_port())
+        time.sleep(0.5)
+
+    if not os.path.isdir(TS_GATEWAY_DIR):
+        print(f"⚠️ 未找到 TS 网关目录，跳过自动启动: {TS_GATEWAY_DIR}")
+        return False
+
+    npm_exe = shutil.which("npm.cmd" if sys.platform.startswith("win") else "npm")
+    if not npm_exe:
+        npm_exe = "npm.cmd" if sys.platform.startswith("win") else "npm"
+
+    print("正在启动 TS AI Gateway...")
+    try:
+        creationflags = 0
+        if sys.platform == 'win32':
+            creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+
+        subprocess.Popen(
+            [npm_exe, "run", "dev"],
+            cwd=TS_GATEWAY_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except Exception as e:
+        print(f"⚠️ 启动 TS AI Gateway 失败: {e}")
+        return False
+
+    # 等待网关就绪（最多约 15 秒）
+    for _ in range(30):
+        time.sleep(0.5)
+        if is_ts_gateway_alive() and is_ts_gateway_compatible():
+            print("✓ TS AI Gateway 已启动并就绪（兼容）")
+            return True
+
+    print("⚠️ TS AI Gateway 未在预期时间内就绪，请检查 ts_ai_sdk_gateway 依赖与 npm 环境")
+    return False
 
 def set_console_size(pid, width=80, height=30):
     """
@@ -123,6 +245,12 @@ if __name__ == "__main__":
     
     # 默认使用 Web 模式
     use_web_mode = args.web or (not args.console)
+
+    # 为所有后续子进程注入 TS 网关地址（若用户已设置则不覆盖）
+    os.environ.setdefault("TS_AI_SDK_GATEWAY_URL", TS_GATEWAY_BASE_URL)
+
+    # 启动前先确保 TS 网关就绪，避免 summary/bored 首次请求直接回退直连
+    ensure_ts_gateway_started()
     
     if use_web_mode:
         # Web 模式：启动模块管理服务器，等就绪后再提示/打开浏览器，避免“进不去网页”
