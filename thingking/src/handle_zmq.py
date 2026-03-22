@@ -10,6 +10,8 @@ import time
 import sys
 import traceback
 import threading
+import logging
+import importlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from layered_memory import LayeredMemorySystem
@@ -54,6 +56,32 @@ from tool_mounting import (
     initialize_agent_tool_mounts,
     configure_tool_agent_schema_for_source,
 )
+
+
+logger = logging.getLogger("bines.thinking.handle_zmq")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
+
+
+def _module_print(*args, **kwargs):
+    """兼容历史 print 调用：统一写入 logger，减少一次性大规模改造风险。"""
+    sep = kwargs.pop("sep", " ")
+    end = kwargs.pop("end", "")
+    file = kwargs.pop("file", None)
+    level = kwargs.pop("level", logging.INFO)
+
+    message = sep.join(str(a) for a in args) + end
+    if file is sys.stderr:
+        logger.error(message)
+        return
+    logger.log(level, message)
+
+
+# 兼容本模块内历史 print 语句（后续可逐步替换为 logger.xxx）
+print = _module_print
 
 # 确保可以从项目根目录导入 config（无论当前工作目录在哪里）
 PROJECT_ROOT = ensure_project_root(__file__, 2)
@@ -126,6 +154,28 @@ _QQ_MERGE_WINDOW_SEC = 3.0  # 合并窗口时间（秒）
 _CURRENT_B_TASK_ID = None
 _CANCELLED_B_TASK_IDS = set()
 _B_TASK_LOCK = threading.Lock()
+
+# 屏幕监控线程等待事件（避免 busy-wait）
+SCREEN_MONITOR_WAKE_EVENT = threading.Event()
+
+# 延迟导入缓存（避免静态导入 pyautogui 引发环境报错）
+_PYAUTOGUI_MOD = None
+_PYAUTOGUI_IMPORT_FAILED = False
+
+
+def _get_pyautogui():
+    """延迟加载 pyautogui，缺失时返回 None。"""
+    global _PYAUTOGUI_MOD, _PYAUTOGUI_IMPORT_FAILED
+    if _PYAUTOGUI_MOD is not None:
+        return _PYAUTOGUI_MOD
+    if _PYAUTOGUI_IMPORT_FAILED:
+        return None
+    try:
+        _PYAUTOGUI_MOD = importlib.import_module("pyautogui")
+        return _PYAUTOGUI_MOD
+    except Exception:
+        _PYAUTOGUI_IMPORT_FAILED = True
+        return None
 
 
 def _qq_merge_set_pending(user_input, img_descr, source, qq_context):
@@ -852,14 +902,14 @@ def screen_monitor_thread():
     
     import hashlib
     
-    print("[Screen Monitor] 屏幕监控线程已启动", flush=True)
+    logger.info("[Screen Monitor] 屏幕监控线程已启动")
     if GAME_MODE_ENABLED:
-        print(f"[Screen Monitor] 游戏模式已启用，监控间隔: {GAME_MODE_INTERVAL}秒", flush=True)
+        logger.info(f"[Screen Monitor] 游戏模式已启用，监控间隔: {GAME_MODE_INTERVAL}秒")
     
     while True:
         try:
             if not SCREEN_MONITOR_ENABLED:
-                time.sleep(5)
+                SCREEN_MONITOR_WAKE_EVENT.wait(timeout=5)
                 continue
             
             # 根据模式选择监控间隔
@@ -867,10 +917,10 @@ def screen_monitor_thread():
             
             # 检查是否到了监控时间
             now = time.time()
-            if now - LAST_SCREEN_CHECK_TIME < monitor_interval:
-                # 游戏模式使用更短的休眠时间
-                sleep_time = 0.01 if GAME_MODE_ENABLED else 1
-                time.sleep(sleep_time)
+            next_due = LAST_SCREEN_CHECK_TIME + monitor_interval
+            if now < next_due:
+                wait_seconds = max(0.01 if GAME_MODE_ENABLED else 0.5, next_due - now)
+                SCREEN_MONITOR_WAKE_EVENT.wait(timeout=wait_seconds)
                 continue
             
             LAST_SCREEN_CHECK_TIME = now
@@ -881,15 +931,20 @@ def screen_monitor_thread():
                 # 检查拒绝状态是否过期
                 if time.time() > SCREEN_MONITOR_REJECT_EXPIRE_TIME:
                     SCREEN_MONITOR_USER_REJECTED = False
-                    print(f"[Screen Monitor] 拒绝状态已过期，恢复屏幕监控", flush=True)
+                    logger.info("[Screen Monitor] 拒绝状态已过期，恢复屏幕监控")
                 else:
                     # 用户明确拒绝，跳过本次监控
-                    time.sleep(1)
+                    SCREEN_MONITOR_WAKE_EVENT.wait(timeout=1)
                     continue
             
             # 快速截屏并计算哈希（用于检测变化）
             try:
-                import pyautogui
+                pyautogui = _get_pyautogui()
+                if pyautogui is None:
+                    logger.warning("[Screen Monitor] pyautogui 未安装，屏幕监控功能不可用")
+                    SCREEN_MONITOR_WAKE_EVENT.wait(timeout=60)
+                    continue
+
                 screenshot = pyautogui.screenshot()
                 
                 # 缩小图片以加快哈希计算
@@ -901,24 +956,20 @@ def screen_monitor_thread():
                 if LAST_SCREEN_HASH is not None and current_hash != LAST_SCREEN_HASH:
                     # 【修复】取消屏幕变化时向大模型发送提示词的功能，只让大模型自己调用
                     # 只记录屏幕变化，不主动触发对话，让大模型自己决定是否需要查看屏幕
-                    print(f"[Screen Monitor] 检测到屏幕变化（哈希值已更新）", flush=True)
+                    logger.info("[Screen Monitor] 检测到屏幕变化（哈希值已更新）")
                     # 不再主动调用 process_message()，让大模型自己决定是否调用屏幕分析工具
                 
                 LAST_SCREEN_HASH = current_hash
                 
-            except ImportError:
-                print("[Screen Monitor] pyautogui 未安装，屏幕监控功能不可用", flush=True)
-                time.sleep(60)  # 如果依赖缺失，减少检查频率
             except Exception as e:
-                print(f"[Screen Monitor] 截屏时出错: {e}", flush=True)
-                time.sleep(5)
+                logger.warning(f"[Screen Monitor] 截屏时出错: {e}")
+                SCREEN_MONITOR_WAKE_EVENT.wait(timeout=5)
             
-            time.sleep(1)  # 短暂休眠，避免占用过多CPU
+            SCREEN_MONITOR_WAKE_EVENT.wait(timeout=1)  # 短暂休眠，避免占用过多CPU
             
         except Exception as e:
-            print(f"[Screen Monitor] 监控线程错误: {e}", flush=True)
-            traceback.print_exc()
-            time.sleep(5)
+            logger.exception(f"[Screen Monitor] 监控线程错误: {e}")
+            SCREEN_MONITOR_WAKE_EVENT.wait(timeout=5)
 
 
 # Global QQ Buffer Manager
@@ -938,14 +989,14 @@ def get_qq_buffer_manager():
 def start_zmq_listener():
     global INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT, _EXECUTOR_FOR_INTERRUPT
     global GAME_MODE_ENABLED, GAME_MODE_INTERVAL
-    print(f"[Thinking] Listening on ZMQ SUB: {ZMQ_SUB_PORT}", flush=True)
-    print(f"[Thinking] Publishing to ZMQ PUB: {ZMQ_PUB_PORT}", flush=True)
+    logger.info(f"[Thinking] Listening on ZMQ SUB: {ZMQ_SUB_PORT}")
+    logger.info(f"[Thinking] Publishing to ZMQ PUB: {ZMQ_PUB_PORT}")
 
     # 启动屏幕监控线程
     if SCREEN_MONITOR_ENABLED:
         monitor_thread = threading.Thread(target=screen_monitor_thread, daemon=True)
         monitor_thread.start()
-        print(f"[Screen Monitor] 屏幕监控已启用，监控间隔: {SCREEN_MONITOR_INTERVAL}秒", flush=True)
+        logger.info(f"[Screen Monitor] 屏幕监控已启用，监控间隔: {SCREEN_MONITOR_INTERVAL}秒")
     
     # RAG GC 与日记归纳由 LayeredMemorySystem.start_maintenance_services() 在初始化时启动，此处不再重复
     
@@ -953,21 +1004,20 @@ def start_zmq_listener():
     def send_user_online_notification():
         """延迟发送用户上线通知，确保系统完全启动"""
         # 等待3秒，确保所有线程和系统都已完全启动
-        time.sleep(3)
+        SCREEN_MONITOR_WAKE_EVENT.wait(timeout=3)
         try:
             # 发送用户上线的系统提示
             online_prompt = "[System Event: User Online] (The user has just come online. You should greet them naturally based on your persona and the current time. You can check the time, mention how long it's been since you last saw them, or simply greet them warmly.)"
-            print(f"[Thinking] 发送用户上线系统提示...", flush=True)
+            logger.info("[Thinking] 发送用户上线系统提示...")
             process_message(online_prompt, "")
-            print(f"[Thinking] 用户上线系统提示已发送", flush=True)
+            logger.info("[Thinking] 用户上线系统提示已发送")
         except Exception as e:
-            print(f"[Thinking] 发送用户上线提示时出错: {e}", flush=True)
-            traceback.print_exc()
+            logger.exception(f"[Thinking] 发送用户上线提示时出错: {e}")
     
     # 在后台线程中发送用户上线通知
     online_notification_thread = threading.Thread(target=send_user_online_notification, daemon=True)
     online_notification_thread.start()
-    print(f"[Thinking] 用户上线通知线程已启动，将在3秒后发送", flush=True)
+    logger.info("[Thinking] 用户上线通知线程已启动，将在3秒后发送")
 
     # 【修复】创建线程池用于异步处理消息，避免阻塞主循环
     executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ThinkingWorker")
@@ -1004,8 +1054,8 @@ def start_zmq_listener():
     
     while True:
         try:
-            # 【修复】减少poll超时到50ms，提高响应速度
-            events = dict(poller.poll(50))
+            # 平衡响应速度与 CPU 占用
+            events = dict(poller.poll(100))
 
             # 处理 control 消息（播放状态）
             if control_sub_socket in events:
