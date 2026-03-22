@@ -30,7 +30,6 @@ from config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_MODEL,
     DEEPSEEK_API_TIMEOUT,
-    TS_AI_SDK_GATEWAY_URL,
 )
 
 # 导入短期记忆系统、动态状态和永久记忆
@@ -144,7 +143,6 @@ if not API_KEY:
 API_URL = DEEPSEEK_API_URL
 MODEL = DEEPSEEK_MODEL
 TIMEOUT = DEEPSEEK_API_TIMEOUT
-TS_GATEWAY_URL = TS_AI_SDK_GATEWAY_URL
 
 # ZMQ 配置
 HOST = ZMQ_HOST
@@ -468,40 +466,15 @@ def check_bored():
             "max_tokens": 10,
             "stream": False
         }
-
-        answer = ""
-        if TS_GATEWAY_URL:
-            try:
-                gw_payload = {
-                    "model": MODEL,
-                    "messages": payload["messages"],
-                    "temperature": payload["temperature"],
-                    "maxTokens": payload["max_tokens"],
-                }
-                gw_resp = requests.post(
-                    f"{TS_GATEWAY_URL}/api/chat/bored",
-                    json=gw_payload,
-                    timeout=TIMEOUT,
-                )
-                gw_resp.raise_for_status()
-                gw_json = gw_resp.json()
-                answer = str(gw_json.get("content", "")).strip().lower()
-                print("[Bored Detector] [TSGW] 使用 TS 网关 /api/chat/bored", flush=True)
-            except Exception as gw_err:
-                print(f"[Bored Detector] TS AI Gateway 调用失败，回退直连模型: {gw_err}", flush=True)
-
-        if not answer:
-            print("[Bored Detector] [PY-FALLBACK] 使用 Python 直连模型", flush=True)
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Authorization": f"Bearer {API_KEY}"
-            }
-            response = requests.post(API_URL, headers=headers, json=payload, timeout=TIMEOUT)
-            response.raise_for_status()
-            result = response.json()
-            answer = result["choices"][0]["message"]["content"].strip().lower()
-
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {API_KEY}"
+        }
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=TIMEOUT)
+        response.raise_for_status()
+        result = response.json()
+        answer = result["choices"][0]["message"]["content"].strip().lower()
         is_bored = "true" in answer
 
         if is_bored:
@@ -526,10 +499,6 @@ def main():
     global next_allowed_trigger_time, last_check_time
     print("[Bored Detector] Process Started (无聊值 0-100 + mtime 缓存 + 生物钟).", flush=True)
     print(f"[Bored Detector] API Key: {API_KEY[:10]}...", flush=True)
-    if TS_GATEWAY_URL:
-        print(f"[Bored Detector] TS 网关已启用: {TS_GATEWAY_URL}", flush=True)
-    else:
-        print("[Bored Detector] TS 网关未配置，默认走 Python 直连", flush=True)
     next_allowed_trigger_time = time.time() + 60
     last_check_time = time.time()
 

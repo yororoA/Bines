@@ -4,7 +4,6 @@ import threading
 import time
 import copy
 import traceback
-import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from openai import OpenAI
@@ -15,8 +14,6 @@ from config import (
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
     DEEPSEEK_SUMMARY_MODEL,
-    DEEPSEEK_API_TIMEOUT,
-    TS_AI_SDK_GATEWAY_URL,
     require_env,
 )
 
@@ -675,18 +672,9 @@ class LayeredMemorySystem:
         # 注意：这些任务与主模型（对话生成）和外援大模型（复杂推理、工具调用）的职能无关，
         #       属于辅助性任务，统一由摘要模型负责，避免职责混乱。
         self._summary_client = None
-        self._summary_gateway_url = (TS_AI_SDK_GATEWAY_URL or "").rstrip("/")
-        if self._summary_gateway_url:
-            print(f"[LayeredMemory] TS 网关已启用: {self._summary_gateway_url}", flush=True)
-        else:
-            print("[LayeredMemory] TS 网关未配置，摘要/日记默认走 Python 直连", flush=True)
         # 摘要模型使用的 DeepSeek API Key（可被环境变量覆盖）
         resolved_summary_key = DEEPSEEK_SUMMARY_API_KEY or os.environ.get("DEEPSEEK_SUMMARY_API_KEY")
-        if self._summary_gateway_url:
-            # 走 TS 网关时可不强制本地直连 key
-            self._summary_api_key = resolved_summary_key or ""
-        else:
-            self._summary_api_key = require_env("DEEPSEEK_SUMMARY_API_KEY", resolved_summary_key)
+        self._summary_api_key = require_env("DEEPSEEK_SUMMARY_API_KEY", resolved_summary_key)
         # 写日记用副 RP 模型（与主模型性格一致、不占用主模型；使用独立摘要/日记端点）
         self._diary_rp_client = None
         # [性能优化] 异步执行摘要生成的线程池
@@ -1498,8 +1486,6 @@ class LayeredMemorySystem:
         这些任务与主模型（对话生成）和外援大模型（复杂推理、工具调用）的职能无关。
         """
         if self._summary_client is None:
-            if not self._summary_api_key:
-                return None
             try:
                 base_url = DEEPSEEK_BASE_URL
                 self._summary_client = OpenAI(
@@ -1516,8 +1502,6 @@ class LayeredMemorySystem:
     def _get_diary_rp_client(self):
         """写日记用副 RP 模型：与主模型性格一致，使用独立端点，不占用主模型。"""
         if self._diary_rp_client is None:
-            if not self._summary_api_key:
-                return None
             try:
                 self._diary_rp_client = OpenAI(
                     api_key=self._summary_api_key,
@@ -1528,58 +1512,12 @@ class LayeredMemorySystem:
                 self._diary_rp_client = None
         return self._diary_rp_client
 
-    def _call_summary_gateway(self, messages, temperature=0.3, max_tokens=1024, model=None):
-        """优先使用 TS 网关 summary 路由。失败抛异常，由上层决定是否回退。"""
-        if not self._summary_gateway_url:
-            raise RuntimeError("TS_AI_SDK_GATEWAY_URL not configured")
-        payload = {
-            "messages": messages,
-            "temperature": temperature,
-            "maxTokens": max_tokens,
-        }
-        if model:
-            payload["model"] = model
-        resp = requests.post(
-            f"{self._summary_gateway_url}/api/chat/summary",
-            json=payload,
-            timeout=DEEPSEEK_API_TIMEOUT,
-        )
-        resp.raise_for_status()
-        j = resp.json()
-        print("[LayeredMemory] [TSGW] 使用 TS 网关 /api/chat/summary", flush=True)
-        return (j.get("content") or "").strip()
-
     def _call_diary_rp_model(self, prompt: str) -> str:
         """调用副 RP 模型写日记（不占用主模型；性格与主模型一致）。"""
-        if self._summary_gateway_url:
-            try:
-                gw_out = self._call_summary_gateway(
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "你是与用户朝夕相处的角色（傲娇、表面高傲内心温柔）。"
-                                "请根据提供的当日摘要与部分原始对话，以第一人称口吻写一段日记，"
-                                "保留关键事件与情感变化，语气自然像在写日记。不要逐条列举，输出一整段连贯的日记正文。"
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.4,
-                    max_tokens=1024,
-                    model=DEEPSEEK_MODEL,
-                )
-                if gw_out:
-                    print("[DiaryRP] [TSGW] 日记生成走 TS 网关", flush=True)
-                    return gw_out
-            except Exception as e:
-                print(f"[DiaryRP] TS 网关调用失败，回退直连: {e}")
-
         client = self._get_diary_rp_client()
         if client is None:
             return ""
         try:
-            print("[DiaryRP] [PY-FALLBACK] 日记生成走 Python 直连", flush=True)
             resp = client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
                 messages=[
@@ -1606,34 +1544,11 @@ class LayeredMemorySystem:
         
         [职责分离] 这是摘要模型的核心职责：对话摘要生成。
         """
-        if self._summary_gateway_url:
-            try:
-                gw_out = self._call_summary_gateway(
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "你是一个对话剧情压缩助手，只输出简洁的第三人称中文剧情摘要。",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.3,
-                    max_tokens=512,
-                    model=DEEPSEEK_SUMMARY_MODEL,
-                )
-                if not gw_out:
-                    print("[EpisodicSummary] 警告：TS 网关返回空内容", flush=True)
-                    return None
-                print("[EpisodicSummary] [TSGW] 摘要生成走 TS 网关", flush=True)
-                return gw_out
-            except Exception as e:
-                print(f"[EpisodicSummary] TS 网关调用失败，回退直连: {e}", flush=True)
-
         client = self._get_summary_client()
         if client is None:
             print(f"[EpisodicSummary] 摘要模型客户端未初始化，请检查 DEEPSEEK_SUMMARY_API_KEY 与 DEEPSEEK_SUMMARY_MODEL", flush=True)
             return ""
         try:
-            print("[EpisodicSummary] [PY-FALLBACK] 摘要生成走 Python 直连", flush=True)
             resp = client.chat.completions.create(
                 model=DEEPSEEK_SUMMARY_MODEL,
                 messages=[
