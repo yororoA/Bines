@@ -85,7 +85,6 @@ async function runRoleChat(role: Role, body: any) {
     model: deepseek(finalModel) as any,
     messages: normalizedMessages,
     temperature,
-    maxTokens,
   });
 
   return {
