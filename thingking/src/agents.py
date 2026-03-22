@@ -232,9 +232,6 @@ class MainAgent:
     def run_one_turn_streaming(self, messages: List[Dict], interrupt_check=None):
         """
         执行一轮流式请求，由 process_message 驱动工具循环。
-        Yields: 内容片段 (str)
-        返回: (generator, holder)
-        holder 在流结束后包含: message = {role, content, tool_calls?}, 可选 error, interrupted
         """
         holder = {}
         msgs = self._ensure_system_prompt(messages)
@@ -248,6 +245,38 @@ class MainAgent:
                 "role": "system",
                 "content": "本轮回复时：上文工具结果中可能含「仅内部参考」的思考过程，请勿在回复中照搬或使用理性/分析性话术，保持角色人设。"
             })
+            
+        # --- 尝试使用 AI SDK Gateway ---
+        try:
+            import requests
+            ai_sdk_payload = {
+                "messages": msgs,
+                "role": "main",
+                "temperature": 0.7,
+            }
+            # 请求到网关流式接口
+            resp = requests.post("http://127.0.0.1:3100/api/chat/main/stream", json=ai_sdk_payload, stream=True, timeout=15)
+            if resp.status_code == 200:
+                def _stream_gen():
+                    full_text = []
+                    # 按照 chunk 读取 (使用 iter_content 以支持纯文本流无损传输)
+                    for chunk in resp.iter_content(chunk_size=1024):
+                        if chunk:
+                            if interrupt_check and interrupt_check():
+                                holder["interrupted"] = True
+                                break
+                            text_chunk = chunk.decode("utf-8")
+                            full_text.append(text_chunk)
+                            yield text_chunk
+                    holder["message"] = {"role": "assistant", "content": "".join(full_text)}
+
+                return _stream_gen(), holder
+            else:
+                print(f"[MainAgent] AI SDK Gateway 状态码非200: {resp.status_code}", flush=True)
+        except Exception as e:
+            print(f"[MainAgent] AI SDK Gateway 失败，回退到原生直连模式: {e}", flush=True)
+
+        # --- 回退：原生直接调用 DeepSeek API ---
         payload = {
             "messages": msgs,
             "model": self.model,
