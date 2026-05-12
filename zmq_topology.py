@@ -3,6 +3,10 @@ from config import ZMQ_PORTS
 
 # 服务名称到「本服务 bind 的端口」映射（单一来源）
 SERVICE_BIND_PORTS = {
+    # TS AI SDK Gateway（HTTP）
+    "AI SDK Gateway": [
+        3100,
+    ],
     "Display": [
         ZMQ_PORTS["CONTROL_PUB"],
     ],

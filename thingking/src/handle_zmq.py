@@ -457,6 +457,7 @@ def _execute_router_tool_calls_and_append(messages: list, tool_calls_list: list,
         elif func_name == "call_tool_agent":
             task_desc = args.get("task_description", "")
             context = args.get("context", "")
+            tool_choice = args.get("toolChoice")
             try:
                 # 运行中动态生效：每次调用前按当前配置重新挂载工具列表
                 active_schema, full_count, is_qq_mode = configure_tool_agent_schema_for_source(
@@ -469,7 +470,13 @@ def _execute_router_tool_calls_and_append(messages: list, tool_calls_list: list,
                 if is_qq_mode:
                     print(f"[Thinking] QQ 来源，工具已过滤为 QQ 白名单 ({len(active_schema)}/{full_count} 个工具)", flush=True)
                 # 【修改】传入中断检查回调，允许用户打断工具执行
-                result = tool_agent.handle_task(task_desc, context, base_messages, interrupt_check=interrupt_callback)
+                result = tool_agent.handle_task(
+                    task_desc,
+                    context,
+                    base_messages,
+                    interrupt_check=interrupt_callback,
+                    tool_choice=tool_choice,
+                )
             except Exception as e:
                 result = f"工具代理执行出错：{e}"
         elif func_name == "call_summary_agent":

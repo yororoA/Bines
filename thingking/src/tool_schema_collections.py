@@ -102,6 +102,13 @@ TOOLS_SCHEMA = [
                     "context": {
                         "type": "string",
                         "description": "可选。当前上下文信息，如对话历史、用户情绪等。Optional. Current context information."
+                    },
+                    "toolChoice": {
+                        "type": "array",
+                        "description": "可选。限定工具代理只可调用该列表中的工具名（由上游 toolChoice 筛选模型产出）。Optional. Restrict tool agent to these tool names only (from upstream toolChoice selector).",
+                        "items": {
+                            "type": "string"
+                        }
                     }
                 },
                 "required": ["task_description"]

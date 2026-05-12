@@ -4,6 +4,7 @@ import threading
 import time
 import copy
 import traceback
+import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from openai import OpenAI
@@ -16,6 +17,44 @@ from config import (
     DEEPSEEK_SUMMARY_MODEL,
     require_env,
 )
+
+
+AI_SDK_GATEWAY_BASE = os.environ.get("AI_SDK_GATEWAY_BASE", "http://127.0.0.1:3100").rstrip("/")
+
+
+def _gateway_chat(
+    *,
+    role: str,
+    messages: list,
+    temperature: float = 0.3,
+    max_tokens: int = 512,
+    model=None,
+    timeout: int = 20,
+):
+    """通过 AI SDK 网关调用文本模型，失败返回 None。"""
+    payload = {
+        "role": role,
+        "messages": messages,
+        "temperature": temperature,
+        "maxTokens": max_tokens,
+    }
+    if model:
+        payload["model"] = model
+    try:
+        resp = requests.post(
+            f"{AI_SDK_GATEWAY_BASE}/api/chat",
+            json=payload,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json() if resp.content else {}
+        content = data.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    except Exception:
+        return None
+    return None
 
 class PermanentMemory:
     """永久记忆: 存储用户画像、核心设定、事实性知识"""
@@ -1514,23 +1553,37 @@ class LayeredMemorySystem:
 
     def _call_diary_rp_model(self, prompt: str) -> str:
         """调用副 RP 模型写日记（不占用主模型；性格与主模型一致）。"""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是与用户朝夕相处的角色（傲娇、表面高傲内心温柔）。"
+                    "请根据提供的当日摘要与部分原始对话，以第一人称口吻写一段日记，"
+                    "保留关键事件与情感变化，语气自然像在写日记。不要逐条列举，输出一整段连贯的日记正文。"
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+
+        # 优先走网关主模型
+        gateway_out = _gateway_chat(
+            role="main",
+            messages=messages,
+            temperature=0.4,
+            max_tokens=1024,
+            model=DEEPSEEK_MODEL,
+            timeout=30,
+        )
+        if gateway_out:
+            return gateway_out
+
         client = self._get_diary_rp_client()
         if client is None:
             return ""
         try:
             resp = client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是与用户朝夕相处的角色（傲娇、表面高傲内心温柔）。"
-                            "请根据提供的当日摘要与部分原始对话，以第一人称口吻写一段日记，"
-                            "保留关键事件与情感变化，语气自然像在写日记。不要逐条列举，输出一整段连贯的日记正文。"
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
+                messages=messages,
                 max_tokens=1024,
                 temperature=0.4,
             )
@@ -1544,6 +1597,26 @@ class LayeredMemorySystem:
         
         [职责分离] 这是摘要模型的核心职责：对话摘要生成。
         """
+        messages = [
+            {
+                "role": "system",
+                "content": "你是一个对话剧情压缩助手，只输出简洁的第三人称中文剧情摘要。"
+            },
+            {"role": "user", "content": prompt},
+        ]
+
+        # 优先走网关摘要模型
+        gateway_out = _gateway_chat(
+            role="summary",
+            messages=messages,
+            temperature=0.3,
+            max_tokens=512,
+            model=DEEPSEEK_SUMMARY_MODEL,
+            timeout=30,
+        )
+        if gateway_out:
+            return gateway_out
+
         client = self._get_summary_client()
         if client is None:
             print(f"[EpisodicSummary] 摘要模型客户端未初始化，请检查 DEEPSEEK_SUMMARY_API_KEY 与 DEEPSEEK_SUMMARY_MODEL", flush=True)
@@ -1551,13 +1624,7 @@ class LayeredMemorySystem:
         try:
             resp = client.chat.completions.create(
                 model=DEEPSEEK_SUMMARY_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "你是一个对话剧情压缩助手，只输出简洁的第三人称中文剧情摘要。"
-                    },
-                    {"role": "user", "content": prompt},
-                ],
+                messages=messages,
                 max_tokens=512,
                 temperature=0.3,
             )
@@ -1604,29 +1671,47 @@ class LayeredMemorySystem:
         if not text or len(text) < 10:
             return 3  # 默认低重要性
         
-        # [职责分离] 使用摘要模型进行打分，不占用主模型或外援大模型资源
+        prompt = (
+            "你是一个记忆重要性评估助手。请评估以下记忆内容的重要性（1-10分）。\n"
+            "评分标准：\n"
+            "- 高分（7-10分）：极其重要的记忆，应永久保留\n"
+            "  例如：用户过敏源、重要设定、关键事实、用户偏好、重要约定、生日等\n"
+            "  例如：'用户对花生过敏'、'用户的生日是1月15日'、'用户最喜欢的颜色是紫色'\n"
+            "- 中分（4-6分）：一般重要的记忆，正常管理\n"
+            "  例如：一般性对话、普通事件、一般性信息\n"
+            "- 低分（1-3分）：不重要的记忆，可以清理\n"
+            "  例如：日常对话、简单回应、无实质信息\n"
+            "  例如：'我等了10秒'、'好的'、'在吗'、'吃了吗'\n"
+            "\n"
+            "只输出一个1-10之间的整数分数，不要输出其他内容。\n"
+            f"\n记忆内容：\n{text}"
+        )
+
+        gateway_score = _gateway_chat(
+            role="summary",
+            messages=[
+                {"role": "system", "content": "你是一个记忆重要性评估助手，只输出1-10之间的整数分数。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=10,
+            model=DEEPSEEK_SUMMARY_MODEL,
+            timeout=20,
+        )
+        if gateway_score:
+            import re
+            match = re.search(r'\d+', gateway_score)
+            if match:
+                score = int(match.group())
+                return min(10, max(1, score))
+
+        # [职责分离] 使用摘要模型进行打分，不占用主模型或外援大模型资源（回退）
         client = self._get_summary_client()
         if client is None:
             # 如果无法调用模型，fallback 到简单的判断
             return 5
-        
+
         try:
-            prompt = (
-                "你是一个记忆重要性评估助手。请评估以下记忆内容的重要性（1-10分）。\n"
-                "评分标准：\n"
-                "- 高分（7-10分）：极其重要的记忆，应永久保留\n"
-                "  例如：用户过敏源、重要设定、关键事实、用户偏好、重要约定、生日等\n"
-                "  例如：'用户对花生过敏'、'用户的生日是1月15日'、'用户最喜欢的颜色是紫色'\n"
-                "- 中分（4-6分）：一般重要的记忆，正常管理\n"
-                "  例如：一般性对话、普通事件、一般性信息\n"
-                "- 低分（1-3分）：不重要的记忆，可以清理\n"
-                "  例如：日常对话、简单回应、无实质信息\n"
-                "  例如：'我等了10秒'、'好的'、'在吗'、'吃了吗'\n"
-                "\n"
-                "只输出一个1-10之间的整数分数，不要输出其他内容。\n"
-                f"\n记忆内容：\n{text}"
-            )
-            
             resp = client.chat.completions.create(
                 model=DEEPSEEK_SUMMARY_MODEL,
                 messages=[
@@ -1680,26 +1765,44 @@ class LayeredMemorySystem:
         if len(text) > 200:
             return 100
         
-        # [职责分离] 使用摘要模型进行打分，不占用主模型或外援大模型资源
+        prompt = (
+            "你是一个信息价值评估助手。请评估以下对话文本的信息密度（0-100分）。\n"
+            "评分标准：\n"
+            "- 高价值（70-100分）：包含用户偏好、重要约定、关键事实、详细描述等\n"
+            "  例如：'我最喜欢的颜色是紫色'、'我们约定明天见面'、'我的生日是1月15日'\n"
+            "- 中价值（40-69分）：包含一般性信息，有一定参考价值\n"
+            "- 低价值（0-39分）：日常对话、简单回应、无实质信息\n"
+            "  例如：'我等了10秒'、'好的'、'在吗'、'吃了吗'\n"
+            "\n"
+            "只输出一个0-100之间的整数分数，不要输出其他内容。\n"
+            f"\n对话文本：\n{text}"
+        )
+
+        gateway_score = _gateway_chat(
+            role="summary",
+            messages=[
+                {"role": "system", "content": "你是一个信息价值评估助手，只输出0-100之间的整数分数。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=10,
+            model=DEEPSEEK_SUMMARY_MODEL,
+            timeout=20,
+        )
+        if gateway_score:
+            import re
+            match = re.search(r'\d+', gateway_score)
+            if match:
+                score = int(match.group())
+                return min(100, max(0, score))
+
+        # [职责分离] 使用摘要模型进行打分，不占用主模型或外援大模型资源（回退）
         client = self._get_summary_client()
         if client is None:
             # 如果无法调用模型，fallback 到简单的长度判断
             return 50 if len(text) > 50 else 20
-        
+
         try:
-            prompt = (
-                "你是一个信息价值评估助手。请评估以下对话文本的信息密度（0-100分）。\n"
-                "评分标准：\n"
-                "- 高价值（70-100分）：包含用户偏好、重要约定、关键事实、详细描述等\n"
-                "  例如：'我最喜欢的颜色是紫色'、'我们约定明天见面'、'我的生日是1月15日'\n"
-                "- 中价值（40-69分）：包含一般性信息，有一定参考价值\n"
-                "- 低价值（0-39分）：日常对话、简单回应、无实质信息\n"
-                "  例如：'我等了10秒'、'好的'、'在吗'、'吃了吗'\n"
-                "\n"
-                "只输出一个0-100之间的整数分数，不要输出其他内容。\n"
-                f"\n对话文本：\n{text}"
-            )
-            
             resp = client.chat.completions.create(
                 model=DEEPSEEK_SUMMARY_MODEL,
                 messages=[
@@ -1800,6 +1903,23 @@ class LayeredMemorySystem:
         )
 
         # [职责分离] 使用摘要模型进行 Query Rewrite，不占用主模型或外援大模型资源
+        gateway_out = _gateway_chat(
+            role="summary",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是一个对话理解助手，只输出一条适合作为记忆检索用的中文查询句子。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=128,
+            model=DEEPSEEK_SUMMARY_MODEL,
+            timeout=20,
+        )
+        if gateway_out:
+            return gateway_out or current_user_input
+
         client = self._get_summary_client()
         if client is None:
             return current_user_input

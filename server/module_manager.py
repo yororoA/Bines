@@ -413,8 +413,15 @@ def api_presence():
 def start_all_services():
     """启动所有服务（清理所有需要的端口）"""
     results = []
-    # 先清理所有端口（启动所有服务时需要清理所有端口）
-    cleanup_ports(list(ZMQ_PORTS.values()))
+    # 先清理所有端口（ZMQ + 各服务绑定端口，如 AI SDK Gateway 3100）
+    all_ports = set(int(p) for p in ZMQ_PORTS.values())
+    for ports in SERVICE_PORTS.values():
+        for p in ports or []:
+            try:
+                all_ports.add(int(p))
+            except (TypeError, ValueError):
+                continue
+    cleanup_ports(sorted(all_ports))
     
     for config in PROCESSES:
         # 启动服务时不清理端口（因为已经在上面统一清理了）

@@ -2,6 +2,7 @@
 三代理架构：主模型、工具模型、摘要模型
 """
 import json
+import os
 import requests
 import time
 from typing import Dict, List, Optional, Tuple
@@ -18,6 +19,44 @@ from config import (
 )
 from thinking_model_helper import ThinkingModelHelper
 from tools import call_tool, TOOLS_REGISTRY
+
+
+AI_SDK_GATEWAY_BASE = os.getenv("AI_SDK_GATEWAY_BASE", "http://127.0.0.1:3100").rstrip("/")
+
+
+def _gateway_chat(
+    *,
+    role: str,
+    messages: List[Dict],
+    temperature: float = 0.7,
+    max_tokens: int = 1024,
+    model: Optional[str] = None,
+    timeout: int = 20,
+) -> Optional[str]:
+    """通过 AI SDK 网关调用文本模型，失败返回 None。"""
+    payload: Dict[str, object] = {
+        "role": role,
+        "messages": messages,
+        "temperature": temperature,
+        "maxTokens": max_tokens,
+    }
+    if model:
+        payload["model"] = model
+    try:
+        resp = requests.post(
+            f"{AI_SDK_GATEWAY_BASE}/api/chat",
+            json=payload,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json() if resp.content else {}
+        content = data.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    except Exception:
+        return None
+    return None
 
 # 副工具模型仅挂载的动态记忆工具 schema（与 memory_tool.update_status 参数一致，含 important_thing）
 UPDATE_STATUS_SCHEMA_FOR_DYNAMIC_MEMORY = [
@@ -255,7 +294,12 @@ class MainAgent:
                 "temperature": 0.7,
             }
             # 请求到网关流式接口
-            resp = requests.post("http://127.0.0.1:3100/api/chat/main/stream", json=ai_sdk_payload, stream=True, timeout=15)
+            resp = requests.post(
+                f"{AI_SDK_GATEWAY_BASE}/api/chat/main/stream",
+                json=ai_sdk_payload,
+                stream=True,
+                timeout=15,
+            )
             if resp.status_code == 200:
                 def _stream_gen():
                     full_text = []
@@ -559,8 +603,15 @@ class ToolAgent:
     def _clean_messages(self, messages: List[Dict]) -> List[Dict]:
         return _clean_messages_for_tool_history(messages, "ToolAgent")
     
-    def handle_task(self, task_description: str, context: str, 
-                   base_messages: List[Dict], progress_callback=None, interrupt_check=None) -> str:
+    def handle_task(
+        self,
+        task_description: str,
+        context: str,
+        base_messages: List[Dict],
+        progress_callback=None,
+        interrupt_check=None,
+        tool_choice: Optional[List[str]] = None,
+    ) -> str:
         """
         处理任务，执行工具调用
         
@@ -606,12 +657,36 @@ class ToolAgent:
                 except:
                     pass
             
+            active_tools_schema = list(self.tools_schema or [])
+            if isinstance(tool_choice, list) and tool_choice:
+                tool_choice_names = {
+                    str(name).strip()
+                    for name in tool_choice
+                    if isinstance(name, str) and str(name).strip()
+                }
+                # 允许 task_complete，保证工具模型可以显式收敛
+                tool_choice_names.add("task_complete")
+                active_tools_schema = [
+                    t for t in active_tools_schema
+                    if t.get("function", {}).get("name") in tool_choice_names
+                ]
+                if not active_tools_schema:
+                    return "工具执行已跳过：toolChoice 未匹配到可用工具。"
+                allowed_list_str = ", ".join(
+                    [t.get("function", {}).get("name") for t in active_tools_schema if t.get("function", {}).get("name")]
+                )
+                messages.append({
+                    "role": "system",
+                    "content": f"【调用约束】本轮仅允许调用以下工具：{allowed_list_str}。严禁调用列表外工具。",
+                })
+                print(f"[ToolAgent] 已按 toolChoice 限制工具: {allowed_list_str}", flush=True)
+
             # 仅允许执行 schema 中已启用的工具，未勾选工具即使被模型返回也不执行
-            allowed_tool_names = {t.get("function", {}).get("name") for t in self.tools_schema}
+            allowed_tool_names = {t.get("function", {}).get("name") for t in active_tools_schema}
             tool_call_map_filtered = {k: v for k, v in TOOLS_REGISTRY.items() if k in allowed_tool_names}
             final_content, tool_history, reasoning_contents = self.thinking_helper.run_tool_calling_turn(
                 messages=messages,
-                tools=self.tools_schema,
+                tools=active_tools_schema,
                 tool_call_map=tool_call_map_filtered,
                 turn=1,
                 task_goal=task_description,
@@ -771,6 +846,18 @@ class SummaryAgent:
         ]
         
         try:
+            # 优先走 AI SDK 网关摘要模型
+            gateway_out = _gateway_chat(
+                role="summary",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=1024,
+                model=self.thinking_helper.model,
+                timeout=20,
+            )
+            if gateway_out:
+                return gateway_out
+
             # 使用助手类内部的 client
             response = self.thinking_helper.client.chat.completions.create(
                 model=self.thinking_helper.model, # 使用配置的模型

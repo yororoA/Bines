@@ -143,6 +143,7 @@ if not API_KEY:
 API_URL = DEEPSEEK_API_URL
 MODEL = DEEPSEEK_MODEL
 TIMEOUT = DEEPSEEK_API_TIMEOUT
+AI_SDK_GATEWAY_BASE = os.environ.get("AI_SDK_GATEWAY_BASE", "http://127.0.0.1:3100").rstrip("/")
 
 # ZMQ 配置
 HOST = ZMQ_HOST
@@ -466,15 +467,42 @@ def check_bored():
             "max_tokens": 10,
             "stream": False
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {API_KEY}"
-        }
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=TIMEOUT)
-        response.raise_for_status()
-        result = response.json()
-        answer = result["choices"][0]["message"]["content"].strip().lower()
+
+        answer = ""
+        # 优先走 AI SDK 网关 bored 角色
+        try:
+            gw_payload = {
+                "role": "bored",
+                "messages": payload["messages"],
+                "temperature": payload["temperature"],
+                "maxTokens": payload["max_tokens"],
+                "model": MODEL,
+            }
+            gw_resp = requests.post(
+                f"{AI_SDK_GATEWAY_BASE}/api/chat/bored",
+                json=gw_payload,
+                timeout=min(TIMEOUT, 20),
+            )
+            if gw_resp.status_code == 200:
+                gw_data = gw_resp.json() if gw_resp.content else {}
+                answer = str(gw_data.get("content") or "").strip().lower()
+            else:
+                print(f"[Bored Detector] 网关 bored 调用失败，状态码: {gw_resp.status_code}，回退直连", flush=True)
+        except Exception as gw_err:
+            print(f"[Bored Detector] 网关 bored 异常，回退直连: {gw_err}", flush=True)
+
+        # 回退：原 DeepSeek 直连
+        if not answer:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {API_KEY}"
+            }
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=TIMEOUT)
+            response.raise_for_status()
+            result = response.json()
+            answer = result["choices"][0]["message"]["content"].strip().lower()
+
         is_bored = "true" in answer
 
         if is_bored:

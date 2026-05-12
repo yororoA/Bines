@@ -38,7 +38,7 @@ def cleanup_ports(
     if not ports:
         return
 
-    print(f"🔍 检查并清理占用端口的进程: {ports}...")
+    print(f"[PortCleanup] Checking and cleaning occupied ports: {ports}...")
     try:
         netstat = subprocess.run(
             ["netstat", "-ano"],
@@ -50,15 +50,15 @@ def cleanup_ports(
         occupied = _extract_listening_pid_by_ports(netstat.stdout, ports)
 
         if not occupied:
-            print("  ✅ 所有目标端口都可用，无需清理")
+            print("  [OK] All target ports are free, no cleanup needed.")
             time.sleep(initial_wait_seconds)
             return
 
         pids = sorted({pid for _, pid in occupied})
         for port, pid in occupied:
-            print(f"  ⚠️  端口 {port} 被进程 PID {pid} 占用")
+            print(f"  [WARN] Port {port} is occupied by PID {pid}.")
 
-        print(f"  🔪 正在终止 {len(pids)} 个占用端口的进程...")
+        print(f"  [INFO] Terminating {len(pids)} process(es) occupying ports...")
         for pid in pids:
             try:
                 res = subprocess.run(
@@ -68,17 +68,17 @@ def cleanup_ports(
                     timeout=5,
                 )
                 if res.returncode == 0:
-                    print(f"    ✓ 已终止进程 PID {pid}")
+                    print(f"    [OK] Terminated PID {pid}.")
                 else:
                     err = (res.stderr or res.stdout or "").strip()
-                    print(f"    ⚠️  终止进程 PID {pid} 失败: {err}")
+                    print(f"    [WARN] Failed to terminate PID {pid}: {err}")
                 time.sleep(0.3)
             except subprocess.TimeoutExpired:
-                print(f"    ⚠️  终止进程 PID {pid} 超时")
+                print(f"    [WARN] Timeout when terminating PID {pid}.")
             except Exception as e:
-                print(f"    ⚠️  终止进程 PID {pid} 失败: {e}")
+                print(f"    [WARN] Failed to terminate PID {pid}: {e}")
 
-        print("  ⏳ 等待端口释放...")
+        print("  [INFO] Waiting for ports to be released...")
         time.sleep(release_wait_seconds)
 
         still_occupied: Optional[List[Tuple[int, str]]] = None
@@ -92,14 +92,14 @@ def cleanup_ports(
             )
             still_occupied = _extract_listening_pid_by_ports(verify.stdout, ports)
             if not still_occupied:
-                print("  ✅ 所有端口已成功释放")
+                print("  [OK] All ports released successfully.")
                 return
             if retry < verify_retries - 1:
                 brief = [f"{p}(PID:{pid})" for p, pid in still_occupied]
-                print(f"  ⚠️  仍有端口被占用: {brief}，等待后重试...")
+                print(f"  [WARN] Ports still occupied: {brief}, retrying after wait...")
                 time.sleep(1.0)
 
         brief = [f"{p}(PID:{pid})" for p, pid in (still_occupied or [])]
-        print(f"  ⚠️  警告: 以下端口可能仍被占用: {brief}")
+        print(f"  [WARN] These ports may still be occupied: {brief}")
     except Exception as e:
-        print(f"  ❌ 端口清理过程中出错: {e}")
+        print(f"  [ERROR] Port cleanup failed: {e}")

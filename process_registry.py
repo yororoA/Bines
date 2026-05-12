@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import Dict, List
 
 from config import ROOT_DIR
@@ -7,6 +8,7 @@ from config import ROOT_DIR
 def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]]:
     """返回模块进程配置列表。通过 display_script 区分 Web/控制台显示模块入口。"""
     root = str(ROOT_DIR)
+    gateway_cmd = ["cmd", "/c", "npm", "run", "dev"] if sys.platform.startswith("win") else ["npm", "run", "dev"]
     return [
         {
             "name": "Classification",
@@ -49,6 +51,11 @@ def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]
             "script": os.path.join(root, "thingking", "src", "bored_detector.py"),
             "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "thingking", "src"),
+        },
+        {
+            "name": "AI SDK Gateway",
+            "command": gateway_cmd,
+            "cwd": os.path.join(root, "ts_ai_sdk_gateway"),
         },
         {
             "name": "Thinking",

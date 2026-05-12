@@ -1,7 +1,84 @@
+import json
+import os
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
+
+import requests
+
+
+AI_SDK_GATEWAY_BASE = os.getenv("AI_SDK_GATEWAY_BASE", "http://127.0.0.1:3100").rstrip("/")
+TOOL_SELECTION_MODE = os.getenv("MAIN_TOOL_SELECTION_MODE", "filter").strip().lower()
+
+
+def _normalize_tool_choice(raw_tool_choice: Any, allowed_tools: List[str]) -> List[str]:
+    """归一化并过滤 toolChoice，仅保留允许调用的工具名。"""
+    if not isinstance(raw_tool_choice, list):
+        return []
+    allowed = set(allowed_tools or [])
+    normalized: List[str] = []
+    for item in raw_tool_choice:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name:
+            continue
+        if name in allowed and name not in normalized:
+            normalized.append(name)
+    return normalized
+
+
+def _select_tools_after_main_output(messages: list, main_output: str, allowed_tools: List[str]) -> List[str]:
+    """
+    主模型输出后进行工具选择：
+    - filter 模式：由筛选模型输出 toolChoice
+    - main 模式：由主模型输出 {text, toolChoice}
+    """
+    if not (main_output or "").strip():
+        return []
+
+    mode = TOOL_SELECTION_MODE if TOOL_SELECTION_MODE in {"filter", "main"} else "filter"
+    payload = {
+        "mode": mode,
+        "main_output": main_output,
+        "messages": messages,
+        "allowed_tools": allowed_tools,
+    }
+
+    try:
+        resp = requests.post(
+            f"{AI_SDK_GATEWAY_BASE}/api/tool_choice",
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json() if resp.content else {}
+            return _normalize_tool_choice(data.get("toolChoice"), allowed_tools)
+        print(f"[Thinking] /api/tool_choice 失败: HTTP {resp.status_code}", flush=True)
+    except Exception as e:
+        print(f"[Thinking] /api/tool_choice 调用异常: {e}", flush=True)
+
+    # 兼容老网关（仅 filter_tools）
+    if mode == "filter":
+        try:
+            fallback_payload = {
+                "main_output": main_output,
+                "messages": messages,
+                "allowed_tools": allowed_tools,
+            }
+            resp = requests.post(
+                f"{AI_SDK_GATEWAY_BASE}/api/filter_tools",
+                json=fallback_payload,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json() if resp.content else {}
+                return _normalize_tool_choice(data.get("selected_tools"), allowed_tools)
+            print(f"[Thinking] /api/filter_tools 回退失败: HTTP {resp.status_code}", flush=True)
+        except Exception as e:
+            print(f"[Thinking] /api/filter_tools 回退异常: {e}", flush=True)
+    return []
 
 
 def run_main_agent_rounds(
@@ -19,6 +96,8 @@ def run_main_agent_rounds(
     """运行主模型多轮工具调用与流式输出循环。"""
     full_raw_response = ""
     exited_due_to_interrupt = False
+    last_selected_tools: List[str] = []
+    same_toolchoice_streak = 0
 
     round_idx = 0
     while round_idx < max_tool_rounds:
@@ -114,35 +193,67 @@ def run_main_agent_rounds(
                 zmq_send(seg, lang="zh", cough=cough_val, enable_audio=enable_audio)
         print("", flush=True)
 
-        tool_calls = (holder.get("message") or {}).get("tool_calls")
+        holder_message = holder.get("message") or {"role": "assistant", "content": full_raw_response or None}
+        tool_calls = holder_message.get("tool_calls")
         if not tool_calls or not list(tool_calls):
-            # [主模型输出结束，进行工具筛选]
-            try:
-                import requests
-                # 获取允许挂载的工具列表 (从 schema 中提取)
-                from tool_schema_collections import ALL_TOOLS_SCHEMA_FOR_AGENT
-                allowed_tools = [t["function"]["name"] for t in ALL_TOOLS_SCHEMA_FOR_AGENT]
-                
-                filter_payload = {
-                    "main_output": full_raw_response,
-                    "messages": messages,
-                    "allowed_tools": allowed_tools
-                }
-                print("\n[Thinking] 正在通过 AI SDK 筛选必要工具...", flush=True)
-                filter_resp = requests.post("http://127.0.0.1:3100/api/filter_tools", json=filter_payload, timeout=10)
-                if filter_resp.status_code == 200:
-                    selected_tools = filter_resp.json().get("selected_tools", [])
-                    print(f"[Thinking] 工具筛选结果: {selected_tools}", flush=True)
-                    # 此处根据要求仅作筛选，其他的等待后续指示
+            # 主模型本轮没有直接返回 tool_calls，走 toolChoice 选择流程
+            from tool_schema_collections import ALL_TOOLS_SCHEMA_FOR_AGENT
+
+            allowed_tools = [t["function"]["name"] for t in ALL_TOOLS_SCHEMA_FOR_AGENT]
+            selected_tools = _select_tools_after_main_output(messages, full_raw_response, allowed_tools)
+
+            if selected_tools:
+                if selected_tools == last_selected_tools:
+                    same_toolchoice_streak += 1
                 else:
-                    print(f"[Thinking] 工具筛选请求失败: {filter_resp.text}", flush=True)
-            except Exception as e:
-                print(f"[Thinking] 工具筛选过程发生异常: {e}", flush=True)
-            
+                    last_selected_tools = selected_tools[:]
+                    same_toolchoice_streak = 1
+
+                # 防止 toolChoice 自激循环：连续两轮命中完全相同的工具集时，不再继续调工具
+                if same_toolchoice_streak >= 2:
+                    print(
+                        f"[Thinking] 检测到重复 toolChoice 循环，跳过本轮工具调用: {selected_tools}",
+                        flush=True,
+                    )
+                    messages.append({"role": "assistant", "content": full_raw_response or None})
+                    break
+
+                print(f"[Thinking] toolChoice 结果: {selected_tools}", flush=True)
+                synthetic_tool_call = {
+                    "id": f"tool_choice_{round_idx}_{int(time.time() * 1000)}",
+                    "type": "function",
+                    "function": {
+                        "name": "call_tool_agent",
+                        "arguments": json.dumps(
+                            {
+                                "task_description": full_raw_response or "",
+                                "context": full_raw_response or "",
+                                "toolChoice": selected_tools,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+                synthetic_message = {
+                    "role": "assistant",
+                    "content": full_raw_response or None,
+                    "tool_calls": [synthetic_tool_call],
+                }
+                messages.append(synthetic_message)
+                execute_router_tool_calls(messages, [synthetic_tool_call], interrupt_requested, source)
+                full_raw_response = (full_raw_response or "").strip()
+                continue
+
+            # 既无 tool_calls 又无 toolChoice，本轮结束
+            same_toolchoice_streak = 0
+            last_selected_tools = []
+            messages.append({"role": "assistant", "content": full_raw_response or None})
             break
 
-        messages.append(holder["message"])
-        execute_router_tool_calls(messages, tool_calls, interrupt_requested, source)
+        same_toolchoice_streak = 0
+        last_selected_tools = []
+        messages.append(holder_message)
+        execute_router_tool_calls(messages, list(tool_calls), interrupt_requested, source)
         full_raw_response = (full_raw_response or "").strip()
 
     return {
