@@ -1,0 +1,15 @@
+smolagents
+smolagents[openai]
+
+langchain
+langchain_community
+
+e2b_code_interpreter
+
+# env management
+pydantic-settings
+
+# for web search
+ddgs
+requests
+httpx
