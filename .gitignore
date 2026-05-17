@@ -48,3 +48,5 @@ ts_ai_sdk_gateway/.env.example
 .env.example
 .env
 dist
+
+test/
