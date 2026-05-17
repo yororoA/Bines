@@ -2,7 +2,12 @@ smolagents
 smolagents[openai]
 
 langchain
+langchain-openai
+langchain-huggingface
+langchain-chroma
+chromadb
 langchain_community
+langgraph
 
 e2b_code_interpreter
 

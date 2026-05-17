@@ -6,8 +6,9 @@ from thinking_settings import thinking_settings
 _SEARCH_AGENT = None
 
 
-@tool("websearch")
-def websearch(query: str) -> str:
+@tool()
+def webSearch(query: str) -> str:
+    """Search the web for information based on a query using DuckDuckGo."""
     global _SEARCH_AGENT
     if _SEARCH_AGENT is None:
         _SEARCH_AGENT = CodeAgent(

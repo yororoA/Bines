@@ -1,5 +1,5 @@
-from webSearch import websearch
+from .webSearch import webSearch
 
 __all__ = [
-    "websearch",
+    "webSearch",
 ]

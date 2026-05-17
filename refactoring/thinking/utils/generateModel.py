@@ -15,14 +15,14 @@ def smolagents_model(
 ):
     if model in ["deepseek-v4-flash", "deepseek-v4-pro"]:
         return OpenAIModel(
-            model=model,
+            model_id=model,
             api_url=thinking_settings.DEEPSEEK_API_URL,
             api_key=thinking_settings.DEEPSEEK_API_KEY,
             **kwargs,
         )
     elif model in ["mimo-v2.5", "mimo-v2.5-pro"]:
         return OpenAIModel(
-            model=model,
+            model_id=model,
             api_url=thinking_settings.MIMO_API_URL,
             api_key=thinking_settings.MIMO_API_KEY,
             **kwargs,
@@ -39,15 +39,17 @@ def langchain_model(
 ):
     if model in ["deepseek-v4-flash", "deepseek-v4-pro"]:
         return init_chat_model(
+            model_provider="openai",
             model=model,
-            api_url=thinking_settings.DEEPSEEK_API_URL,
+            base_url=thinking_settings.DEEPSEEK_API_URL,
             api_key=thinking_settings.DEEPSEEK_API_KEY,
             **kwargs,
         )
     elif model in ["mimo-v2.5", "mimo-v2.5-pro"]:
         return init_chat_model(
+            model_provider="openai",
             model=model,
-            api_url=thinking_settings.MIMO_API_URL,
+            base_url=thinking_settings.MIMO_API_URL,
             api_key=thinking_settings.MIMO_API_KEY,
             **kwargs,
         )

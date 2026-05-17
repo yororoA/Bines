@@ -8,9 +8,6 @@ class ThinkingSettings(BaseSettings):
     MIMO_API_KEY: str
     DEEPSEEK_API_URL: str
     DEEPSEEK_API_KEY: str
-    DEEPSEEK_THINKING_API_KEY: str
-    DEEPSEEK_SUMMARY_API_KEY: str
-    DEEPSEEK_BORED_API_KEY: str
     RAG_EMBEDDING_MODEL: str
     E2B_API_KEY: str
 
