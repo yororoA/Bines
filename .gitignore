@@ -47,4 +47,4 @@ DEPENDENCIES.md
 node_modules
 ts_ai_sdk_gateway/.env.example
 .env.example
-.env
+*.env
