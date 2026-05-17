@@ -9,12 +9,10 @@ chromadb
 langchain_community
 langgraph
 
-e2b_code_interpreter
+openai
 
-# env management
 pydantic-settings
 
-# for web search
 ddgs
 requests
 httpx

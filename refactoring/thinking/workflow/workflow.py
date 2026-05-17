@@ -1,33 +1,52 @@
 from langgraph.graph import StateGraph, END
-from .nodes import manager_node, reply_node, web_search_node, rag_search_node
-from .messagesState import MessagesState
 
-
-def jump(state: MessagesState):
-    return state["next_node"]
-
-
-workflow = StateGraph(MessagesState)
-
-workflow.add_node("manager", manager_node)
-workflow.add_node("reply", reply_node)
-workflow.add_node("web_search", web_search_node)
-workflow.add_node("rag_search", rag_search_node)
-
-workflow.set_entry_point("manager")
-
-workflow.add_conditional_edges(
-    "manager",
-    jump,
-    {
-        "web_search": "web_search",
-        "rag_search": "rag_search",
-        "reply": "reply",
-    },
+from workflow.state import ThinkingState
+from workflow.nodes import (
+    context_builder_node,
+    manager_node,
+    reply_node,
+    tool_agent_node,
+    summary_agent_node,
 )
-workflow.add_edge("web_search", "manager")
-workflow.add_edge("rag_search", "manager")
 
-workflow.add_edge("reply", END)
 
-app = workflow.compile()
+def _route_after_manager(state: dict) -> str:
+    next_node = state.get("next_node", "reply")
+    if next_node == "tool_agent":
+        return "tool_agent"
+    elif next_node == "summary_agent":
+        return "summary_agent"
+    else:
+        return "reply"
+
+
+def build_workflow() -> StateGraph:
+    graph = StateGraph(ThinkingState)
+
+    graph.add_node("context_builder", context_builder_node)
+    graph.add_node("manager", manager_node)
+    graph.add_node("tool_agent", tool_agent_node)
+    graph.add_node("summary_agent", summary_agent_node)
+    graph.add_node("reply", reply_node)
+
+    graph.set_entry_point("context_builder")
+    graph.add_edge("context_builder", "manager")
+
+    graph.add_conditional_edges(
+        "manager",
+        _route_after_manager,
+        {
+            "tool_agent": "tool_agent",
+            "summary_agent": "summary_agent",
+            "reply": "reply",
+        },
+    )
+
+    graph.add_edge("tool_agent", "manager")
+    graph.add_edge("summary_agent", "manager")
+    graph.add_edge("reply", END)
+
+    return graph
+
+
+app = build_workflow().compile()
