@@ -16,3 +16,6 @@ pydantic-settings
 ddgs
 requests
 httpx
+websocket-client
+
+sentence-transformers
