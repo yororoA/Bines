@@ -3,6 +3,7 @@ smolagents[openai]
 
 langchain
 langchain-openai
+langchain[openai]
 langchain-huggingface
 langchain-chroma
 chromadb
