@@ -14,6 +14,8 @@ class ThinkingSettings(BaseSettings):
     E2B_API_KEY: str = ""
     NAPCAT_WS_SERVER:str = ""
     NAPCAT_WS_TOKEN:str = ""
+    NAPCAT_WS_RECONNECT_TIMEOUT:int = 5
+    NAPCAT_WS_API_RESPONSE_TIMEOUT:int = 15
 
     model_config = SettingsConfigDict(
         env_file="thinking.env", env_file_encoding="utf-8"
