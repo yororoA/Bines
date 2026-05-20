@@ -1,18 +1,18 @@
-from langchain.tools import tool
+from smolagents import tool
 from napcat_server import napcat_client
 from .types import SEND_MSG
 
 
 @tool
-async def send_msg(msg: SEND_MSG)->dict:
+async def send_msg(msg: SEND_MSG) -> dict | str:
     """
-    发送消息
+    通过 QQ 发送消息
 
     Args:
         msg (SEND_MSG): 要发送的消息
 
     Returns:
-        dict: 发送结果
+        dict|str: 发送结果
     """
     if napcat_client:
         try:
@@ -23,3 +23,4 @@ async def send_msg(msg: SEND_MSG)->dict:
             return res
         except Exception as e:
             return f"Error sending message: {e}"
+
