@@ -2,23 +2,20 @@ from smolagents import (
     DuckDuckGoSearchTool,
     WebSearchTool,
     VisitWebpageTool,
-    OpenAIModel,
     CodeAgent,
 )
 from langchain.tools import tool
 from thinking_settings import thinking_settings
+from utils import generate_sml_model
 
-_model = OpenAIModel(
-    model_id=thinking_settings.MODEL_LIST[2],  # mimo-v2.5
-    api_base=thinking_settings.MIMO_API_URL,
-    api_key=thinking_settings.MIMO_API_KEY,
-)
 
-_searchAgent = Null
+_model = generate_sml_model(thinking_settings.MODEL_SELECTED)
+
+_searchAgent = None
 
 
 @tool
-def web_search(query: str) -> str:
+def webSearch(query: str) -> str:
     """Search the web for the answer to a question.
 
     Args:
@@ -40,7 +37,7 @@ def web_search(query: str) -> str:
             system_prompt="You are a helpful assistant that can search the web. Always make sure you know the current time.",
             max_tokens=1024,
             max_retries=3,
-            # output_type="text",
+            max_steps=6,
         )
 
     return str(_searchAgent.run(query))

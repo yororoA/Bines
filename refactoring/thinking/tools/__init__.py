@@ -1,5 +1,7 @@
-from .webSearch import web_search
+from .performer_tools import webSearch
+from .napcat_tools import send_msg
 
 __all__ = [
-    "web_search",
+    "webSearch",
+    "send_msg",
 ]
