@@ -21,8 +21,24 @@ def ManagerNode(state: GraphStatus) -> Command:
 
     sends = []
     for task_name, task_list in result.tasks_demand.items():
+        # 处理 final_reply 和 advance_reply 任务
         if task_name in ["final_reply", "advance_reply"]:
-            continue
+            isFinal = task_name == "final_reply"
+            sends.append(
+                Send(
+                    to="reply",
+                    content={
+                        "tasks": task_list,
+                        "Final": isFinal,
+                        "message": (
+                            result.final_reply if isFinal else result.advance_reply
+                        ),
+                    },
+                )
+            )
+            # 如果是 final_reply 任务，直接跳过后续任务
+            if isFinal:
+                continue
 
         for item in task_list:
             if item.task_id not in done_ids:
