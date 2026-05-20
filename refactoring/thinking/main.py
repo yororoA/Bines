@@ -22,6 +22,5 @@ async def main():
             await napcat_client.close()
 
 
-# 启动graph以及连接napcat
 if __name__ == "__main__":
     asyncio.run(main())
