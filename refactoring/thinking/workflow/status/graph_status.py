@@ -1,41 +1,23 @@
-from typing import Literal
-from typing_extensions import Annotated, TypedDict
+from typing import Annotated, TypedDict
 from operator import add
+from .manager_route import TaskItem
 
 
 def merge_tasks(left: dict, right: dict) -> dict:
-    """
-    left: 当前状态中的字典
-    right: 节点返回的新字典
-    """
-    _left = left if left is not None else {}
-    _right = right if right is not None else {}
-
+    _left = left or {}
+    _right = right or {}
     merged = _left.copy()
     for key, value in _right.items():
         if key in merged:
-            # 如果 Key 已存在，将两个列表合并（相加）
-            merged[key] = merged[key] + value
+            existing_ids = {item.task_id for item in merged[key]}
+            new_items = [item for item in value if item.task_id not in existing_ids]
+            merged[key] = merged[key] + new_items
         else:
-            # 如果是新 Key，直接赋值
             merged[key] = value
     return merged
 
 
 class GraphStatus(TypedDict):
-    """The status of the graph. Input to the manager route."""
-
-    tasks_demand: Annotated[
-        dict[
-            Literal["memory_search", "performer", "advance_reply", "final_reply"],
-            list[str],
-        ],
-    ]
-    tasks_done: Annotated[
-        dict[
-            Literal["memory_search", "performer", "advance_reply", "final_reply"],
-            list[str],
-        ],
-        merge_tasks,
-    ]
+    tasks_demand: Annotated[dict[str, list[TaskItem]], merge_tasks]
+    tasks_done: Annotated[dict[str, list[TaskItem]], merge_tasks]
     thoughts: Annotated[str, add]

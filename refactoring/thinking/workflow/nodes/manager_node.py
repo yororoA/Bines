@@ -10,17 +10,31 @@ _model = generate_langchain_model(thinking_settings.MODEL_SELECTED)
 ManagerModel = _model.with_structured_output(ManagerRoute)
 
 
-def ManagerNode(state: GraphStatus) -> ManagerRoute:
-    """The manager node."""
-    result = ManagerModel.invoke(state)
-    sends = []
-    for task_name, task_descriptions in result.tasks_demand.items():
-        for task_description in task_descriptions:
-            sends.append(
-                Send(
-                    to=task_name,
-                    content=task_description,
-                )
-            )
+def ManagerNode(state: GraphStatus) -> Command:
+    result: ManagerRoute = ManagerModel.invoke(state)
 
-    return Command(update=result, goto=sends)
+    # 获取已完成的 ID 集合
+    done_ids = set()
+    for items in state.get("tasks_done", {}).values():
+        for item in items:
+            done_ids.add(item.task_id)
+
+    sends = []
+    for task_name, task_list in result.tasks_demand.items():
+        if task_name in ["final_reply", "advance_reply"]:
+            continue
+
+        for item in task_list:
+            if item.task_id not in done_ids:
+                sends.append(
+                    Send(
+                        to=task_name,
+                        content=item,
+                    )
+                )
+
+    return Command(
+        # result 是 Pydantic 实例，model_dump 会将其及其嵌套的 TaskItem 全部转为 dict
+        update=result.model_dump(),
+        goto=sends if sends else END,
+    )
