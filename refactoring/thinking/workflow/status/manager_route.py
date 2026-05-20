@@ -3,23 +3,28 @@ from typing import Literal, Optional
 
 
 class ManagerRoute(BaseModel):
-    """The route for the manager to follow."""
+    """The route for the manager to output."""
 
-    next_step: Literal["memory_search", "performer", "advance_reply", "final_reply"] = (
-        Field(
-            description="The next step in the route."
-            + "\nmemory_search: Search the memory for the answer to the question, which the answer may be in the memory."
-            + "\nperformer: Perform the task, when you can't find the answer in the memory or need to perform some actions."
-            + "\nadvance_reply: Advance the conversation. When you are temporarily unable to answer and need to wait for the execution results returned by `performer` node, and need to give feedback to users in advance."
-            + "\nfinal_reply: Final the conversation. When you are able to give the final reply to the user."
-        )
+    tasks_demand: dict[
+        Literal["memory_search", "performer", "advance_reply", "final_reply"], list[str]
+    ] = Field(
+        title="The tasks need to be performed",
+        description="key: the task name, value: a list of the detailed task purpose descriptions",
+        examples=[
+            {
+                "memory_search": ["Find out if there are birthday related answers in the memory."],
+                "performer": ["Search the internet for the current president of the United States."],   
+                "advance_reply": ["Reply the user in advance with `Um, let me think...`"],
+                "final_reply": ["Reply the user with the final words `The weather of New York is sunny now.`"], 
+            }
+        ],
     )
-    next_step_purpose: str = Field(
-        description="The detailed purpose of the next step."
-        + "\nFor example, if the next step is memory_search, then the purpose is to search the memory for the answer to the memory."
-        + "\nIf the next step is performer, then the purpose is to perform the task."
-        + "\nIf the next step is advance_reply, then the purpose is to advance the conversation."
-        + "\nIf the next step is final_reply, then the purpose is to final the conversation."
+    thoughts: str = Field(
+        title="The thoughts of your current decision",
+        description="The thoughts of your current decision."
+        + "\nYou can fill this field with the thoughts about the answer to the question, or the tasks to perform."
+        + "\nFor example, the user asked a question which you need to search the memory or perform some actions for the answer, then you can fill this field with the thoughts about why you need to search the memory or perform some actions."
+        + "\nAnd after the task is performed, you can continue to think about the next step according to the task results and the past thoughts in the this field.",
     )
     advance_reply: Optional[str] = Field(
         default=None,
