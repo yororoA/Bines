@@ -3,7 +3,7 @@ from napcat_server import napcat_client
 from .types import SEND_MSG
 
 
-@tool
+@tool("send qq message")
 async def send_msg(msg: SEND_MSG) -> dict | str:
     """
     通过 QQ 发送消息

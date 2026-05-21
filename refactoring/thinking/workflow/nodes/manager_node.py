@@ -2,7 +2,7 @@ from utils import generate_langchain_model
 from thinking_settings import thinking_settings
 
 # from common_tools_node import CommonTools
-from status import GraphStatus, ManagerRoute
+from status import GraphStatus, ManagerRoute, ReplyInput
 from langgraph.types import Send, Command
 from langgraph.graph import END
 
@@ -34,13 +34,11 @@ def ManagerNode(state: GraphStatus) -> Command:
             isFinal = task_name == "final_reply"
             reply_command = Send(
                 to="reply",
-                content={
-                    "tasks": task_list,
-                    "Final": isFinal,
-                    "message": (
-                        result.final_reply if isFinal else result.advance_reply
-                    ),
-                },
+                content=ReplyInput(
+                    tasks=task_list,
+                    Final=isFinal,
+                    message=(result.final_reply if isFinal else result.advance_reply),
+                ),
             )
             # 如果是 final_reply 任务，直接跳过后续任务
             if isFinal:

@@ -8,6 +8,10 @@ class TaskItem(BaseModel):
     )
     description: str = Field(description="Detailed purpose of the task")
 
+class ReplyInput(BaseModel):
+    tasks: list[TaskItem]
+    Final: bool
+    message: str
 
 class ManagerRoute(BaseModel):
     """The route for the manager to output."""
