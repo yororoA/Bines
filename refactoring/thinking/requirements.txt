@@ -9,6 +9,7 @@ langchain-chroma
 chromadb
 langchain_community
 langgraph
+langgraph-checkpoint-sqlite
 
 openai
 
