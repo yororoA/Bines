@@ -2,6 +2,8 @@ from langchain.chat_models import init_chat_model, BaseChatModel
 
 
 def generate_langchain_model(model_name: str) -> BaseChatModel:
+    from thinking_settings import thinking_settings
+
     if model_name in ["deepseek-v4-flash", "deepseek-v4-pro"]:
         return init_chat_model(
             model_provider="openai",

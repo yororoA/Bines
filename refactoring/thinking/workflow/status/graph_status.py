@@ -1,6 +1,7 @@
 from typing import Annotated, TypedDict
 from operator import add
 from .manager_route import TaskItem
+from langchain.messages import AnyMessage
 
 
 def merge_tasks(left: dict, right: dict) -> dict:
@@ -18,6 +19,7 @@ def merge_tasks(left: dict, right: dict) -> dict:
 
 
 class GraphStatus(TypedDict):
+    messages: Annotated[list[AnyMessage], add]
     tasks_demand: Annotated[dict[str, list[TaskItem]], merge_tasks]
     tasks_done: Annotated[dict[str, list[TaskItem]], merge_tasks]
     thoughts: Annotated[str, add]

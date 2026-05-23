@@ -5,14 +5,18 @@ from thinking_settings import thinking_settings
 from status import GraphStatus, ManagerRoute, ReplyInput
 from langgraph.types import Send, Command
 from langgraph.graph import END
-
+from typing import Literal
 
 _model = generate_langchain_model(thinking_settings.MODEL_SELECTED)
 # ManagerModel = _model.bind_tools(CommonTools).with_structured_output(ManagerRoute)
 ManagerModel = _model.with_structured_output(ManagerRoute)
 
 
-def ManagerNode(state: GraphStatus) -> Command:
+def ManagerNode(
+    state: GraphStatus,
+) -> Command[
+    Literal["performer", "advance_reply", "final_reply", "memory_search", "__end__"]
+]:
     result: ManagerRoute = ManagerModel.invoke(state)
 
     # 获取已完成的 ID 集合
@@ -33,7 +37,7 @@ def ManagerNode(state: GraphStatus) -> Command:
         if task_name in ["final_reply", "advance_reply"]:
             isFinal = task_name == "final_reply"
             reply_command = Send(
-                to="reply",
+                to=task_name,
                 content=ReplyInput(
                     tasks=task_list,
                     Final=isFinal,
