@@ -3,6 +3,7 @@ from .manager_node import ManagerModel
 from .common_tools_node import CommonToolsByName, CommonTools
 from .performer_node import PerformerNode
 from .manager_node import ManagerNode
+from .memory_search_node import MemorySearchNode
 
 __all__ = [
     "ManagerModel",
@@ -11,4 +12,5 @@ __all__ = [
     "ManagerNode",
     "PerformerNode",
     "ReplyNode",
+    "MemorySearchNode"
 ]
