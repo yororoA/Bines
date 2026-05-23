@@ -1,17 +1,17 @@
 from thinking_settings import thinking_settings
-from langgraph.graph import StateGraph, START, END
-from .status import GraphStatus, ManagerRoute
+from langgraph.graph import StateGraph, END
+from .status import GraphStatus
 from .nodes import ManagerNode, PerformerNode, ReplyNode, MemorySearchNode
 import sqlite3
 from langgraph.checkpoint.sqlite import SqliteSaver
-from typing import Literal
 from pathlib import Path
+from status import GraphStatus
+from typing import Literal
 
 
 class Workflow:
-    def __init__(self, thread_id: Literal["raw_chat", "QQ"]):
-        self.workflow = self._build_Workflow()
-        self.checkpoint_saver = SqliteSaver(f"checkpoint_{thread_id}.db")
+    def __init__(self):
+        self._app = self._compile()
 
     def _build_Workflow(self):
         workflow = StateGraph(GraphStatus)
@@ -41,7 +41,7 @@ class Workflow:
             name="final_reply",
             description="The reply node responsible for generating final responses to user queries.",
         )
-
+        # todo: add context_builder node
         workflow.set_entry_point("context_builder")
 
         workflow.add_edge("context_builder", "manager")
@@ -52,11 +52,22 @@ class Workflow:
 
         return workflow
 
-    def compile(self):
+    def _compile(self):
+        if self._app is not None:
+            return self._app
+
         base_dir = Path(__file__).resolve().parents[2]
-        data_dir = base_dir / "data/checkpoints"
-        data_dir.mkdir(exist_ok=True)
+        checkpoints_dir = base_dir / "data/checkpoints"
+        checkpoints_dir.mkdir(exist_ok=True, parents=True)
 
-        conn = sqlite3.connect(data_dir / "checkpoints.db")
+        conn = sqlite3.connect(
+            checkpoints_dir / "checkpoints.db", check_same_thread=False
+        )
+        memory = SqliteSaver(conn)
 
-        return self.workflow.compile()
+        return self._build_Workflow().compile(checkpointer=memory)
+
+    def invoke(self, initial_state: GraphStatus, thread_id: Literal["raw_chat", "QQ"]):
+        return self._app.invoke(
+            initial_state, config={"configurable": {"thread_id": thread_id}}
+        )

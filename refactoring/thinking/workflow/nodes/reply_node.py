@@ -1,7 +1,6 @@
 from tools import send_msg
-from smolagents import CodeAgent, tool
+from smolagents import CodeAgent
 from utils import generate_sml_model
-from pydantic import BaseModel, Field
 from thinking_settings import thinking_settings
 from status import ReplyInput, TaskItem
 
