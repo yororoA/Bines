@@ -7,6 +7,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from pathlib import Path
 from status import GraphStatus
 from typing import Literal
+from langchain.messages import HumanMessage
 
 
 class Workflow:
@@ -67,7 +68,8 @@ class Workflow:
 
         return self._build_Workflow().compile(checkpointer=memory)
 
-    def invoke(self, initial_state: GraphStatus, thread_id: Literal["raw_chat", "QQ"]):
+    def invoke(self, input: str, thread_id: Literal["raw_chat", "QQ"]):
+        initial_state = GraphStatus(messages=[HumanMessage(content=input)])
         return self._app.invoke(
             initial_state, config={"configurable": {"thread_id": thread_id}}
         )
