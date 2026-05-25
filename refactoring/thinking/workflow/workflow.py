@@ -42,7 +42,8 @@ class Workflow:
             name="final_reply",
             description="The reply node responsible for generating final responses to user queries.",
         )
-        # todo: add context_builder node
+        # todo: add context_builder node, connect with memory_search_node
+        # context -> manager -> memory_search ---(search result)--> context -> manager
         workflow.set_entry_point("context_builder")
 
         workflow.add_edge("context_builder", "manager")
