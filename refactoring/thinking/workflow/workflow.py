@@ -18,28 +18,28 @@ class Workflow:
         workflow = StateGraph(GraphStatus)
 
         workflow.add_node(
+            "manager",
             ManagerNode,
-            name="manager",
             description="The manager node responsible for task planning and coordination.",
         )
         workflow.add_node(
+            "memory_search",
             MemorySearchNode,
-            name="memory_search",
             description="The memory search node responsible for searching memory for relevant information.",
         )
         workflow.add_node(
+            "performer",
             PerformerNode,
-            name="performer",
             description="The performer node responsible for executing tasks assigned by the manager.",
         )
         workflow.add_node(
+            "advance_reply",
             ReplyNode,
-            name="advance_reply",
             description="The reply node responsible for generating responses to user queries.",
         )
         workflow.add_node(
+            "final_reply",
             ReplyNode,
-            name="final_reply",
             description="The reply node responsible for generating final responses to user queries.",
         )
         # todo: add context_builder node, connect with memory_search_node
