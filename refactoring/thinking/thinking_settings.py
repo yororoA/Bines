@@ -8,7 +8,7 @@ class ThinkingSettings(BaseSettings):
     MIMO_API_KEY: str = ""
     DEEPSEEK_API_URL: str = ""
     DEEPSEEK_API_KEY: str = ""
-    CHECKPOINT_THREAD_ID: list[str] = ['raw_chat', 'QQ']
+    CHECKPOINT_THREAD_ID: list[str] = ['raw_chat', 'QQ_private', 'QQ_group']
     RAG_EMBEDDING_MODEL: str = "BAAI/bge-small-zh-v1.5"
     RAG_PERSIST_DIR: str = "memory_data/chroma_db"
     HF_ENDPOINT: str = ""
