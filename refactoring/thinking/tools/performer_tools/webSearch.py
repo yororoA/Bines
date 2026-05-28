@@ -1,17 +1,4 @@
-from smolagents import (
-    DuckDuckGoSearchTool,
-    WebSearchTool,
-    VisitWebpageTool,
-    CodeAgent,
-)
-from langchain.tools import tool
-from thinking_settings import thinking_settings
-from utils import generate_sml_model
-
-
-_model = generate_sml_model(thinking_settings.MODEL_SELECTED)
-
-_searchAgent = None
+from smolagents import tool, DuckDuckGoSearchTool, WebSearchTool, VisitWebpageTool
 
 
 @tool
@@ -25,19 +12,14 @@ def webSearch(query: str) -> str:
         The answer to the question.
 
     Example:
-        web_search("Who is the current president of the United States?") -> "The current president is Joe Biden."
-
+        webSearch("Who is the current president of the United States?") -> "The current president is Joe Biden."
     """
-    global _searchAgent
-    if _searchAgent is None:
-        _searchAgent = CodeAgent(
-            model=_model,
-            tools=[DuckDuckGoSearchTool(), WebSearchTool(), VisitWebpageTool()],
-            additional_authorized_imports=["datetime", "requests", "json", "httpx"],
-            system_prompt="You are a helpful assistant that can search the web. Always make sure you know the current time.",
-            max_tokens=1024,
-            max_retries=3,
-            max_steps=6,
-        )
+    search_tool = DuckDuckGoSearchTool()
+    return str(search_tool(query))
 
-    return str(_searchAgent.run(query))
+
+def get_search_tools() -> list:
+    return [DuckDuckGoSearchTool(), WebSearchTool(), VisitWebpageTool()]
+
+
+SEARCH_AUTHORIZED_IMPORTS = ["datetime", "requests", "json", "httpx"]
