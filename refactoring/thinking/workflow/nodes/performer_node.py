@@ -2,8 +2,7 @@ import logging
 
 from utils import shared_smol_model
 from smolagents import CodeAgent
-from tools import webSearch
-from tools.performer_tools.webSearch import get_search_tools, SEARCH_AUTHORIZED_IMPORTS
+from tools import get_tool_registry, PERFORMER_TOOLS
 from ..status import TaskItem
 
 logger = logging.getLogger(__name__)
@@ -19,10 +18,14 @@ def PerformerNode(task_item: TaskItem) -> dict[str, list[TaskItem]]:
 
     try:
         if _PerformerAgent is None:
+            registry = get_tool_registry()
+            tools = registry.get_tools(PERFORMER_TOOLS)
+            imports = registry.get_authorized_imports(PERFORMER_TOOLS)
+
             _PerformerAgent = CodeAgent(
                 model=shared_smol_model.get(),
-                tools=[webSearch, *get_search_tools()],
-                additional_authorized_imports=["datetime", *SEARCH_AUTHORIZED_IMPORTS],
+                tools=tools,
+                additional_authorized_imports=["datetime", *imports],
                 system_prompt="You are a helpful assistant that can search the web. Always make sure you know the current time.",
                 max_tokens=1024,
                 max_retries=3,

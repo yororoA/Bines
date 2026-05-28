@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import logging
 
-from tools import send_msg
 from smolagents import CodeAgent
 from utils import shared_smol_model
 from ..status import ReplyInput, TaskItem
 from memory import PersonaState, retrieve_for_reply, format_retrieval_results
+from tools import get_tool_registry, REPLY_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +54,14 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
 def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
     try:
         prompt = _build_reply_system_prompt(reply_input)
+        registry = get_tool_registry()
+        tools = registry.get_tools(REPLY_TOOLS)
 
         agent = CodeAgent(
             model=shared_smol_model.get(),
             name="ReplyAgent",
             description="Agent used to reply to the user.",
-            tools=[send_msg],
+            tools=tools,
             additional_authorized_imports=["datetime"],
             system_prompt=prompt,
             output_schema=list[TaskItem],
