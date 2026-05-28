@@ -19,11 +19,8 @@ async def main():
         thinking_settings.NAPCAT_WS_SERVER, thinking_settings.NAPCAT_WS_TOKEN
     )
     gc.napcat_client = napcat_client
-    stop_event = asyncio.Event()
     try:
-        con_task = asyncio.create_task(napcat_client.connect())
-        await con_task
-        await stop_event.wait()
+        await napcat_client.process_messages()
     except asyncio.CancelledError:
         logger.info("Shutting down...")
     except Exception:
