@@ -17,6 +17,8 @@ class ThinkingSettings(BaseSettings):
     NAPCAT_WS_TOKEN:str = ""
     NAPCAT_WS_RECONNECT_TIMEOUT:int = 5
     NAPCAT_WS_API_RESPONSE_TIMEOUT:int = 15
+    DEDUP_SIMILARITY_THRESHOLD: float = 0.08
+    MAX_INPUT_LENGTH: int = 4096
 
     model_config = SettingsConfigDict(
         env_file="thinking.env", env_file_encoding="utf-8"

@@ -142,7 +142,14 @@ class NapCatClient:
                 content_parts.append("[image]")
         content = " ".join(content_parts) if content_parts else raw_message
 
-        thread_id = _determine_thread_id(message_type)
+        if len(content) > thinking_settings.MAX_INPUT_LENGTH:
+            original_len = len(content)
+            content = content[:thinking_settings.MAX_INPUT_LENGTH]
+            logger.warning("Input message truncated from %d to %d chars", original_len, thinking_settings.MAX_INPUT_LENGTH)
+
+        user_id = str(data.get("user_id", ""))
+        group_id = str(data.get("group_id", ""))
+        thread_id = _determine_thread_id(message_type, user_id=user_id, group_id=group_id)
         if not thread_id:
             return
 
@@ -198,9 +205,9 @@ class NapCatClient:
             }
 
 
-def _determine_thread_id(message_type: str) -> str:
+def _determine_thread_id(message_type: str, user_id: str = "", group_id: str = "") -> str:
     if message_type == "private":
-        return "QQ_private"
+        return f"QQ_private_{user_id}" if user_id else "QQ_private"
     if message_type == "group":
-        return "QQ_group"
+        return f"QQ_group_{group_id}" if group_id else "QQ_group"
     return ""
