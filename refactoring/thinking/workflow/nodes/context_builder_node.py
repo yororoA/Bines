@@ -12,22 +12,15 @@ from memory import (
     format_retrieval_results,
     get_memory_store,
     COLLECTION_PERSONA,
+    persona_cache,
 )
 from utils.time_utils import day_key
-
-_SOUL_PROMPT: str | None = None
+from utils import file_cache
 
 
 def _load_soul_prompt() -> str:
-    global _SOUL_PROMPT
-    if _SOUL_PROMPT is not None:
-        return _SOUL_PROMPT
     soul_path = Path(__file__).resolve().parents[2] / "Personal" / "SOUL.md"
-    if soul_path.exists():
-        _SOUL_PROMPT = soul_path.read_text(encoding="utf-8")
-    else:
-        _SOUL_PROMPT = ""
-    return _SOUL_PROMPT
+    return file_cache.read(soul_path)
 
 
 def _extract_query(state: GraphStatus) -> str:
@@ -45,10 +38,16 @@ def _extract_query(state: GraphStatus) -> str:
 
 
 def _load_persona(state: GraphStatus) -> dict[str, Any]:
+    cached = persona_cache.get()
+    if cached is not None:
+        return cached
+
     store = get_memory_store()
     persona_entries = store.get_all(COLLECTION_PERSONA)
     if not persona_entries:
-        return PersonaState().to_dict()
+        snapshot = PersonaState().to_dict()
+        persona_cache.put(snapshot)
+        return snapshot
 
     by_category: dict[str, dict[str, Any]] = {}
     for entry in persona_entries:
@@ -66,7 +65,7 @@ def _load_persona(state: GraphStatus) -> dict[str, Any]:
     def _get(cat: str, default: str) -> str:
         return by_category.get(cat, {}).get("content", default)
 
-    return PersonaState(
+    snapshot = PersonaState(
         tone=_get("tone", "friendly"),
         style=_get("style", "concise"),
         verbosity=_get("verbosity", "moderate"),
@@ -76,6 +75,8 @@ def _load_persona(state: GraphStatus) -> dict[str, Any]:
         long_term_preferences=by_category.get("long_term_preferences", {}).get("content", "").split(";") if by_category.get("long_term_preferences") else [],
         tech_stack=by_category.get("tech_stack", {}).get("content", "").split(";") if by_category.get("tech_stack") else [],
     ).to_dict()
+    persona_cache.put(snapshot)
+    return snapshot
 
 
 def _build_rag_recall(query: str) -> dict[str, Any]:

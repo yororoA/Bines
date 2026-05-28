@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from langchain.messages import SystemMessage
 from langgraph.types import Command, Send
 
-from utils import generate_langchain_model
-from thinking_settings import thinking_settings
+from utils import shared_langchain_model
 from ..status import GraphStatus, ManagerRoute, ReplyInput, MAX_ITERATIONS
 from memory import PersonaState
 
-_model = generate_langchain_model(thinking_settings.MODEL_SELECTED)
-ManagerModel = _model.with_structured_output(ManagerRoute)
+logger = logging.getLogger(__name__)
+
+ManagerModel = shared_langchain_model.get_structured(ManagerRoute)
+
+_CONVERGENCE_WINDOW = 3
 
 
 def _get_done_ids(state: GraphStatus) -> set[str]:
@@ -26,6 +29,32 @@ def _get_done_ids(state: GraphStatus) -> set[str]:
             if task_id:
                 done_ids.add(task_id)
     return done_ids
+
+
+def _extract_task_count(thought: str) -> int | None:
+    marker = "[task_count="
+    start = thought.find(marker)
+    if start == -1:
+        return None
+    start += len(marker)
+    end = thought.find("]", start)
+    if end == -1:
+        return None
+    try:
+        return int(thought[start:end])
+    except ValueError:
+        return None
+
+
+def _check_convergence(state: GraphStatus) -> bool:
+    thoughts = state.get("thoughts", [])
+    if len(thoughts) < _CONVERGENCE_WINDOW:
+        return False
+    recent = thoughts[-_CONVERGENCE_WINDOW:]
+    counts = [_extract_task_count(t) for t in recent]
+    if any(c is None for c in counts):
+        return False
+    return len(set(counts)) == 1
 
 
 def _assemble_manager_context(state: GraphStatus) -> list[Any]:
@@ -72,14 +101,37 @@ def ManagerNode(
     state: GraphStatus,
 ) -> Command[Literal["performer", "advance_reply", "final_reply"]]:
     current_iteration = state.get("iteration_count", 0) + 1
-    context_messages = _assemble_manager_context(state)
-    result: ManagerRoute = ManagerModel.invoke(context_messages)
+    done_ids = _get_done_ids(state)
+    task_count = len(done_ids)
+
     state_update: dict[str, Any] = {
-        "thoughts": [result.thoughts],
         "iteration_count": current_iteration,
     }
 
     soul_prompt = state.get("soul_prompt", "")
+
+    if current_iteration > 1 and _check_convergence(state):
+        logger.info(
+            "Convergence detected at iteration %d with %d tasks done",
+            current_iteration, task_count,
+        )
+        reply_input = ReplyInput(
+            tasks=[],
+            Final=True,
+            message=f"[system: all tasks completed, {task_count} tasks done]",
+            persona_snapshot=state.get("persona_snapshot", {}),
+            already_said=state.get("already_said", []),
+            soul_prompt=soul_prompt,
+        )
+        state_update["thoughts"] = [
+            f"[Convergence] No new tasks for {_CONVERGENCE_WINDOW} iterations. "
+            f"Total tasks: {task_count}"
+        ]
+        return Command(
+            update=state_update,
+            goto=[Send("final_reply", reply_input)],
+        )
+
     if current_iteration >= MAX_ITERATIONS:
         reply_input = ReplyInput(
             tasks=[],
@@ -93,6 +145,12 @@ def ManagerNode(
             update=state_update,
             goto=[Send("final_reply", reply_input)],
         )
+
+    context_messages = _assemble_manager_context(state)
+    result: ManagerRoute = ManagerModel.invoke(context_messages)
+
+    thought_with_count = f"{result.thoughts} [task_count={task_count}]"
+    state_update["thoughts"] = [thought_with_count]
 
     if result.goto_final_reply:
         reply_input = ReplyInput(
@@ -123,7 +181,6 @@ def ManagerNode(
         )
 
     if result.performer_task is not None:
-        done_ids = _get_done_ids(state)
         if result.performer_task.task_id not in done_ids:
             return Command(
                 update=state_update,

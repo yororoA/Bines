@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..status import GraphStatus
@@ -10,8 +11,19 @@ from memory import (
     add_to_buffer,
     get_existing_diary_day_keys,
     consolidate_buffer_to_diary,
+    get_memory_store,
+    COLLECTION_SUMMARY,
+    COLLECTION_KNOWLEDGE,
+    COLLECTION_DIARY,
 )
 from utils.time_utils import day_key
+from utils import get_metrics_collector
+
+logger = logging.getLogger(__name__)
+
+_DIARY_TRIGGERED_TODAY: str | None = None
+_INVOCATION_COUNT: int = 0
+_DECAY_INTERVAL: int = 5
 
 
 def _collect_messages_text(state: GraphStatus) -> str:
@@ -58,38 +70,69 @@ def _extract_context_for_memory(state: GraphStatus) -> str:
     return "\n\n".join(parts)
 
 
-_DIARY_TRIGGERED_TODAY: str | None = None
-
-
 def _should_trigger_diary() -> bool:
+    global _DIARY_TRIGGERED_TODAY
     current_day = day_key()
+
     if _DIARY_TRIGGERED_TODAY == current_day:
         return False
+
     existing_days = get_existing_diary_day_keys()
-    return current_day not in existing_days
+    if current_day not in existing_days:
+        return True
+
+    _DIARY_TRIGGERED_TODAY = current_day
+    return False
+
+
+def _run_memory_decay():
+    store = get_memory_store()
+    for col in (COLLECTION_SUMMARY, COLLECTION_KNOWLEDGE, COLLECTION_DIARY):
+        try:
+            removed = store.decay_collection(col)
+            if removed:
+                logger.info("Decay: removed %d entries from %s", removed, col)
+        except Exception:
+            logger.exception("Failed to decay collection %s", col)
 
 
 def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
-    global _DIARY_TRIGGERED_TODAY
-    context_text = _extract_context_for_memory(state)
+    global _DIARY_TRIGGERED_TODAY, _INVOCATION_COUNT
+    _INVOCATION_COUNT += 1
 
-    if context_text:
-        persona = PersonaState.from_dict(
-            state.get("persona_snapshot", {})
-        )
-        judgment: MemoryJudgment = judge_and_store(
-            context_text, persona=persona
-        )
+    collector = get_metrics_collector()
 
-        if judgment.should_store and judgment.memory_type == "summary":
-            add_to_buffer(
-                judgment.rewritten_content or context_text,
-                metadata={"topic": judgment.topic, "importance": judgment.importance},
-            )
+    with collector.track_node("dynamic_agent") as metrics:
+        context_text = _extract_context_for_memory(state)
 
-    if _should_trigger_diary():
-        result = consolidate_buffer_to_diary(day_key())
-        if result:
-            _DIARY_TRIGGERED_TODAY = day_key()
+        if context_text:
+            try:
+                persona = PersonaState.from_dict(
+                    state.get("persona_snapshot", {})
+                )
+                judgment: MemoryJudgment = judge_and_store(
+                    context_text, persona=persona
+                )
+
+                if judgment.should_store and judgment.memory_type == "summary":
+                    add_to_buffer(
+                        judgment.rewritten_content or context_text,
+                        metadata={"topic": judgment.topic, "importance": judgment.importance},
+                    )
+
+                metrics.token_estimate += len(context_text) // 4
+            except Exception:
+                logger.exception("Memory judgment/storage failed")
+
+        if _should_trigger_diary():
+            try:
+                result = consolidate_buffer_to_diary(day_key())
+                if result:
+                    _DIARY_TRIGGERED_TODAY = day_key()
+            except Exception:
+                logger.exception("Diary consolidation failed")
+
+        if _INVOCATION_COUNT % _DECAY_INTERVAL == 0:
+            _run_memory_decay()
 
     return {}

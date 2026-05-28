@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 from tools import send_msg
 from smolagents import CodeAgent
-from utils import generate_sml_model
-from thinking_settings import thinking_settings
+from utils import shared_smol_model
 from ..status import ReplyInput, TaskItem
 from memory import PersonaState, retrieve_for_reply, format_retrieval_results
 
-_model = generate_sml_model(thinking_settings.MODEL_SELECTED)
+logger = logging.getLogger(__name__)
 
 
 def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
@@ -51,28 +52,36 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
 
 
 def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
-    prompt = _build_reply_system_prompt(reply_input)
+    try:
+        prompt = _build_reply_system_prompt(reply_input)
 
-    agent = CodeAgent(
-        model=_model,
-        name="ReplyAgent",
-        description="Agent used to reply to the user.",
-        tools=[send_msg],
-        additional_authorized_imports=["datetime"],
-        system_prompt=prompt,
-        output_schema=list[TaskItem],
-        max_tokens=1024,
-        max_retries=3,
-        max_steps=6,
-    )
+        agent = CodeAgent(
+            model=shared_smol_model.get(),
+            name="ReplyAgent",
+            description="Agent used to reply to the user.",
+            tools=[send_msg],
+            additional_authorized_imports=["datetime"],
+            system_prompt=prompt,
+            output_schema=list[TaskItem],
+            max_tokens=1024,
+            max_retries=3,
+            max_steps=6,
+        )
 
-    feedback: list[TaskItem] = agent.run(
-        {"tasks": reply_input.tasks, "message": reply_input.message}
-    )
+        feedback: list[TaskItem] = agent.run(
+            {"tasks": reply_input.tasks, "message": reply_input.message}
+        )
 
-    already_said_entries = [item.description for item in feedback if item.description]
+        already_said_entries = [item.description for item in feedback if item.description]
 
-    return {
-        "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": feedback},
-        "already_said": already_said_entries,
-    }
+        return {
+            "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": feedback},
+            "already_said": already_said_entries,
+        }
+    except Exception as e:
+        logger.exception("ReplyNode failed")
+        fallback = [TaskItem(task_id="reply_error", description=str(reply_input.message or ""))]
+        return {
+            "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": fallback},
+            "already_said": [],
+        }
