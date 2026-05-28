@@ -117,7 +117,7 @@ def judge_and_store(
         content=content,
     )
 
-    model = _get_judge_model()
+    model = shared_langchain_model.get_structured(MemoryJudgment)
     judgment: MemoryJudgment = model.invoke(prompt)
 
     if not judgment.should_store:
@@ -155,6 +155,8 @@ def judge_and_store(
         _cleanup_low_confidence_persona(
             memory_store, judgment.category, judgment.confidence
         )
+        persona_cache.invalidate()
+        logger.debug("Persona cache invalidated after storing category=%s", judgment.category)
 
     return judgment
 

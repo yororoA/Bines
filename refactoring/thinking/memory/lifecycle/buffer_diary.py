@@ -52,18 +52,8 @@ def get_existing_diary_day_keys(
     return sorted(seen)
 
 
-_DIARY_MODEL = None
-
-
-def _get_diary_model():
-    global _DIARY_MODEL
-    if _DIARY_MODEL is None:
-        _DIARY_MODEL = generate_langchain_model(thinking_settings.MODEL_SELECTED)
-    return _DIARY_MODEL
-
-
 def _summarize_diary_with_llm(buffer_contents: list[str], target_day_key: str) -> str:
-    model = _get_diary_model()
+    model = shared_langchain_model.get()
     fragments = "\n---\n".join(buffer_contents)
     prompt = (
         "You are a diary writer for an AI assistant. "

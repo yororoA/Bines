@@ -17,6 +17,9 @@ DEFAULT_PERSONA_K = 4
 DEFAULT_DIARY_K = 2
 
 
+RETRIEVAL_SCORE_THRESHOLD = 1.5
+
+
 def retrieve_memories(
     query: str,
     summary_k: int = DEFAULT_SUMMARY_K,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,3 +40,31 @@ class PersonaState:
             long_term_preferences=data.get("long_term_preferences", []),
             tech_stack=data.get("tech_stack", []),
         )
+
+
+class PersonaCache:
+    def __init__(self):
+        self._cached: dict[str, Any] | None = None
+        self._version: int = 0
+        self._lock = threading.Lock()
+
+    def get(self) -> dict[str, Any] | None:
+        with self._lock:
+            return self._cached
+
+    def put(self, snapshot: dict[str, Any]):
+        with self._lock:
+            self._cached = snapshot
+            self._version += 1
+
+    def invalidate(self):
+        with self._lock:
+            self._cached = None
+            self._version += 1
+
+    @property
+    def version(self) -> int:
+        return self._version
+
+
+persona_cache = PersonaCache()

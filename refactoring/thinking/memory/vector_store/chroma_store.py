@@ -151,6 +151,52 @@ class ChromaMemoryStore:
         store = self._get_collection(collection)
         store.delete(ids=ids)
 
+    def decay_collection(
+        self,
+        collection: str,
+        half_life_days: float = DECAY_HALF_LIFE_DAYS,
+        min_effective_importance: float = DECAY_MIN_IMPORTANCE,
+        max_entries: int = DECAY_MAX_ENTRIES,
+    ) -> int:
+        entries = self.get_all(collection)
+        if not entries:
+            return 0
+
+        now = datetime.now()
+        to_delete: list[str] = []
+        scored: list[tuple[str, float]] = []
+
+        for entry in entries:
+            meta = entry.get("metadata", {})
+            importance = meta.get("importance", 5.0)
+            created_at_str = meta.get("created_at", "")
+            try:
+                created_at = datetime.fromisoformat(created_at_str)
+            except (ValueError, TypeError):
+                created_at = now
+
+            age_days = (now - created_at).total_seconds() / 86400
+            decay_factor = math.exp(-0.693 * age_days / half_life_days)
+            effective_importance = importance * decay_factor
+
+            if effective_importance < min_effective_importance:
+                to_delete.append(entry["id"])
+            else:
+                scored.append((entry["id"], effective_importance))
+
+        if len(scored) > max_entries:
+            scored.sort(key=lambda x: x[1])
+            excess = len(scored) - max_entries
+            to_delete.extend(entry_id for entry_id, _ in scored[:excess])
+
+        if to_delete:
+            self.delete_by_ids(collection, to_delete)
+            logger.info(
+                "Decayed %s: removed %d entries", collection, len(to_delete)
+            )
+
+        return len(to_delete)
+
     def get_collection_names(self) -> list[str]:
         return list(self._collections.keys())
 

@@ -1,4 +1,4 @@
-from .persona_state import PersonaState
+from .persona_state import PersonaState, PersonaCache, persona_cache
 from .vector_store import (
     ChromaMemoryStore,
     get_memory_store,
@@ -27,6 +27,8 @@ from .lifecycle import (
 
 __all__ = [
     "PersonaState",
+    "PersonaCache",
+    "persona_cache",
     "ChromaMemoryStore",
     "get_memory_store",
     "COLLECTION_SUMMARY",
