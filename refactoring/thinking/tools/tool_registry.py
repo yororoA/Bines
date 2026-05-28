@@ -67,6 +67,22 @@ def get_tool_registry() -> ToolRegistry:
 def register_default_tools():
     from tools.performer_tools.webSearch import webSearch, get_search_tools, SEARCH_AUTHORIZED_IMPORTS
     from tools.napcat_tools.common_msgs.cmsg_tools import send_msg
+    from tools.napcat_tools.common_msgs.msg_tools import (
+        delete_msg,
+        get_msg,
+        send_forward_msg,
+        send_group_forward_msg,
+        send_private_forward_msg,
+        get_group_msg_history,
+        get_friend_msg_history,
+    )
+    from tools.napcat_tools.common_msgs.group_tools import (
+        get_group_list,
+        get_group_info,
+        get_group_member_list,
+        get_group_member_info,
+    )
+    from tools.napcat_tools.common_msgs.interact_tools import send_poke
 
     registry = get_tool_registry()
     if registry._defaults_registered:
@@ -76,4 +92,17 @@ def register_default_tools():
     registry.register_tool(PERFORMER_TOOLS, webSearch, SEARCH_AUTHORIZED_IMPORTS)
     for tool in get_search_tools():
         registry.register_tool(PERFORMER_TOOLS, tool)
+
     registry.register_tool(REPLY_TOOLS, send_msg)
+    registry.register_tool(REPLY_TOOLS, delete_msg)
+    registry.register_tool(REPLY_TOOLS, get_msg)
+    registry.register_tool(REPLY_TOOLS, send_forward_msg)
+    registry.register_tool(REPLY_TOOLS, send_group_forward_msg)
+    registry.register_tool(REPLY_TOOLS, send_private_forward_msg)
+    registry.register_tool(REPLY_TOOLS, get_group_msg_history)
+    registry.register_tool(REPLY_TOOLS, get_friend_msg_history)
+    registry.register_tool(REPLY_TOOLS, get_group_list)
+    registry.register_tool(REPLY_TOOLS, get_group_info)
+    registry.register_tool(REPLY_TOOLS, get_group_member_list)
+    registry.register_tool(REPLY_TOOLS, get_group_member_info)
+    registry.register_tool(REPLY_TOOLS, send_poke)
