@@ -3,16 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from langchain.chat_models import init_chat_model
-
 from thinking_settings import thinking_settings
 from ..vector_store.chroma_store import (
     ChromaMemoryStore,
     get_memory_store,
-    COLLECTION_SUMMARY,
+    COLLECTION_BUFFER,
     COLLECTION_DIARY,
     COLLECTION_SLICED_DIARY,
 )
+from utils import generate_langchain_model
 from utils.time_utils import day_key
 
 
@@ -26,7 +25,7 @@ def add_to_buffer(
     meta["source"] = "buffer"
     meta["day_key"] = day_key()
     meta["created_at"] = datetime.now().isoformat()
-    return memory_store.add(COLLECTION_SUMMARY, content, metadata=meta)
+    return memory_store.add(COLLECTION_BUFFER, content, metadata=meta)
 
 
 def get_buffer_by_day(
@@ -37,7 +36,7 @@ def get_buffer_by_day(
     filter_dict: dict[str, Any] = {"source": "buffer"}
     if target_day_key:
         filter_dict["day_key"] = target_day_key
-    return memory_store.get_all(COLLECTION_SUMMARY, filter=filter_dict)
+    return memory_store.get_all(COLLECTION_BUFFER, filter=filter_dict)
 
 
 def get_existing_diary_day_keys(
@@ -59,12 +58,7 @@ _DIARY_MODEL = None
 def _get_diary_model():
     global _DIARY_MODEL
     if _DIARY_MODEL is None:
-        _DIARY_MODEL = init_chat_model(
-            model_provider="openai",
-            model=thinking_settings.MODEL_SELECTED,
-            base_url=thinking_settings.DEEPSEEK_API_URL,
-            api_key=thinking_settings.DEEPSEEK_API_KEY,
-        )
+        _DIARY_MODEL = generate_langchain_model(thinking_settings.MODEL_SELECTED)
     return _DIARY_MODEL
 
 
@@ -129,6 +123,6 @@ def consolidate_buffer_to_diary(
         }
         memory_store.add(COLLECTION_SLICED_DIARY, para, metadata=slice_meta)
 
-    memory_store.delete_by_ids(COLLECTION_SUMMARY, buffer_ids)
+    memory_store.delete_by_ids(COLLECTION_BUFFER, buffer_ids)
 
     return diary_id

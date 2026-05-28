@@ -7,6 +7,7 @@ from .vector_store import (
     COLLECTION_PERSONA,
     COLLECTION_DIARY,
     COLLECTION_SLICED_DIARY,
+    COLLECTION_BUFFER,
     ALL_COLLECTIONS,
 )
 from .retrieval import (
@@ -33,6 +34,7 @@ __all__ = [
     "COLLECTION_PERSONA",
     "COLLECTION_DIARY",
     "COLLECTION_SLICED_DIARY",
+    "COLLECTION_BUFFER",
     "ALL_COLLECTIONS",
     "retrieve_memories",
     "retrieve_for_reply",

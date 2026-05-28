@@ -3,19 +3,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, Field
 
 from thinking_settings import thinking_settings
 from ..vector_store.chroma_store import (
     ChromaMemoryStore,
     get_memory_store,
-    COLLECTION_SUMMARY,
     COLLECTION_KNOWLEDGE,
     COLLECTION_PERSONA,
     COLLECTION_DIARY,
 )
 from ..persona_state import PersonaState
+from utils import generate_langchain_model
 from utils.time_utils import day_key
 
 MemoryType = Literal["summary", "knowledge", "persona", "diary"]
@@ -74,12 +73,7 @@ _JUDGE_MODEL = None
 def _get_judge_model():
     global _JUDGE_MODEL
     if _JUDGE_MODEL is None:
-        base_model = init_chat_model(
-            model_provider="openai",
-            model=thinking_settings.MODEL_SELECTED,
-            base_url=thinking_settings.DEEPSEEK_API_URL,
-            api_key=thinking_settings.DEEPSEEK_API_KEY,
-        )
+        base_model = generate_langchain_model(thinking_settings.MODEL_SELECTED)
         _JUDGE_MODEL = base_model.with_structured_output(MemoryJudgment)
     return _JUDGE_MODEL
 
@@ -129,6 +123,9 @@ def judge_and_store(
     if not judgment.should_store:
         return judgment
 
+    if judgment.memory_type == "summary":
+        return judgment
+
     final_content = judgment.rewritten_content or content
     final_meta = metadata or {}
     final_meta["importance"] = judgment.importance
@@ -146,7 +143,6 @@ def judge_and_store(
         final_meta["updated_at"] = datetime.now().isoformat()
 
     collection_map = {
-        "summary": COLLECTION_SUMMARY,
         "knowledge": COLLECTION_KNOWLEDGE,
         "persona": COLLECTION_PERSONA,
         "diary": COLLECTION_DIARY,
@@ -155,4 +151,25 @@ def judge_and_store(
     target_collection = collection_map[judgment.memory_type]
     memory_store.add(target_collection, final_content, metadata=final_meta)
 
+    if judgment.memory_type == "persona" and judgment.category:
+        _cleanup_low_confidence_persona(
+            memory_store, judgment.category, judgment.confidence
+        )
+
     return judgment
+
+
+def _cleanup_low_confidence_persona(
+    store: ChromaMemoryStore,
+    category: str,
+    new_confidence: float,
+) -> None:
+    entries = store.get_all(
+        COLLECTION_PERSONA, filter={"category": category}
+    )
+    ids_to_delete = [
+        e["id"] for e in entries
+        if e.get("metadata", {}).get("confidence", 0) < new_confidence
+    ]
+    if ids_to_delete:
+        store.delete_by_ids(COLLECTION_PERSONA, ids_to_delete)
