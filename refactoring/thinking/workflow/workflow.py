@@ -1,6 +1,5 @@
 import sqlite3
 from pathlib import Path
-from typing import Literal
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -79,6 +78,7 @@ class Workflow:
         conn = sqlite3.connect(
             checkpoints_dir / "checkpoints.db", check_same_thread=False
         )
+        conn.execute("PRAGMA journal_mode=WAL")
         memory = SqliteSaver(conn)
 
         return self._build_Workflow().compile(checkpointer=memory)
@@ -86,7 +86,7 @@ class Workflow:
     def invoke(
         self,
         input: str,
-        thread_id: Literal["raw_chat", "QQ_private", "QQ_group"],
+        thread_id: str,
     ):
         initial_state = GraphStatus(messages=[HumanMessage(content=input)])
         return self._app.invoke(

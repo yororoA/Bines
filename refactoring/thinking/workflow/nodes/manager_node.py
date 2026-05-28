@@ -7,7 +7,7 @@ from langchain.messages import SystemMessage
 from langgraph.types import Command, Send
 
 from utils import shared_langchain_model
-from ..status import GraphStatus, ManagerRoute, ReplyInput, MAX_ITERATIONS
+from ..status import GraphStatus, ManagerRoute, PerformerInput, ReplyInput, MAX_ITERATIONS
 from memory import PersonaState
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,22 @@ def ManagerNode(
         )
 
     context_messages = _assemble_manager_context(state)
-    result: ManagerRoute = ManagerModel.invoke(context_messages)
+    try:
+        result: ManagerRoute = ManagerModel.invoke(context_messages)
+    except Exception:
+        logger.exception("ManagerModel invoke failed, falling back to final_reply")
+        reply_input = ReplyInput(
+            tasks=[],
+            Final=True,
+            message="",
+            persona_snapshot=state.get("persona_snapshot", {}),
+            already_said=state.get("already_said", []),
+            soul_prompt=soul_prompt,
+        )
+        return Command(
+            update=state_update,
+            goto=[Send("final_reply", reply_input)],
+        )
 
     thought_with_count = f"{result.thoughts} [task_count={task_count}]"
     state_update["thoughts"] = [thought_with_count]
@@ -180,12 +195,12 @@ def ManagerNode(
             goto=[Send("advance_reply", reply_input)],
         )
 
-    if result.performer_task is not None:
-        if result.performer_task.task_id not in done_ids:
-            return Command(
-                update=state_update,
-                goto=[Send("performer", result.performer_task)],
-            )
+    pending_tasks = [t for t in result.performer_tasks if t.task_id not in done_ids]
+    if pending_tasks:
+        return Command(
+            update=state_update,
+            goto=[Send("performer", PerformerInput(task_item=task, soul_prompt=soul_prompt)) for task in pending_tasks],
+        )
 
     reply_input = ReplyInput(
         tasks=[],

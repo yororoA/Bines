@@ -51,6 +51,8 @@ def StatusTrimNode(state: GraphStatus) -> dict:
         "rag_recall": {},
         "soul_prompt": "",
         "already_said": _RESET,
+        "diary_triggered_day": state.get("diary_triggered_day", ""),
+        "invocation_count": state.get("invocation_count", 0),
     }
 
     if len(messages) >= MESSAGE_WINDOW_SIZE:
@@ -62,10 +64,8 @@ def StatusTrimNode(state: GraphStatus) -> dict:
             summary_msg = SystemMessage(
                 content=f"[Earlier conversation summary]\n{summary}"
             )
-            result["messages"] = _RESET
             result["messages"] = [summary_msg] + to_keep
         else:
-            result["messages"] = _RESET
             result["messages"] = to_keep
 
         logger.info(

@@ -9,6 +9,11 @@ class TaskItem(BaseModel):
     description: str = Field(description="Detailed purpose of the task")
 
 
+class PerformerInput(BaseModel):
+    task_item: TaskItem
+    soul_prompt: str = ""
+
+
 class ReplyInput(BaseModel):
     tasks: list[TaskItem] = Field(default_factory=list)
     Final: bool = Field(default=False)
@@ -28,10 +33,10 @@ class ReplyInput(BaseModel):
 
 
 class ManagerRoute(BaseModel):
-    performer_task: Optional[TaskItem] = Field(
-        default=None,
-        description="The single task to send to the performer node. "
-        "Set to None if no more tasks are needed.",
+    performer_tasks: list[TaskItem] = Field(
+        default_factory=list,
+        description="List of tasks to send to performer nodes. "
+        "Leave empty if no more tasks are needed.",
     )
     goto_advance_reply: bool = Field(
         default=False,

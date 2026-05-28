@@ -49,3 +49,5 @@ class GraphStatus(TypedDict):
     rag_recall: dict
     soul_prompt: str
     already_said: Annotated[list[str], add_list_str]
+    diary_triggered_day: str
+    invocation_count: int
