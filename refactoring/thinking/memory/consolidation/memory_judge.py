@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Literal
 
@@ -13,9 +14,11 @@ from ..vector_store.chroma_store import (
     COLLECTION_PERSONA,
     COLLECTION_DIARY,
 )
-from ..persona_state import PersonaState
+from ..persona_state import PersonaState, persona_cache
 from utils import generate_langchain_model
 from utils.time_utils import day_key
+
+logger = logging.getLogger(__name__)
 
 MemoryType = Literal["summary", "knowledge", "persona", "diary"]
 
@@ -117,7 +120,7 @@ def judge_and_store(
         content=content,
     )
 
-    model = shared_langchain_model.get_structured(MemoryJudgment)
+    model = _get_judge_model()
     judgment: MemoryJudgment = model.invoke(prompt)
 
     if not judgment.should_store:

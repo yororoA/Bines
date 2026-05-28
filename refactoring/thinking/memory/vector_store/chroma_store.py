@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import math
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +12,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 from thinking_settings import thinking_settings
 from utils.time_utils import day_key
+
+logger = logging.getLogger(__name__)
 
 COLLECTION_SUMMARY = "summary"
 COLLECTION_KNOWLEDGE = "knowledge"
@@ -27,6 +31,9 @@ ALL_COLLECTIONS = [
     COLLECTION_BUFFER,
 ]
 
+DECAY_HALF_LIFE_DAYS = 30.0
+DECAY_MIN_IMPORTANCE = 1.0
+DECAY_MAX_ENTRIES = 500
 
 _global_embeddings: HuggingFaceEmbeddings | None = None
 
@@ -72,6 +79,20 @@ class ChromaMemoryStore:
     ) -> str:
         store = self._get_collection(collection)
         _id = doc_id or uuid.uuid4().hex
+
+        try:
+            similar = store.similarity_search_with_score(content, k=1)
+            if similar:
+                _, score = similar[0]
+                if score < thinking_settings.DEDUP_SIMILARITY_THRESHOLD:
+                    logger.debug(
+                        "Skipping duplicate in %s (score=%.4f < threshold=%.4f)",
+                        collection, score, thinking_settings.DEDUP_SIMILARITY_THRESHOLD,
+                    )
+                    return _id
+        except Exception:
+            logger.debug("Dedup check failed for %s, proceeding with add", collection)
+
         meta = metadata or {}
         if "memory_type" not in meta:
             meta["memory_type"] = collection
