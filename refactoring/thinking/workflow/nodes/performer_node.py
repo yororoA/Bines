@@ -2,6 +2,7 @@ from utils import generate_sml_model
 from smolagents import CodeAgent
 from thinking_settings import thinking_settings
 from tools import webSearch
+from tools.performer_tools.webSearch import get_search_tools, SEARCH_AUTHORIZED_IMPORTS
 from ..status import TaskItem
 
 _performer_model = generate_sml_model(thinking_settings.MODEL_SELECTED)
@@ -18,8 +19,8 @@ def PerformerNode(task_item: TaskItem) -> dict[str, list[TaskItem]]:
     if _PerformerAgent is None:
         _PerformerAgent = CodeAgent(
             model=_performer_model,
-            tools=[webSearch],
-            additional_authorized_imports=["datetime"],
+            tools=[webSearch, *get_search_tools()],
+            additional_authorized_imports=["datetime", *SEARCH_AUTHORIZED_IMPORTS],
             system_prompt="You are a helpful assistant that can search the web. Always make sure you know the current time.",
             max_tokens=1024,
             max_retries=3,

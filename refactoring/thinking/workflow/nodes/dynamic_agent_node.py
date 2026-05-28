@@ -62,19 +62,15 @@ _DIARY_TRIGGERED_TODAY: str | None = None
 
 
 def _should_trigger_diary() -> bool:
-    global _DIARY_TRIGGERED_TODAY
     current_day = day_key()
     if _DIARY_TRIGGERED_TODAY == current_day:
         return False
     existing_days = get_existing_diary_day_keys()
-    if current_day not in existing_days:
-        _DIARY_TRIGGERED_TODAY = current_day
-        return True
-    _DIARY_TRIGGERED_TODAY = current_day
-    return False
+    return current_day not in existing_days
 
 
 def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
+    global _DIARY_TRIGGERED_TODAY
     context_text = _extract_context_for_memory(state)
 
     if context_text:
@@ -92,6 +88,8 @@ def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
             )
 
     if _should_trigger_diary():
-        consolidate_buffer_to_diary(day_key())
+        result = consolidate_buffer_to_diary(day_key())
+        if result:
+            _DIARY_TRIGGERED_TODAY = day_key()
 
     return {}

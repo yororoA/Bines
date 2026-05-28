@@ -1,5 +1,5 @@
 from .manager_route import ManagerRoute, ReplyInput, TaskItem
-from .graph_status import GraphStatus, _RESET
+from .graph_status import GraphStatus, _RESET, MAX_ITERATIONS
 
 __all__ = [
     "ManagerRoute",
@@ -7,4 +7,5 @@ __all__ = [
     "TaskItem",
     "ReplyInput",
     "_RESET",
+    "MAX_ITERATIONS",
 ]

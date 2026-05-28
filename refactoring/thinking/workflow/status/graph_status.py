@@ -9,11 +9,14 @@ _RESET = type("_RESET", (), {"__repr__": lambda self: "_RESET"})()
 Since LangGraph TypedDict reducer fields cannot be overwritten (they are always
 fed through the reducer function), _RESET acts as a special signal:
 - merge_tasks: returns empty dict when right is _RESET
-- add_str: returns empty string when right is _RESET
+- cap_list: returns empty list when right is _RESET
 - add_list_str: returns empty list when right is _RESET
 
 Usage: return {"field_name": _RESET} from a node to clear that field.
 """
+
+MAX_THOUGHTS = 10
+MAX_ITERATIONS = 10
 
 
 def merge_tasks(left: dict, right: dict) -> dict:
@@ -32,10 +35,11 @@ def merge_tasks(left: dict, right: dict) -> dict:
     return merged
 
 
-def add_str(left: str, right: str) -> str:
+def cap_list(left: list[str], right: list[str]) -> list[str]:
     if right is _RESET:
-        return ""
-    return (left or "") + (right or "")
+        return []
+    merged = (left or []) + (right or [])
+    return merged[-MAX_THOUGHTS:]
 
 
 def add_list_str(left: list[str], right: list[str]) -> list[str]:
@@ -47,7 +51,9 @@ def add_list_str(left: list[str], right: list[str]) -> list[str]:
 class GraphStatus(TypedDict):
     messages: Annotated[list[AnyMessage], add]
     tasks_done: Annotated[dict[str, list[TaskItem]], merge_tasks]
-    thoughts: Annotated[str, add_str]
+    thoughts: Annotated[list[str], cap_list]
+    iteration_count: int
     persona_snapshot: dict
     rag_recall: dict
+    soul_prompt: str
     already_said: Annotated[list[str], add_list_str]

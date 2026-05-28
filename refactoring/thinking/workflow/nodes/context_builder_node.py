@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from langchain.messages import HumanMessage
@@ -13,6 +14,20 @@ from memory import (
     COLLECTION_PERSONA,
 )
 from utils.time_utils import day_key
+
+_SOUL_PROMPT: str | None = None
+
+
+def _load_soul_prompt() -> str:
+    global _SOUL_PROMPT
+    if _SOUL_PROMPT is not None:
+        return _SOUL_PROMPT
+    soul_path = Path(__file__).resolve().parents[2] / "Personal" / "SOUL.md"
+    if soul_path.exists():
+        _SOUL_PROMPT = soul_path.read_text(encoding="utf-8")
+    else:
+        _SOUL_PROMPT = ""
+    return _SOUL_PROMPT
 
 
 def _extract_query(state: GraphStatus) -> str:
@@ -48,13 +63,18 @@ def _load_persona(state: GraphStatus) -> dict[str, Any]:
                 "confidence": conf,
             }
 
-    tone = by_category.get("tone", {}).get("content", "friendly")
-    style = by_category.get("style", {}).get("content", "concise")
-    role_identity = by_category.get("role_identity", {}).get("content", "assistant")
+    def _get(cat: str, default: str) -> str:
+        return by_category.get(cat, {}).get("content", default)
+
     return PersonaState(
-        tone=tone,
-        style=style,
-        role_identity=role_identity,
+        tone=_get("tone", "friendly"),
+        style=_get("style", "concise"),
+        verbosity=_get("verbosity", "moderate"),
+        role_identity=_get("role_identity", "assistant"),
+        speaking_habits=by_category.get("speaking_habits", {}).get("content", "").split(";") if by_category.get("speaking_habits") else [],
+        interaction_strategy=_get("interaction_strategy", "collaborative"),
+        long_term_preferences=by_category.get("long_term_preferences", {}).get("content", "").split(";") if by_category.get("long_term_preferences") else [],
+        tech_stack=by_category.get("tech_stack", {}).get("content", "").split(";") if by_category.get("tech_stack") else [],
     ).to_dict()
 
 
@@ -75,7 +95,9 @@ def ContextBuilderNode(state: GraphStatus) -> dict:
     query = _extract_query(state)
     persona_snapshot = _load_persona(state)
     rag_recall = _build_rag_recall(query)
+    soul_prompt = _load_soul_prompt()
     return {
         "persona_snapshot": persona_snapshot,
         "rag_recall": rag_recall,
+        "soul_prompt": soul_prompt,
     }

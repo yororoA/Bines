@@ -5,7 +5,7 @@ from smolagents import CodeAgent
 from utils import generate_sml_model
 from thinking_settings import thinking_settings
 from ..status import ReplyInput, TaskItem
-from memory import PersonaState
+from memory import PersonaState, retrieve_for_reply, format_retrieval_results
 
 _model = generate_sml_model(thinking_settings.MODEL_SELECTED)
 
@@ -22,27 +22,37 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
         "and the `description` is the feedback of the task."
     )
 
+    parts = [base_prompt]
+
+    if reply_input.soul_prompt:
+        parts.append(reply_input.soul_prompt)
+
     persona_str = (
         f"\n\n[Persona] Tone: {persona.tone}, Style: {persona.style}, "
         f"Role: {persona.role_identity}"
     )
+    parts.append(persona_str)
 
-    already_said_str = ""
+    if reply_input.message:
+        results = retrieve_for_reply(reply_input.message)
+        formatted = format_retrieval_results(results)
+        if formatted:
+            parts.append(f"\n\n[RAG Context]\n{formatted}")
+
     if reply_input.already_said:
         already_said_str = (
             "\n\n[Already Said] You have already told the user: "
             + "; ".join(reply_input.already_said[-5:])
             + "\nAvoid repeating these points."
         )
+        parts.append(already_said_str)
 
-    return base_prompt + persona_str + already_said_str
+    return "\n".join(parts)
 
 
 def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
     prompt = _build_reply_system_prompt(reply_input)
 
-    # CodeAgent must be recreated each call because system_prompt carries
-    # dynamic persona + already_said from the current ReplyInput.
     agent = CodeAgent(
         model=_model,
         name="ReplyAgent",

@@ -65,9 +65,9 @@ class Workflow:
         workflow.add_edge("context_builder", "manager")
         workflow.add_edge("performer", "manager")
         workflow.add_edge("advance_reply", "manager")
-        workflow.add_edge("final_reply", "status_trim")
-        workflow.add_edge("status_trim", "dynamic_agent")
-        workflow.add_edge("dynamic_agent", END)
+        workflow.add_edge("final_reply", "dynamic_agent")
+        workflow.add_edge("dynamic_agent", "status_trim")
+        workflow.add_edge("status_trim", END)
 
         return workflow
 

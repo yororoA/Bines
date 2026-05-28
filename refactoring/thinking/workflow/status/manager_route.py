@@ -21,6 +21,10 @@ class ReplyInput(BaseModel):
         default_factory=list,
         description="List of things already communicated to the user, to avoid repetition.",
     )
+    soul_prompt: str = Field(
+        default="",
+        description="SOUL.md content defining the agent's core personality.",
+    )
 
 
 class ManagerRoute(BaseModel):
