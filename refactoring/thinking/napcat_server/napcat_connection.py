@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import uuid
+import random
 import logging
-import threading
 
 import asyncio
 import websockets
@@ -12,16 +12,15 @@ from thinking_settings import thinking_settings
 
 logger = logging.getLogger(__name__)
 
-_shared_workflow = None
-_workflow_lock = threading.Lock()
+_workflow = None
 
 
 def _get_workflow():
-    global _shared_workflow
-    if _shared_workflow is None:
+    global _workflow
+    if _workflow is None:
         from workflow import Workflow
-        _shared_workflow = Workflow()
-    return _shared_workflow
+        _workflow = Workflow()
+    return _workflow
 
 
 class NapCatClient:
@@ -30,47 +29,65 @@ class NapCatClient:
         self.token = token
         self.websocket = None
         self._pending_requests: dict[str, asyncio.Future] = {}
+        self._message_queue: asyncio.Queue = asyncio.Queue()
+        self._connection_task: asyncio.Task | None = None
 
-    async def connect(self):
+    async def process_messages(self):
+        self._connection_task = asyncio.create_task(self._connect())
+        await self._process_loop()
+
+    async def close(self):
+        if self._connection_task and not self._connection_task.done():
+            self._connection_task.cancel()
+            try:
+                await self._connection_task
+            except asyncio.CancelledError:
+                pass
+        if self.websocket:
+            await self.websocket.close()
+            self.websocket = None
+            logger.info("NapCat connection closed")
+
+    async def _connect(self):
         headers = {"Authorization": f"Bearer {self.token}"}
+        backoff = thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT
+        max_backoff = 60
+
         while True:
             try:
                 async with websockets.connect(
                     self.uri, extra_headers=headers
                 ) as websocket:
                     self.websocket = websocket
-                    logger.info("NapCat connection succeed: %s", self.uri)
+                    backoff = thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT
+                    logger.info("NapCat connection established: %s", self.uri)
                     await self._listen()
+                    self.websocket = None
             except asyncio.CancelledError:
-                logger.info("NapCat connect cancelled")
+                logger.info("NapCat connection task cancelled")
+                self.websocket = None
                 break
             except websockets.InvalidStatusCode as e:
+                self.websocket = None
                 if e.status_code in (401, 403):
                     logger.error(
-                        "NapCat authentication failed (status %d), stopping",
-                        e.status_code,
+                        "NapCat auth failed (status %d), stopping", e.status_code
                     )
                     break
+                jitter = backoff * random.uniform(0.5, 1.5)
                 logger.warning(
-                    "NapCat connection error (status %d), "
-                    "retry in %d seconds",
-                    e.status_code,
-                    thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT,
+                    "NapCat error (status %d), retry in %.1fs", e.status_code, jitter
                 )
-                await asyncio.sleep(thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT)
+                await asyncio.sleep(jitter)
+                backoff = min(backoff * 2, max_backoff)
             except Exception as e:
+                self.websocket = None
+                jitter = backoff * random.uniform(0.5, 1.5)
                 logger.warning(
-                    "NapCat connection error: %s, retry in %d seconds",
-                    e,
-                    thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT,
+                    "NapCat connection error: %s, retry in %.1fs", e, jitter
                 )
-                await asyncio.sleep(thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT)
-
-    async def close(self):
-        if self.websocket:
-            await self.websocket.close()
-            self.websocket = None
-            logger.info("NapCat connection closed")
+                await asyncio.sleep(jitter)
+                backoff = min(backoff * 2, max_backoff)
 
     async def _listen(self):
         try:
@@ -82,20 +99,26 @@ class NapCatClient:
                     if not future.done():
                         future.set_result(data)
                 else:
-                    await self._process_event(data)
+                    await self._message_queue.put(data)
         except asyncio.CancelledError:
-            logger.info("NapCat connection cancelled")
+            raise
         except websockets.ConnectionClosed:
-            logger.info("NapCat connection closed")
+            logger.info("NapCat websocket closed")
         finally:
             for future in self._pending_requests.values():
                 if not future.done():
                     future.set_exception(
-                        asyncio.CancelledError(
-                            "NapCat connection closed before response received"
-                        )
+                        asyncio.CancelledError("Connection closed before response")
                     )
             self._pending_requests.clear()
+
+    async def _process_loop(self):
+        while True:
+            data = await self._message_queue.get()
+            try:
+                await self._process_event(data)
+            except Exception:
+                logger.exception("Error processing queued message")
 
     async def _process_event(self, data: dict):
         post_type = data.get("post_type")
@@ -127,16 +150,30 @@ class NapCatClient:
         try:
             await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: _invoke_workflow(workflow, content, thread_id),
+                lambda: workflow.invoke(content, thread_id=thread_id),
             )
         except Exception:
-            logger.exception(
-                "Error processing message (thread=%s)", thread_id
-            )
+            logger.exception("Error in workflow (thread=%s)", thread_id)
+
+    async def _wait_for_connection(self, timeout: float = 30.0) -> bool:
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            if self.websocket:
+                return True
+            await asyncio.sleep(0.1)
+        return False
 
     async def call_api(self, *, action, params=None):
         if not self.websocket:
-            await self.connect()
+            connected = await self._wait_for_connection(
+                timeout=thinking_settings.NAPCAT_WS_API_RESPONSE_TIMEOUT
+            )
+            if not connected:
+                return {
+                    "action": action,
+                    "params": params,
+                    "error": "No active websocket connection",
+                }
 
         request_id = uuid.uuid4().hex
         payload = {"action": action, "params": params or {}, "echo": request_id}
@@ -159,11 +196,6 @@ class NapCatClient:
                 "params": params,
                 "error": "Timeout waiting for response",
             }
-
-
-def _invoke_workflow(workflow, content: str, thread_id: str):
-    with _workflow_lock:
-        workflow.invoke(content, thread_id=thread_id)
 
 
 def _determine_thread_id(message_type: str) -> str:
