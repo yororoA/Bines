@@ -1,13 +1,20 @@
-from thinking_settings import thinking_settings
-from langgraph.graph import StateGraph, END
-from .status import GraphStatus
-from .nodes import ManagerNode, PerformerNode, ReplyNode, MemorySearchNode
 import sqlite3
-from langgraph.checkpoint.sqlite import SqliteSaver
 from pathlib import Path
-from status import GraphStatus
 from typing import Literal
+
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain.messages import HumanMessage
+
+from .status import GraphStatus
+from .nodes import (
+    ManagerNode,
+    PerformerNode,
+    ReplyNode,
+    ContextBuilderNode,
+    StatusTrimNode,
+    DynamicAgentNode,
+)
 
 
 class Workflow:
@@ -18,14 +25,14 @@ class Workflow:
         workflow = StateGraph(GraphStatus)
 
         workflow.add_node(
-            "manager",
-            ManagerNode,
-            description="The manager node responsible for task planning and coordination.",
+            "context_builder",
+            ContextBuilderNode,
+            description="Builds conversational context from STM, RAG, and persona.",
         )
         workflow.add_node(
-            "memory_search",
-            MemorySearchNode,
-            description="The memory search node responsible for searching memory for relevant information.",
+            "manager",
+            ManagerNode,
+            description="The manager node responsible for task planning and advance_reply decisions.",
         )
         workflow.add_node(
             "performer",
@@ -35,29 +42,36 @@ class Workflow:
         workflow.add_node(
             "advance_reply",
             ReplyNode,
-            description="The reply node responsible for generating responses to user queries.",
+            description="Generates intermediate replies to keep the user informed during task execution.",
         )
         workflow.add_node(
             "final_reply",
             ReplyNode,
-            description="The reply node responsible for generating final responses to user queries.",
+            description="Generates the final reply to the user after all tasks are completed.",
         )
-        # todo: add context_builder node, connect with memory_search_node
-        # context -> manager -> memory_search ---(search result)--> context -> manager
+        workflow.add_node(
+            "status_trim",
+            StatusTrimNode,
+            description="Trims graph status to only keep messages, clearing ephemeral state.",
+        )
+        workflow.add_node(
+            "dynamic_agent",
+            DynamicAgentNode,
+            description="Updates persona memory and handles STM overflow after final reply.",
+        )
+
         workflow.set_entry_point("context_builder")
 
         workflow.add_edge("context_builder", "manager")
-        workflow.add_edge("memory_search", "manager")
         workflow.add_edge("performer", "manager")
         workflow.add_edge("advance_reply", "manager")
-        workflow.add_edge("final_reply", END)
+        workflow.add_edge("final_reply", "status_trim")
+        workflow.add_edge("status_trim", "dynamic_agent")
+        workflow.add_edge("dynamic_agent", END)
 
         return workflow
 
     def _compile(self):
-        if self._app is not None:
-            return self._app
-
         base_dir = Path(__file__).resolve().parents[2]
         checkpoints_dir = base_dir / "data/checkpoints"
         checkpoints_dir.mkdir(exist_ok=True, parents=True)
@@ -69,8 +83,13 @@ class Workflow:
 
         return self._build_Workflow().compile(checkpointer=memory)
 
-    def invoke(self, input: str, thread_id: Literal["raw_chat", "QQ"]):
+    def invoke(
+        self,
+        input: str,
+        thread_id: Literal["raw_chat", "QQ_private", "QQ_group"],
+    ):
         initial_state = GraphStatus(messages=[HumanMessage(content=input)])
         return self._app.invoke(
-            initial_state, config={"configurable": {"thread_id": thread_id}}
+            initial_state,
+            config={"configurable": {"thread_id": thread_id}},
         )
