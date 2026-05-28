@@ -1,8 +1,9 @@
 from .napcat_connection import NapCatClient
-from .global_client import napcat_client
+from .global_client import napcat_client, get_client
 
 
 __all__ = [
     "NapCatClient",
-    "napcat_client"
+    "napcat_client",
+    "get_client",
 ]

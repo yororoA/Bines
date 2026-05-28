@@ -1,11 +1,20 @@
 import asyncio
+import logging
+
 from napcat_server import NapCatClient
 from thinking_settings import thinking_settings
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(name)s %(levelname)s: %(message)s",
+)
+
+logger = logging.getLogger(__name__)
 
 
 async def main():
     import napcat_server.global_client as gc
-    # 连接napcat
+
     napcat_client = NapCatClient(
         thinking_settings.NAPCAT_WS_SERVER, thinking_settings.NAPCAT_WS_TOKEN
     )
@@ -16,9 +25,9 @@ async def main():
         await con_task
         await stop_event.wait()
     except asyncio.CancelledError:
-        print("\nShutting down...")
-    except Exception as e:
-        print(f"Unexpected error: {e}")
+        logger.info("Shutting down...")
+    except Exception:
+        logger.exception("Unexpected error")
     finally:
         if napcat_client:
             await napcat_client.close()

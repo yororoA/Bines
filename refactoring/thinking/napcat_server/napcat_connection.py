@@ -2,20 +2,21 @@ from __future__ import annotations
 
 import json
 import uuid
+import logging
+import threading
 
 import asyncio
 import websockets
 
 from thinking_settings import thinking_settings
 
+logger = logging.getLogger(__name__)
 
 _shared_workflow = None
+_workflow_lock = threading.Lock()
 
 
 def _get_workflow():
-    # Shared Workflow instance across all QQ threads (private/group).
-    # LangGraph's compiled app is thread-safe for concurrent invocations
-    # as long as each invoke uses a distinct thread_id.
     global _shared_workflow
     if _shared_workflow is None:
         from workflow import Workflow
@@ -38,12 +39,30 @@ class NapCatClient:
                     self.uri, extra_headers=headers
                 ) as websocket:
                     self.websocket = websocket
-                    print(f"NapCat connection succeed: {self.uri}")
+                    logger.info("NapCat connection succeed: %s", self.uri)
                     await self._listen()
+            except asyncio.CancelledError:
+                logger.info("NapCat connect cancelled")
+                break
+            except websockets.InvalidStatusCode as e:
+                if e.status_code in (401, 403):
+                    logger.error(
+                        "NapCat authentication failed (status %d), stopping",
+                        e.status_code,
+                    )
+                    break
+                logger.warning(
+                    "NapCat connection error (status %d), "
+                    "retry in %d seconds",
+                    e.status_code,
+                    thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT,
+                )
+                await asyncio.sleep(thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT)
             except Exception as e:
-                print(
-                    f"NapCat connection error: {e}, "
-                    f"try reconnect in {thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT} seconds"
+                logger.warning(
+                    "NapCat connection error: %s, retry in %d seconds",
+                    e,
+                    thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT,
                 )
                 await asyncio.sleep(thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT)
 
@@ -51,7 +70,7 @@ class NapCatClient:
         if self.websocket:
             await self.websocket.close()
             self.websocket = None
-            print("NapCat connection closed")
+            logger.info("NapCat connection closed")
 
     async def _listen(self):
         try:
@@ -65,16 +84,17 @@ class NapCatClient:
                 else:
                     await self._process_event(data)
         except asyncio.CancelledError:
-            print("NapCat connection cancelled")
+            logger.info("NapCat connection cancelled")
         except websockets.ConnectionClosed:
-            print("NapCat connection closed")
+            logger.info("NapCat connection closed")
         finally:
             for future in self._pending_requests.values():
-                future.set_exception(
-                    asyncio.CancelledError(
-                        "NapCat connection closed before response received"
+                if not future.done():
+                    future.set_exception(
+                        asyncio.CancelledError(
+                            "NapCat connection closed before response received"
+                        )
                     )
-                )
             self._pending_requests.clear()
 
     async def _process_event(self, data: dict):
@@ -104,10 +124,15 @@ class NapCatClient:
             return
 
         workflow = _get_workflow()
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: workflow.invoke(content, thread_id=thread_id),
-        )
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _invoke_workflow(workflow, content, thread_id),
+            )
+        except Exception:
+            logger.exception(
+                "Error processing message (thread=%s)", thread_id
+            )
 
     async def call_api(self, *, action, params=None):
         if not self.websocket:
@@ -118,24 +143,27 @@ class NapCatClient:
         future = asyncio.Future()
         self._pending_requests[request_id] = future
         await self.websocket.send(json.dumps(payload))
-        print(f"Requesting {action} with params: {params}")
+        logger.debug("Requesting %s with params: %s", action, params)
 
         try:
             response = await asyncio.wait_for(
                 future, timeout=thinking_settings.NAPCAT_WS_API_RESPONSE_TIMEOUT
             )
-            response_data = response
-            print(f"Received response: {response_data}")
-            return response_data
+            return response
         except asyncio.TimeoutError:
-            print(f"Timeout waiting for response for {action} with params: {params}")
-            self._pending_requests.pop(request_id)
+            logger.warning("Timeout for %s with params: %s", action, params)
+            self._pending_requests.pop(request_id, None)
             return {
                 "request_id": request_id,
                 "action": action,
                 "params": params,
                 "error": "Timeout waiting for response",
             }
+
+
+def _invoke_workflow(workflow, content: str, thread_id: str):
+    with _workflow_lock:
+        workflow.invoke(content, thread_id=thread_id)
 
 
 def _determine_thread_id(message_type: str) -> str:
