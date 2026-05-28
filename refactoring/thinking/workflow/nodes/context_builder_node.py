@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from langchain.messages import HumanMessage
 
 from ..status import GraphStatus
+
+logger = logging.getLogger(__name__)
 from memory import (
     PersonaState,
     retrieve_for_manager,
@@ -82,8 +85,12 @@ def _load_persona(state: GraphStatus) -> dict[str, Any]:
 def _build_rag_recall(query: str) -> dict[str, Any]:
     if not query:
         return {}
-    results = retrieve_for_manager(query)
-    formatted = format_retrieval_results(results)
+    try:
+        results = retrieve_for_manager(query)
+        formatted = format_retrieval_results(results)
+    except Exception:
+        logger.exception("RAG retrieval failed, proceeding without context")
+        return {}
     return {
         "query": query,
         "day_key": day_key(),

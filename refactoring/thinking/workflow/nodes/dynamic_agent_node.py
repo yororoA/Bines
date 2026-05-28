@@ -21,8 +21,6 @@ from utils import get_metrics_collector
 
 logger = logging.getLogger(__name__)
 
-_DIARY_TRIGGERED_TODAY: str | None = None
-_INVOCATION_COUNT: int = 0
 _DECAY_INTERVAL: int = 5
 
 
@@ -70,18 +68,16 @@ def _extract_context_for_memory(state: GraphStatus) -> str:
     return "\n\n".join(parts)
 
 
-def _should_trigger_diary() -> bool:
-    global _DIARY_TRIGGERED_TODAY
+def _should_trigger_diary(diary_triggered_day: str) -> bool:
     current_day = day_key()
 
-    if _DIARY_TRIGGERED_TODAY == current_day:
+    if diary_triggered_day == current_day:
         return False
 
     existing_days = get_existing_diary_day_keys()
     if current_day not in existing_days:
         return True
 
-    _DIARY_TRIGGERED_TODAY = current_day
     return False
 
 
@@ -97,8 +93,9 @@ def _run_memory_decay():
 
 
 def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
-    global _DIARY_TRIGGERED_TODAY, _INVOCATION_COUNT
-    _INVOCATION_COUNT += 1
+    invocation_count = state.get("invocation_count", 0) + 1
+    diary_triggered_day = state.get("diary_triggered_day", "")
+    new_diary_triggered_day = diary_triggered_day
 
     collector = get_metrics_collector()
 
@@ -124,15 +121,18 @@ def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
             except Exception:
                 logger.exception("Memory judgment/storage failed")
 
-        if _should_trigger_diary():
+        if _should_trigger_diary(diary_triggered_day):
             try:
                 result = consolidate_buffer_to_diary(day_key())
                 if result:
-                    _DIARY_TRIGGERED_TODAY = day_key()
+                    new_diary_triggered_day = day_key()
             except Exception:
                 logger.exception("Diary consolidation failed")
 
-        if _INVOCATION_COUNT % _DECAY_INTERVAL == 0:
+        if invocation_count % _DECAY_INTERVAL == 0:
             _run_memory_decay()
 
-    return {}
+    return {
+        "diary_triggered_day": new_diary_triggered_day,
+        "invocation_count": invocation_count,
+    }
