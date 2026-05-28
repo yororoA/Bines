@@ -1,9 +1,6 @@
-smolagents
 smolagents[openai]
 
-langchain
 langchain-openai
-langchain[openai]
 langchain-huggingface
 langchain-chroma
 chromadb
@@ -11,13 +8,11 @@ langchain_community
 langgraph
 langgraph-checkpoint-sqlite
 
-openai
-
 pydantic-settings
 
 ddgs
 requests
 httpx
-websocket-client
+websockets
 
 sentence-transformers
