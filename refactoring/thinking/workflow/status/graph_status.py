@@ -4,19 +4,11 @@ from langchain.messages import AnyMessage
 from .manager_route import TaskItem
 
 _RESET = type("_RESET", (), {"__repr__": lambda self: "_RESET"})()
-"""Sentinel value used by custom reducers to clear Annotated fields.
-
-Since LangGraph TypedDict reducer fields cannot be overwritten (they are always
-fed through the reducer function), _RESET acts as a special signal:
-- merge_tasks: returns empty dict when right is _RESET
-- cap_list: returns empty list when right is _RESET
-- add_list_str: returns empty list when right is _RESET
-
-Usage: return {"field_name": _RESET} from a node to clear that field.
-"""
 
 MAX_THOUGHTS = 10
 MAX_ITERATIONS = 10
+MESSAGE_WINDOW_SIZE = 20
+MESSAGE_TRIM_SIZE = 10
 
 
 def merge_tasks(left: dict, right: dict) -> dict:
