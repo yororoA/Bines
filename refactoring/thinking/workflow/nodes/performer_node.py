@@ -2,14 +2,16 @@ from utils import generate_sml_model
 from smolagents import CodeAgent
 from thinking_settings import thinking_settings
 from tools import webSearch
-from status import TaskItem
+from ..status import TaskItem
 
 _performer_model = generate_sml_model(thinking_settings.MODEL_SELECTED)
 
 _PerformerAgent = None
 
 
-def PerformerNode(task_item: TaskItem) -> dict:
+def PerformerNode(task_item: TaskItem) -> dict[str, list[TaskItem]]:
+    global _PerformerAgent
+
     task_id = task_item.task_id
     task_description = task_item.description
 
@@ -27,5 +29,5 @@ def PerformerNode(task_item: TaskItem) -> dict:
     result = _PerformerAgent.run(task_description)
 
     return {
-        "task_done": {"performer": [TaskItem(task_id=task_id, description=str(result))]}
+        "tasks_done": {"performer": [TaskItem(task_id=task_id, description=str(result))]}
     }
