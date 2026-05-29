@@ -32,8 +32,6 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
                         "You are a helpful assistant that can search the web. "
                         "Always make sure you know the current time."
                     )
-                    if soul_prompt:
-                        system_prompt = soul_prompt + "\n\n" + system_prompt
 
                     _PerformerAgent = CodeAgent(
                         model=shared_smol_model.get(),
@@ -45,7 +43,10 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
                         max_steps=6,
                     )
 
-        result = _PerformerAgent.run(task_description)
+        run_input = task_description
+        if soul_prompt:
+            run_input = f"[System Persona]\n{soul_prompt}\n\n[Task]\n{task_description}"
+        result = _PerformerAgent.run(run_input)
 
         return {
             "tasks_done": {"performer": [TaskItem(task_id=task_id, description=str(result))]}

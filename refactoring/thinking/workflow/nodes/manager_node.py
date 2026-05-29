@@ -17,6 +17,23 @@ ManagerModel = shared_langchain_model.get_structured(ManagerRoute)
 _CONVERGENCE_WINDOW = 3
 
 
+def _make_reply_input(
+    state: GraphStatus,
+    *,
+    final: bool = True,
+    message: str = "",
+    soul_prompt: str = "",
+) -> ReplyInput:
+    return ReplyInput(
+        tasks=[],
+        Final=final,
+        message=message,
+        persona_snapshot=state.get("persona_snapshot", {}),
+        already_said=state.get("already_said", []),
+        soul_prompt=soul_prompt,
+    )
+
+
 def _get_done_ids(state: GraphStatus) -> set[str]:
     done_ids = set()
     for items in state.get("tasks_done", {}).values():
@@ -119,12 +136,9 @@ def ManagerNode(
             "Convergence detected at iteration %d with %d tasks done",
             current_iteration, task_count,
         )
-        reply_input = ReplyInput(
-            tasks=[],
-            Final=True,
+        reply_input = _make_reply_input(
+            state,
             message=f"[system: all tasks completed, {task_count} tasks done]",
-            persona_snapshot=state.get("persona_snapshot", {}),
-            already_said=state.get("already_said", []),
             soul_prompt=soul_prompt,
         )
         state_update["thoughts"] = [
@@ -137,14 +151,7 @@ def ManagerNode(
         )
 
     if current_iteration >= MAX_ITERATIONS:
-        reply_input = ReplyInput(
-            tasks=[],
-            Final=True,
-            message="",
-            persona_snapshot=state.get("persona_snapshot", {}),
-            already_said=state.get("already_said", []),
-            soul_prompt=soul_prompt,
-        )
+        reply_input = _make_reply_input(state, soul_prompt=soul_prompt)
         return Command(
             update=state_update,
             goto=[Send("final_reply", reply_input)],
@@ -156,14 +163,7 @@ def ManagerNode(
         result: ManagerRoute = ManagerModel.invoke(invoke_messages)
     except Exception:
         logger.exception("ManagerModel invoke failed, falling back to final_reply")
-        reply_input = ReplyInput(
-            tasks=[],
-            Final=True,
-            message="",
-            persona_snapshot=state.get("persona_snapshot", {}),
-            already_said=state.get("already_said", []),
-            soul_prompt=soul_prompt,
-        )
+        reply_input = _make_reply_input(state, soul_prompt=soul_prompt)
         return Command(
             update=state_update,
             goto=[Send("final_reply", reply_input)],
@@ -173,13 +173,8 @@ def ManagerNode(
     state_update["thoughts"] = [thought_with_count]
 
     if result.goto_final_reply:
-        reply_input = ReplyInput(
-            tasks=[],
-            Final=True,
-            message=result.final_reply_hint or "",
-            persona_snapshot=state.get("persona_snapshot", {}),
-            already_said=state.get("already_said", []),
-            soul_prompt=soul_prompt,
+        reply_input = _make_reply_input(
+            state, message=result.final_reply_hint or "", soul_prompt=soul_prompt,
         )
         return Command(
             update=state_update,
@@ -187,13 +182,8 @@ def ManagerNode(
         )
 
     if result.goto_advance_reply:
-        reply_input = ReplyInput(
-            tasks=[],
-            Final=False,
-            message=result.advance_reply_hint or "",
-            persona_snapshot=state.get("persona_snapshot", {}),
-            already_said=state.get("already_said", []),
-            soul_prompt=soul_prompt,
+        reply_input = _make_reply_input(
+            state, final=False, message=result.advance_reply_hint or "", soul_prompt=soul_prompt,
         )
         return Command(
             update=state_update,
@@ -207,14 +197,7 @@ def ManagerNode(
             goto=[Send("performer", PerformerInput(task_item=task, soul_prompt=soul_prompt)) for task in pending_tasks],
         )
 
-    reply_input = ReplyInput(
-        tasks=[],
-        Final=True,
-        message="",
-        persona_snapshot=state.get("persona_snapshot", {}),
-        already_said=state.get("already_said", []),
-        soul_prompt=soul_prompt,
-    )
+    reply_input = _make_reply_input(state, soul_prompt=soul_prompt)
     return Command(
         update=state_update,
         goto=[Send("final_reply", reply_input)],
