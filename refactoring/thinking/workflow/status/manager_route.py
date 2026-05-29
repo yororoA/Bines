@@ -30,6 +30,10 @@ class ReplyInput(BaseModel):
         default="",
         description="SOUL.md content defining the agent's core personality.",
     )
+    rag_recall: dict[str, Any] = Field(
+        default_factory=dict,
+        description="RAG retrieval results from context_builder, passed to avoid redundant retrieval.",
+    )
 
 
 class ManagerRoute(BaseModel):

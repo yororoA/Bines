@@ -8,6 +8,15 @@ from utils import shared_langchain_model
 logger = logging.getLogger(__name__)
 
 
+def _find_trim_index(messages: list, max_index: int) -> int:
+    from langchain.messages import HumanMessage
+    best = max_index
+    for i in range(min(max_index, len(messages))):
+        if isinstance(messages[i], HumanMessage):
+            best = i
+    return best
+
+
 def _summarize_messages(messages: list) -> str:
     if not messages:
         return ""
@@ -28,7 +37,7 @@ def _summarize_messages(messages: list) -> str:
     prompt = (
         "Summarize the following conversation into a concise context note. "
         "Preserve key facts, decisions, topics discussed, and any user preferences mentioned. "
-        "Keep it under 200 words.\n\n"
+        "MUST be under 200 words. Output ONLY the summary text, no preamble or labels.\n\n"
         f"Conversation:\n{combined}\n\nSummary:"
     )
 
@@ -56,8 +65,9 @@ def StatusTrimNode(state: GraphStatus) -> dict:
     }
 
     if len(messages) >= MESSAGE_WINDOW_SIZE:
-        to_summarize = messages[:MESSAGE_TRIM_SIZE]
-        to_keep = messages[MESSAGE_TRIM_SIZE:]
+        trim_at = _find_trim_index(messages, MESSAGE_TRIM_SIZE)
+        to_summarize = messages[:trim_at]
+        to_keep = messages[trim_at:]
 
         summary = _summarize_messages(to_summarize)
         if summary:
