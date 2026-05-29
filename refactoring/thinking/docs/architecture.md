@@ -4,6 +4,8 @@
 
 Thinking is an AI Agent conversational system built on LangGraph, integrated with QQ via NapCat WebSocket protocol. It features a 7-node workflow pipeline with a comprehensive memory system and persona-based role playing.
 
+**Key Technologies**: LangGraph, LangChain, ChromaDB, SmolAgents, Pydantic Settings
+
 ## System Architecture
 
 ```
@@ -126,6 +128,7 @@ QQ Client --> NapCat WebSocket --> json parse --> message_queue --> _process_loo
 - Exponential backoff with jitter for reconnection
 - Separate process_loop consuming from asyncio.Queue
 - API call timeout with connection wait
+- Debounce cooldown (configurable via `DEBOUNCE_SECONDS`, default 3.0s)
 
 ## State Management
 
@@ -138,6 +141,20 @@ Defined in `workflow/status/graph_status.py`:
 - `thoughts` - Manager thought chain (capped at 10)
 - `iteration_count` - Loop iteration count
 - `persona_snapshot` / `rag_recall` / `soul_prompt` - Context snapshots
+- `advance_reply_content` - Intermediate reply content
+- `final_reply_content` - Final reply content
+
+### Configuration
+
+All settings managed via `ThinkingSettings` (Pydantic BaseSettings) in `thinking_settings.py`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| MODEL_SELECTED | deepseek-v4-flash | Active model name |
+| DEBOUNCE_SECONDS | 3.0 | Message debounce cooldown |
+| WORKFLOW_TIMEOUT_SECONDS | 120.0 | Workflow execution timeout |
+| DEDUP_SIMILARITY_THRESHOLD | 0.08 | Memory dedup similarity threshold |
+| MAX_INPUT_LENGTH | 4096 | Max input message length |
 
 ### Persistence
 

@@ -5,6 +5,7 @@
 - Python 3.11+
 - NapCat QQ Bot server running and accessible
 - API keys for LLM providers (DeepSeek, MIMO, etc.)
+- HuggingFace access (for embedding model download)
 
 ## Installation
 
@@ -15,31 +16,39 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Create `thinking.env` in the project root:
+Copy `thinking.env.example` to `thinking.env` and fill in your values:
 
 ```env
 # Model Configuration
-MODEL_LIST=["deepseek-v4-flash","deepseek-v4-pro","mimo-v2.5","mimo-v2.5-pro"]
+MODEL_LIST='["deepseek-v4-flash","deepseek-v4-pro","mimo-v2.5","mimo-v2.5-pro"]'
 MODEL_SELECTED=deepseek-v4-flash
 
 # Provider: DeepSeek
-DEEPSEEK_API_URL=https://api.deepseek.com/v1
+DEEPSEEK_API_URL=https://api.deepseek.com
 DEEPSEEK_API_KEY=sk-your-deepseek-key
 
 # Provider: MIMO
-MIMO_API_URL=https://api.mimo.com/v1
+MIMO_API_URL=https://token-plan-sgp.xiaomimimo.com/v1
 MIMO_API_KEY=sk-your-mimo-key
 
 # RAG Embedding
 RAG_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 RAG_PERSIST_DIR=memory_data/chroma_db
-HF_ENDPOINT=
+HF_ENDPOINT=https://huggingface.co
+
+# E2B Sandbox (optional, for code execution)
+E2B_API_KEY=
 
 # NapCat QQ Bot
-NAPCAT_WS_SERVER=ws://127.0.0.1:3001
+NAPCAT_WS_SERVER=ws://localhost:9998
 NAPCAT_WS_TOKEN=your-napcat-token
 NAPCAT_WS_RECONNECT_TIMEOUT=5
 NAPCAT_WS_API_RESPONSE_TIMEOUT=15
+BOT_NUMBER=your-bot-qq-number
+
+# Workflow
+DEBOUNCE_SECONDS=3.0
+WORKFLOW_TIMEOUT_SECONDS=120.0
 ```
 
 ## Running
@@ -107,3 +116,23 @@ When adding new modules, follow these conventions:
 - Add error handling with logging for all node functions
 - Use `persona_cache` from `memory.persona_state` for persona reads
 - Use `file_cache` from `utils.file_cache` for file reads needing hot-reload
+
+## Troubleshooting
+
+### NapCat Connection Failed
+- Verify `NAPCAT_WS_SERVER` and `NAPCAT_WS_TOKEN` are correct
+- Ensure NapCat WebSocket server is running
+- Check firewall/network settings
+
+### Model API Errors
+- Verify API keys are valid and have sufficient quota
+- Check `MODEL_SELECTED` is in `MODEL_LIST`
+- Ensure API URLs end with `/v1` for OpenAI-compatible providers
+
+### ChromaDB Issues
+- Delete `memory_data/chroma_db` to reset the vector store
+- Ensure HuggingFace endpoint is accessible for embedding model download
+
+### Workflow Timeout
+- Increase `WORKFLOW_TIMEOUT_SECONDS` in `thinking.env`
+- Check logs for specific node execution errors
