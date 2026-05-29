@@ -11,7 +11,7 @@ from ..vector_store.chroma_store import (
     COLLECTION_DIARY,
     COLLECTION_SLICED_DIARY,
 )
-from utils import generate_langchain_model
+from utils import generate_langchain_model, shared_langchain_model
 from utils.time_utils import day_key
 
 
