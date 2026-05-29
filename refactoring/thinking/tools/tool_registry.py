@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class ToolRegistry:
         }
         self._discovered: bool = False
         self._defaults_registered: bool = False
+        self._lock = threading.Lock()
 
     def register_tool(
         self,
@@ -44,16 +46,21 @@ class ToolRegistry:
 
     def get_tools(self, category: ToolCategory) -> list[Any]:
         if not self._discovered:
-            self._discover()
+            with self._lock:
+                if not self._discovered:
+                    self._discover()
+                    self._discovered = True
         return list(self._tools.get(category, []))
 
     def get_authorized_imports(self, category: ToolCategory) -> list[str]:
         if not self._discovered:
-            self._discover()
+            with self._lock:
+                if not self._discovered:
+                    self._discover()
+                    self._discovered = True
         return sorted(self._authorized_imports.get(category, set()))
 
     def _discover(self):
-        self._discovered = True
         register_default_tools()
 
 
