@@ -71,13 +71,16 @@ class MemoryJudgment(BaseModel):
 
 
 _JUDGE_MODEL = None
+_JUDGE_MODEL_NAME: str = ""
 
 
 def _get_judge_model():
-    global _JUDGE_MODEL
-    if _JUDGE_MODEL is None:
-        base_model = generate_langchain_model(thinking_settings.MODEL_SELECTED)
+    global _JUDGE_MODEL, _JUDGE_MODEL_NAME
+    current_name = thinking_settings.MODEL_SELECTED
+    if _JUDGE_MODEL is None or current_name != _JUDGE_MODEL_NAME:
+        base_model = generate_langchain_model(current_name)
         _JUDGE_MODEL = base_model.with_structured_output(MemoryJudgment)
+        _JUDGE_MODEL_NAME = current_name
     return _JUDGE_MODEL
 
 
@@ -108,20 +111,7 @@ def judge_and_store(
 ) -> MemoryJudgment:
     memory_store = store or get_memory_store()
 
-    persona_context = ""
-    if persona:
-        parts = []
-        if persona.user_name:
-            parts.append(f"User: {persona.user_name}")
-        if persona.speaking_habits:
-            parts.append(f"Speaking habits: {'; '.join(persona.speaking_habits)}")
-        if persona.long_term_preferences:
-            parts.append(f"Preferences: {'; '.join(persona.long_term_preferences)}")
-        if persona.tech_stack:
-            parts.append(f"Tech stack: {'; '.join(persona.tech_stack)}")
-        if persona.user_preferences:
-            parts.append(f"User preferences: {'; '.join(persona.user_preferences)}")
-        persona_context = "\n".join(parts)
+    persona_context = persona.to_prompt_string() if persona else ""
 
     prompt = _JUDGE_PROMPT_TEMPLATE.format(
         persona_context=persona_context or "No persona context available.",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 
 from smolagents import CodeAgent
 from utils import shared_smol_model
@@ -33,24 +34,14 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
     if reply_input.soul_prompt:
         parts.append(reply_input.soul_prompt)
 
-    profile_parts = []
-    if persona.user_name:
-        profile_parts.append(f"Name: {persona.user_name}")
-    if persona.speaking_habits:
-        profile_parts.append(f"Speaking habits: {'; '.join(persona.speaking_habits)}")
-    if persona.long_term_preferences:
-        profile_parts.append(f"Preferences: {'; '.join(persona.long_term_preferences)}")
-    if persona.tech_stack:
-        profile_parts.append(f"Tech stack: {'; '.join(persona.tech_stack)}")
-    if persona.user_preferences:
-        profile_parts.append(f"User preferences: {'; '.join(persona.user_preferences)}")
-    persona_str = ""
-    if profile_parts:
-        persona_str = "\n\n[User Profile]\n" + "\n".join(profile_parts)
-    if persona_str:
-        parts.append(persona_str)
+    profile_str = persona.to_prompt_string()
+    if profile_str:
+        parts.append(f"\n\n{profile_str}")
 
-    if reply_input.message:
+    rag = reply_input.rag_recall
+    if rag and rag.get("formatted"):
+        parts.append(f"\n\n[RAG Context]\n{rag['formatted']}")
+    elif reply_input.message:
         results = retrieve_for_reply(reply_input.message)
         formatted = format_retrieval_results(results)
         if formatted:
@@ -109,7 +100,7 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
         }
     except Exception as e:
         logger.exception("ReplyNode failed")
-        fallback = [TaskItem(task_id="reply_error", description=str(reply_input.message or ""))]
+        fallback = [TaskItem(task_id=f"reply_error_{uuid.uuid4().hex[:8]}", description=str(reply_input.message or ""))]
         return {
             "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": fallback},
             "already_said": [],

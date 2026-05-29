@@ -32,6 +32,22 @@ class PersonaState:
             user_preferences=data.get("user_preferences", []),
         )
 
+    def to_prompt_string(self) -> str:
+        lines: list[str] = []
+        if self.user_name:
+            lines.append(f"Name: {self.user_name}")
+        if self.speaking_habits:
+            lines.append(f"Speaking habits: {'; '.join(self.speaking_habits)}")
+        if self.long_term_preferences:
+            lines.append(f"Preferences: {'; '.join(self.long_term_preferences)}")
+        if self.tech_stack:
+            lines.append(f"Tech stack: {'; '.join(self.tech_stack)}")
+        if self.user_preferences:
+            lines.append(f"User preferences: {'; '.join(self.user_preferences)}")
+        if not lines:
+            return ""
+        return "[User Profile]\n" + "\n".join(lines)
+
 
 class PersonaCache:
     def __init__(self):

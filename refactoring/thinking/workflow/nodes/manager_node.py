@@ -12,8 +12,6 @@ from memory import PersonaState
 
 logger = logging.getLogger(__name__)
 
-ManagerModel = shared_langchain_model.get_structured(ManagerRoute)
-
 _CONVERGENCE_WINDOW = 3
 
 
@@ -31,6 +29,7 @@ def _make_reply_input(
         persona_snapshot=state.get("persona_snapshot", {}),
         already_said=state.get("already_said", []),
         soul_prompt=soul_prompt,
+        rag_recall=state.get("rag_recall", {}),
     )
 
 
@@ -87,19 +86,9 @@ def _assemble_manager_context(state: GraphStatus) -> str:
         context_parts.append(soul_prompt)
 
     persona = PersonaState.from_dict(persona_snapshot)
-    profile_parts = []
-    if persona.user_name:
-        profile_parts.append(f"Name: {persona.user_name}")
-    if persona.speaking_habits:
-        profile_parts.append(f"Speaking habits: {'; '.join(persona.speaking_habits)}")
-    if persona.long_term_preferences:
-        profile_parts.append(f"Preferences: {'; '.join(persona.long_term_preferences)}")
-    if persona.tech_stack:
-        profile_parts.append(f"Tech stack: {'; '.join(persona.tech_stack)}")
-    if persona.user_preferences:
-        profile_parts.append(f"User preferences: {'; '.join(persona.user_preferences)}")
-    if profile_parts:
-        context_parts.append("[User Profile]\n" + "\n".join(profile_parts))
+    profile_str = persona.to_prompt_string()
+    if profile_str:
+        context_parts.append(profile_str)
 
     if rag_recall and "formatted" in rag_recall:
         context_parts.append(f"[RAG Context]\n{rag_recall['formatted']}")
@@ -160,7 +149,7 @@ def ManagerNode(
     context_str = _assemble_manager_context(state)
     invoke_messages = [SystemMessage(content=context_str)] + list(state.get("messages", []))
     try:
-        result: ManagerRoute = ManagerModel.invoke(invoke_messages)
+        result: ManagerRoute = shared_langchain_model.get_structured(ManagerRoute).invoke(invoke_messages)
     except Exception:
         logger.exception("ManagerModel invoke failed, falling back to final_reply")
         reply_input = _make_reply_input(state, soul_prompt=soul_prompt)
