@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import signal
 from datetime import datetime, timedelta
 
 from napcat_server import NapCatClient
@@ -50,8 +51,33 @@ async def main():
     )
     gc.napcat_client = napcat_client
     _run_startup_buffer_consolidation()
+
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def _signal_handler():
+        logger.info("Shutdown signal received")
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _signal_handler)
+        except NotImplementedError:
+            pass
+
     try:
-        await napcat_client.process_messages()
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        process_task = asyncio.create_task(napcat_client.process_messages())
+        done, pending = await asyncio.wait(
+            [shutdown_task, process_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     except asyncio.CancelledError:
         logger.info("Shutting down...")
     except Exception:
@@ -62,4 +88,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt, shutting down...")

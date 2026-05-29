@@ -54,19 +54,36 @@ def _get_embeddings() -> HuggingFaceEmbeddings:
 class ChromaMemoryStore:
     def __init__(self, persist_dir: str | None = None):
         self._persist_dir = persist_dir or thinking_settings.RAG_PERSIST_DIR
-        self._embeddings = _get_embeddings()
+        try:
+            self._embeddings = _get_embeddings()
+        except Exception:
+            logger.exception("Failed to initialize embeddings model")
+            self._embeddings = None
+            self._collections = {}
+            return
+
         self._collections: dict[str, Chroma] = {}
         for name in ALL_COLLECTIONS:
-            self._collections[name] = Chroma(
-                collection_name=name,
-                embedding_function=self._embeddings,
-                persist_directory=str(Path(self._persist_dir).resolve()),
-            )
+            try:
+                self._collections[name] = Chroma(
+                    collection_name=name,
+                    embedding_function=self._embeddings,
+                    persist_directory=str(Path(self._persist_dir).resolve()),
+                )
+            except Exception:
+                logger.error(
+                    "Failed to initialize collection '%s': %s",
+                    name,
+                    self._persist_dir,
+                    exc_info=True,
+                )
 
     def _get_collection(self, collection: str) -> Chroma:
         if collection not in self._collections:
+            available = list(self._collections.keys())
             raise ValueError(
-                f"Unknown collection '{collection}'. Must be one of {ALL_COLLECTIONS}"
+                f"Collection '{collection}' is not available. "
+                f"Available: {available}. It may have failed to initialize."
             )
         return self._collections[collection]
 
