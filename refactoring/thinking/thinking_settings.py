@@ -21,6 +21,8 @@ class ThinkingSettings(BaseSettings):
     WORKFLOW_TIMEOUT_SECONDS: float = 120.0
     DEDUP_SIMILARITY_THRESHOLD: float = 0.08
     MAX_INPUT_LENGTH: int = 4096
+    DAY_KEY_CUTOFF_HOUR: int = 4
+    CONVERGENCE_WINDOW: int = 3
 
     model_config = SettingsConfigDict(
         env_file="thinking.env", env_file_encoding="utf-8"
