@@ -18,6 +18,8 @@ class NodeMetrics:
 
 
 class WorkflowMetricsCollector:
+    MAX_NODE_CALLS = 1000
+
     def __init__(self):
         self._node_calls: list[NodeMetrics] = []
 
@@ -33,6 +35,8 @@ class WorkflowMetricsCollector:
         finally:
             metrics.duration_ms = (time.perf_counter() - start) * 1000
             self._node_calls.append(metrics)
+            if len(self._node_calls) > self.MAX_NODE_CALLS:
+                self._node_calls = self._node_calls[-self.MAX_NODE_CALLS:]
             level = logging.WARNING if metrics.error else logging.INFO
             logger.log(
                 level,
