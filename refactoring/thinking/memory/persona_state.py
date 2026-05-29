@@ -73,5 +73,9 @@ class PersonaCache:
     def version(self) -> int:
         return self._version
 
+    def has_changed_since(self, old_version: int) -> bool:
+        with self._lock:
+            return self._version != old_version
+
 
 persona_cache = PersonaCache()

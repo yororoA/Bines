@@ -21,7 +21,7 @@ from utils.time_utils import day_key
 
 logger = logging.getLogger(__name__)
 
-MemoryType = Literal["knowledge", "persona", "diary"]
+MemoryType = Literal["knowledge", "persona", "diary", "buffer"]
 
 
 class MemoryJudgment(BaseModel):
@@ -123,7 +123,7 @@ def judge_and_store(
     if not judgment.should_store:
         return judgment
 
-    if judgment.memory_type == "summary":
+    if judgment.memory_type == "buffer":
         add_to_buffer(
             judgment.rewritten_content or content,
             metadata={"topic": judgment.topic, "importance": judgment.importance},
