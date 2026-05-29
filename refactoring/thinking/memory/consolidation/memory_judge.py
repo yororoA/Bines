@@ -110,10 +110,18 @@ def judge_and_store(
 
     persona_context = ""
     if persona:
-        persona_context = (
-            f"Tone: {persona.tone}, Style: {persona.style}, "
-            f"Role: {persona.role_identity}"
-        )
+        parts = []
+        if persona.user_name:
+            parts.append(f"User: {persona.user_name}")
+        if persona.speaking_habits:
+            parts.append(f"Speaking habits: {'; '.join(persona.speaking_habits)}")
+        if persona.long_term_preferences:
+            parts.append(f"Preferences: {'; '.join(persona.long_term_preferences)}")
+        if persona.tech_stack:
+            parts.append(f"Tech stack: {'; '.join(persona.tech_stack)}")
+        if persona.user_preferences:
+            parts.append(f"User preferences: {'; '.join(persona.user_preferences)}")
+        persona_context = "\n".join(parts)
 
     prompt = _JUDGE_PROMPT_TEMPLATE.format(
         persona_context=persona_context or "No persona context available.",
