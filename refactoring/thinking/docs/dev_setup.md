@@ -30,9 +30,6 @@ DEEPSEEK_API_KEY=sk-your-deepseek-key
 MIMO_API_URL=https://api.mimo.com/v1
 MIMO_API_KEY=sk-your-mimo-key
 
-# Checkpoint
-CHECKPOINT_THREAD_ID=["raw_chat","QQ_private","QQ_group"]
-
 # RAG Embedding
 RAG_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 RAG_PERSIST_DIR=memory_data/chroma_db
