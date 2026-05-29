@@ -23,7 +23,7 @@ from .nodes import (
 class Workflow:
     def __init__(self):
         self._app = self._compile()
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="workflow")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow")
 
     def _build_Workflow(self):
         workflow = StateGraph(GraphStatus)
@@ -76,13 +76,11 @@ class Workflow:
         return workflow
 
     def _compile(self):
-        base_dir = Path(__file__).resolve().parents[2]
+        base_dir = Path(__file__).resolve().parents[1]
         checkpoints_dir = base_dir / "data/checkpoints"
         checkpoints_dir.mkdir(exist_ok=True, parents=True)
 
-        conn = sqlite3.connect(
-            checkpoints_dir / "checkpoints.db", check_same_thread=False
-        )
+        conn = sqlite3.connect(checkpoints_dir / "checkpoints.db", check_same_thread=False, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
         memory = SqliteSaver(conn)
 

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 _PerformerAgent = None
 _PerformerLock = threading.Lock()
+_PerformerRunLock = threading.Lock()
 _cached_soul_hash: str | None = None
 
 
@@ -53,7 +54,8 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
                     )
                     _cached_soul_hash = current_hash
 
-        result = _PerformerAgent.run(task_description)
+        with _PerformerRunLock:
+            result = _PerformerAgent.run(task_description)
 
         return {
             "tasks_done": {"performer": [TaskItem(task_id=task_id, description=str(result))]}

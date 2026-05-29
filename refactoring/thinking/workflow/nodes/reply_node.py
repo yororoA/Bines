@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 _ReplyAgent = None
 _ReplyTools = None
 _ReplyLock = threading.Lock()
+_ReplyRunLock = threading.Lock()
 _cached_prompt_hash: str | None = None
 
 
@@ -65,7 +66,7 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
 
 
 def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
-    global _ReplyAgent, _cached_prompt_hash
+    global _ReplyAgent, _ReplyTools, _cached_prompt_hash
 
     try:
         prompt = _build_reply_system_prompt(reply_input)
@@ -93,9 +94,10 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
                     )
                     _cached_prompt_hash = current_hash
 
-        feedback: list[TaskItem] = _ReplyAgent.run(
-            {"tasks": reply_input.tasks, "message": reply_input.message}
-        )
+        with _ReplyRunLock:
+            feedback: list[TaskItem] = _ReplyAgent.run(
+                {"tasks": reply_input.tasks, "message": reply_input.message}
+            )
 
         already_said_entries = [item.description for item in feedback if item.description]
 
