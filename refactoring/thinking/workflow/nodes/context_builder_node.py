@@ -20,6 +20,8 @@ from memory import (
 from utils.time_utils import day_key
 from utils import file_cache
 
+USER_PROFILE_CATEGORIES = {"speaking_habits", "long_term_preferences", "tech_stack", "user_preferences", "user_name"}
+
 
 def _load_soul_prompt() -> str:
     soul_path = Path(__file__).resolve().parents[2] / "Personal" / "SOUL.md"
@@ -56,6 +58,8 @@ def _load_persona(state: GraphStatus) -> dict[str, Any]:
     for entry in persona_entries:
         meta = entry.get("metadata", {})
         cat = meta.get("category", "general")
+        if cat not in USER_PROFILE_CATEGORIES:
+            continue
         conf = meta.get("confidence", 0.5)
         existing = by_category.get(cat)
         if existing is None or conf > existing.get("confidence", 0):
@@ -65,18 +69,20 @@ def _load_persona(state: GraphStatus) -> dict[str, Any]:
                 "confidence": conf,
             }
 
-    def _get(cat: str, default: str) -> str:
-        return by_category.get(cat, {}).get("content", default)
+    user_name = by_category.get("user_name", {}).get("content", "")
+
+    def _split_list(cat: str) -> list[str]:
+        entry = by_category.get(cat)
+        if not entry:
+            return []
+        return entry.get("content", "").split(";")
 
     snapshot = PersonaState(
-        tone=_get("tone", "friendly"),
-        style=_get("style", "concise"),
-        verbosity=_get("verbosity", "moderate"),
-        role_identity=_get("role_identity", "assistant"),
-        speaking_habits=by_category.get("speaking_habits", {}).get("content", "").split(";") if by_category.get("speaking_habits") else [],
-        interaction_strategy=_get("interaction_strategy", "collaborative"),
-        long_term_preferences=by_category.get("long_term_preferences", {}).get("content", "").split(";") if by_category.get("long_term_preferences") else [],
-        tech_stack=by_category.get("tech_stack", {}).get("content", "").split(";") if by_category.get("tech_stack") else [],
+        user_name=user_name,
+        speaking_habits=_split_list("speaking_habits"),
+        long_term_preferences=_split_list("long_term_preferences"),
+        tech_stack=_split_list("tech_stack"),
+        user_preferences=_split_list("user_preferences"),
     ).to_dict()
     persona_cache.put(snapshot)
     return snapshot

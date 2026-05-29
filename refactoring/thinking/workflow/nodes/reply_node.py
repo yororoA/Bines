@@ -28,11 +28,22 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
     if reply_input.soul_prompt:
         parts.append(reply_input.soul_prompt)
 
-    persona_str = (
-        f"\n\n[Persona] Tone: {persona.tone}, Style: {persona.style}, "
-        f"Role: {persona.role_identity}"
-    )
-    parts.append(persona_str)
+    profile_parts = []
+    if persona.user_name:
+        profile_parts.append(f"Name: {persona.user_name}")
+    if persona.speaking_habits:
+        profile_parts.append(f"Speaking habits: {'; '.join(persona.speaking_habits)}")
+    if persona.long_term_preferences:
+        profile_parts.append(f"Preferences: {'; '.join(persona.long_term_preferences)}")
+    if persona.tech_stack:
+        profile_parts.append(f"Tech stack: {'; '.join(persona.tech_stack)}")
+    if persona.user_preferences:
+        profile_parts.append(f"User preferences: {'; '.join(persona.user_preferences)}")
+    persona_str = ""
+    if profile_parts:
+        persona_str = "\n\n[User Profile]\n" + "\n".join(profile_parts)
+    if persona_str:
+        parts.append(persona_str)
 
     if reply_input.message:
         results = retrieve_for_reply(reply_input.message)

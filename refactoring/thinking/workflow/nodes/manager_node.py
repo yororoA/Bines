@@ -57,8 +57,7 @@ def _check_convergence(state: GraphStatus) -> bool:
     return len(set(counts)) == 1
 
 
-def _assemble_manager_context(state: GraphStatus) -> list[Any]:
-    messages = list(state.get("messages", []))
+def _assemble_manager_context(state: GraphStatus) -> str:
     persona_snapshot = state.get("persona_snapshot", {})
     rag_recall = state.get("rag_recall", {})
     already_said = state.get("already_said", [])
@@ -71,10 +70,19 @@ def _assemble_manager_context(state: GraphStatus) -> list[Any]:
         context_parts.append(soul_prompt)
 
     persona = PersonaState.from_dict(persona_snapshot)
-    context_parts.append(
-        f"[Persona] Tone: {persona.tone}, Style: {persona.style}, "
-        f"Role: {persona.role_identity}"
-    )
+    profile_parts = []
+    if persona.user_name:
+        profile_parts.append(f"Name: {persona.user_name}")
+    if persona.speaking_habits:
+        profile_parts.append(f"Speaking habits: {'; '.join(persona.speaking_habits)}")
+    if persona.long_term_preferences:
+        profile_parts.append(f"Preferences: {'; '.join(persona.long_term_preferences)}")
+    if persona.tech_stack:
+        profile_parts.append(f"Tech stack: {'; '.join(persona.tech_stack)}")
+    if persona.user_preferences:
+        profile_parts.append(f"User preferences: {'; '.join(persona.user_preferences)}")
+    if profile_parts:
+        context_parts.append("[User Profile]\n" + "\n".join(profile_parts))
 
     if rag_recall and "formatted" in rag_recall:
         context_parts.append(f"[RAG Context]\n{rag_recall['formatted']}")
@@ -90,11 +98,7 @@ def _assemble_manager_context(state: GraphStatus) -> list[Any]:
             "[Already Said] " + "; ".join(already_said[-5:])
         )
 
-    context_str = "\n\n".join(context_parts)
-    if context_str:
-        messages.insert(0, SystemMessage(content=context_str))
-
-    return messages
+    return "\n\n".join(context_parts)
 
 
 def ManagerNode(
@@ -146,9 +150,10 @@ def ManagerNode(
             goto=[Send("final_reply", reply_input)],
         )
 
-    context_messages = _assemble_manager_context(state)
+    context_str = _assemble_manager_context(state)
+    invoke_messages = [SystemMessage(content=context_str)] + list(state.get("messages", []))
     try:
-        result: ManagerRoute = ManagerModel.invoke(context_messages)
+        result: ManagerRoute = ManagerModel.invoke(invoke_messages)
     except Exception:
         logger.exception("ManagerModel invoke failed, falling back to final_reply")
         reply_input = ReplyInput(
