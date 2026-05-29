@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import threading
 
@@ -10,28 +11,36 @@ logger = logging.getLogger(__name__)
 
 _PerformerAgent = None
 _PerformerLock = threading.Lock()
+_cached_soul_hash: str | None = None
+
+
+def _soul_hash(soul: str) -> str:
+    return hashlib.md5(soul.encode()).hexdigest()[:16]
 
 
 def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
-    global _PerformerAgent
+    global _PerformerAgent, _cached_soul_hash
 
     task_item = performer_input.task_item
     task_id = task_item.task_id
     task_description = task_item.description
     soul_prompt = performer_input.soul_prompt or ""
+    current_hash = _soul_hash(soul_prompt)
 
     try:
-        if _PerformerAgent is None:
+        needs_rebuild = _PerformerAgent is None or current_hash != _cached_soul_hash
+        if needs_rebuild:
             with _PerformerLock:
-                if _PerformerAgent is None:
+                if _PerformerAgent is None or current_hash != _cached_soul_hash:
                     registry = get_tool_registry()
                     tools = registry.get_tools(PERFORMER_TOOLS)
                     imports = registry.get_authorized_imports(PERFORMER_TOOLS)
 
-                    system_prompt = (
+                    base_prompt = (
                         "You are a helpful assistant that can search the web. "
                         "Always make sure you know the current time."
                     )
+                    system_prompt = f"{soul_prompt}\n\n{base_prompt}" if soul_prompt else base_prompt
 
                     _PerformerAgent = CodeAgent(
                         model=shared_smol_model.get(),
@@ -42,11 +51,9 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
                         max_retries=3,
                         max_steps=6,
                     )
+                    _cached_soul_hash = current_hash
 
-        run_input = task_description
-        if soul_prompt:
-            run_input = f"[System Persona]\n{soul_prompt}\n\n[Task]\n{task_description}"
-        result = _PerformerAgent.run(run_input)
+        result = _PerformerAgent.run(task_description)
 
         return {
             "tasks_done": {"performer": [TaskItem(task_id=task_id, description=str(result))]}

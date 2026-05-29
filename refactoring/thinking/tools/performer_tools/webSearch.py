@@ -1,5 +1,14 @@
 from smolagents import tool, DuckDuckGoSearchTool, WebSearchTool, VisitWebpageTool
 
+_search_tool = None
+
+
+def _get_search_tool():
+    global _search_tool
+    if _search_tool is None:
+        _search_tool = DuckDuckGoSearchTool()
+    return _search_tool
+
 
 @tool
 def webSearch(query: str) -> str:
@@ -14,8 +23,7 @@ def webSearch(query: str) -> str:
     Example:
         webSearch("Who is the current president of the United States?") -> "The current president is Joe Biden."
     """
-    search_tool = DuckDuckGoSearchTool()
-    return str(search_tool(query))
+    return str(_get_search_tool()(query))
 
 
 def get_search_tools() -> list:
