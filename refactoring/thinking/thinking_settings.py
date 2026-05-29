@@ -16,6 +16,9 @@ class ThinkingSettings(BaseSettings):
     NAPCAT_WS_TOKEN:str = ""
     NAPCAT_WS_RECONNECT_TIMEOUT:int = 5
     NAPCAT_WS_API_RESPONSE_TIMEOUT:int = 15
+    BOT_NUMBER: str = ""
+    DEBOUNCE_SECONDS: float = 3.0
+    WORKFLOW_TIMEOUT_SECONDS: float = 120.0
     DEDUP_SIMILARITY_THRESHOLD: float = 0.08
     MAX_INPUT_LENGTH: int = 4096
 
