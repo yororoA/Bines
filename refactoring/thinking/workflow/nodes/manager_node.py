@@ -12,7 +12,10 @@ from memory import PersonaState
 
 logger = logging.getLogger(__name__)
 
-_CONVERGENCE_WINDOW = 3
+
+def _get_convergence_window() -> int:
+    from thinking_settings import thinking_settings
+    return thinking_settings.CONVERGENCE_WINDOW
 
 
 def _make_reply_input(
@@ -47,14 +50,14 @@ def _get_done_ids(state: GraphStatus) -> set[str]:
     return done_ids
 
 
-def _check_convergence(state: GraphStatus, current_task_count: int) -> bool:
+def _check_convergence(state: GraphStatus, current_task_count: int) -> tuple[bool, int]:
     last_count = state.get("last_task_count", -1)
     counter = state.get("convergence_counter", 0)
     if current_task_count == last_count and current_task_count >= 0:
         counter += 1
     else:
         counter = 0
-    return counter >= _CONVERGENCE_WINDOW
+    return counter >= _get_convergence_window(), counter
 
 
 def _assemble_manager_context(state: GraphStatus) -> str:
@@ -105,7 +108,10 @@ def ManagerNode(
 
     soul_prompt = state.get("soul_prompt", "")
 
-    if current_iteration > 1 and _check_convergence(state, task_count):
+    converged, new_counter = _check_convergence(state, task_count)
+    state_update["convergence_counter"] = new_counter
+
+    if current_iteration > 1 and converged:
         logger.info(
             "Convergence detected at iteration %d with %d tasks done",
             current_iteration, task_count,
@@ -116,7 +122,7 @@ def ManagerNode(
             soul_prompt=soul_prompt,
         )
         state_update["thoughts"] = [
-            f"[Convergence] No new tasks for {_CONVERGENCE_WINDOW} iterations. "
+            f"[Convergence] No new tasks for {_get_convergence_window()} iterations. "
             f"Total tasks: {task_count}"
         ]
         state_update["convergence_counter"] = 0
@@ -145,12 +151,6 @@ def ManagerNode(
         )
 
     state_update["thoughts"] = [result.thoughts]
-
-    last_count = state.get("last_task_count", -1)
-    if task_count == last_count and task_count >= 0:
-        state_update["convergence_counter"] = state.get("convergence_counter", 0) + 1
-    else:
-        state_update["convergence_counter"] = 0
 
     if result.goto_final_reply:
         reply_input = _make_reply_input(

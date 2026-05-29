@@ -101,7 +101,11 @@ class Workflow:
         try:
             return future.result(timeout=timeout)
         except FuturesTimeoutError:
-            logger.error("Workflow timeout after %.1fs for thread %s", timeout, thread_id)
+            logger.error(
+                "Workflow timeout after %.1fs for thread %s. "
+                "The task may still be running in background.",
+                timeout, thread_id,
+            )
             future.cancel()
             return {
                 "messages": [HumanMessage(content="[System: Workflow timed out. Please try again.]")],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import uuid
@@ -12,9 +13,14 @@ from tools import get_tool_registry, REPLY_TOOLS
 
 logger = logging.getLogger(__name__)
 
-_ReplyModel = None
+_ReplyAgent = None
 _ReplyTools = None
 _ReplyLock = threading.Lock()
+_cached_prompt_hash: str | None = None
+
+
+def _prompt_hash(prompt: str) -> str:
+    return hashlib.md5(prompt.encode()).hexdigest()[:16]
 
 
 def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
@@ -59,36 +65,35 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
 
 
 def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
-    global _ReplyModel, _ReplyTools
+    global _ReplyAgent, _cached_prompt_hash
 
     try:
         prompt = _build_reply_system_prompt(reply_input)
+        current_hash = _prompt_hash(prompt)
 
-        if _ReplyModel is None:
+        needs_rebuild = _ReplyAgent is None or current_hash != _cached_prompt_hash
+        if needs_rebuild:
             with _ReplyLock:
-                if _ReplyModel is None:
-                    _ReplyModel = shared_smol_model.get()
+                if _ReplyAgent is None or current_hash != _cached_prompt_hash:
+                    if _ReplyTools is None:
+                        registry = get_tool_registry()
+                        _ReplyTools = registry.get_tools(REPLY_TOOLS)
 
-        if _ReplyTools is None:
-            with _ReplyLock:
-                if _ReplyTools is None:
-                    registry = get_tool_registry()
-                    _ReplyTools = registry.get_tools(REPLY_TOOLS)
+                    _ReplyAgent = CodeAgent(
+                        model=shared_smol_model.get(),
+                        name="ReplyAgent",
+                        description="Agent used to reply to the user.",
+                        tools=_ReplyTools,
+                        additional_authorized_imports=["datetime"],
+                        system_prompt=prompt,
+                        output_schema=list[TaskItem],
+                        max_tokens=1024,
+                        max_retries=3,
+                        max_steps=6,
+                    )
+                    _cached_prompt_hash = current_hash
 
-        agent = CodeAgent(
-            model=_ReplyModel,
-            name="ReplyAgent",
-            description="Agent used to reply to the user.",
-            tools=_ReplyTools,
-            additional_authorized_imports=["datetime"],
-            system_prompt=prompt,
-            output_schema=list[TaskItem],
-            max_tokens=1024,
-            max_retries=3,
-            max_steps=6,
-        )
-
-        feedback: list[TaskItem] = agent.run(
+        feedback: list[TaskItem] = _ReplyAgent.run(
             {"tasks": reply_input.tasks, "message": reply_input.message}
         )
 

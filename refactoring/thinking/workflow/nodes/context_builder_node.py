@@ -47,11 +47,14 @@ def _load_persona(state: GraphStatus) -> dict[str, Any]:
     if cached is not None:
         return cached
 
+    old_version = persona_cache.version
     store = get_memory_store()
     persona_entries = store.get_all(COLLECTION_PERSONA)
     if not persona_entries:
         snapshot = PersonaState().to_dict()
         persona_cache.put(snapshot)
+        if persona_cache.has_changed_since(old_version):
+            logger.info("Persona updated (version %d -> %d)", old_version, persona_cache.version)
         return snapshot
 
     by_category: dict[str, dict[str, Any]] = {}
@@ -85,6 +88,8 @@ def _load_persona(state: GraphStatus) -> dict[str, Any]:
         user_preferences=_split_list("user_preferences"),
     ).to_dict()
     persona_cache.put(snapshot)
+    if persona_cache.has_changed_since(old_version):
+        logger.info("Persona updated (version %d -> %d)", old_version, persona_cache.version)
     return snapshot
 
 

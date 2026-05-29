@@ -101,7 +101,7 @@ def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
                     context_text, persona=persona
                 )
 
-                if judgment.should_store and judgment.memory_type == "summary":
+                if judgment.should_store and judgment.memory_type == "buffer":
                     add_to_buffer(
                         judgment.rewritten_content or context_text,
                         metadata={"topic": judgment.topic, "importance": judgment.importance},

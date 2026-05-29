@@ -104,7 +104,7 @@ class NapCatClient:
         workflow = _get_workflow()
         try:
             task = asyncio.create_task(
-                asyncio.get_event_loop().run_in_executor(
+                asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: workflow.invoke(combined, thread_id=thread_id),
                 )
