@@ -8,7 +8,7 @@ Thinking is an AI Agent conversational system built on LangGraph, integrated wit
 
 ## System Architecture
 
-```
+```text
 napcat_server/          tools/                  workflow/
     |                      |                        |
     v                      v                        v
@@ -20,7 +20,7 @@ napcat_server/          tools/                  workflow/
 
 ## Workflow Pipeline
 
-```
+```text
 context_builder --> manager --> performer --> manager (loop)
                      |                          |
                      +--> advance_reply --------+
@@ -31,7 +31,7 @@ context_builder --> manager --> performer --> manager (loop)
 ### Node Responsibilities
 
 | Node | File | Responsibility |
-|------|------|---------------|
+| ------ | ------ | ----------------- |
 | context_builder | `workflow/nodes/context_builder_node.py` | Load SOUL.md persona, RAG retrieval, persona snapshot |
 | manager | `workflow/nodes/manager_node.py` | LLM-driven task planning & routing (ManagerRoute structured output) |
 | performer | `workflow/nodes/performer_node.py` | Execute search/action tasks via smolagents CodeAgent |
@@ -45,7 +45,7 @@ context_builder --> manager --> performer --> manager (loop)
 ### Collection Architecture
 
 | Collection | Purpose |
-|-----------|---------|
+| ------ | ----------------- |
 | `summary` | Event summaries, topic abstractions |
 | `knowledge` | Stable reusable knowledge (tech facts, project info) |
 | `persona` | User long-term traits (preferences, habits, tech stack) |
@@ -55,7 +55,7 @@ context_builder --> manager --> performer --> manager (loop)
 
 ### Memory Lifecycle
 
-```
+```text
 Conversation --> judge_and_store (LLM) --> [summary] --> buffer --> daily consolidation --> diary + sliced_diary
                                          --> [knowledge] --> ChromaDB
                                          --> [persona] --> ChromaDB (with cache invalidation)
@@ -65,6 +65,7 @@ Conversation --> judge_and_store (LLM) --> [summary] --> buffer --> daily consol
 ### Decay Mechanism
 
 Knowledge collections (summary, knowledge, diary) decay over time:
+
 - Half-life: 30 days
 - Importance-based exponential decay
 - Max entries cap: 500 per collection
@@ -101,7 +102,7 @@ registry.register(ModelProvider(
 `tools/tool_registry.py` provides dynamic tool registration:
 
 | Category | Typical Tools | Consumer |
-|----------|--------------|----------|
+| ------ | ----------------- |
 | `PERFORMER_TOOLS` | webSearch, DuckDuckGoSearch, WebSearch, VisitWebpage | performer_node |
 | `REPLY_TOOLS` | send_msg (QQ) | reply_node |
 | `COMMON_TOOLS` | get_time | all nodes |
@@ -119,7 +120,7 @@ registry.register_tool(PERFORMER_TOOLS, my_new_tool, authorized_imports=["json"]
 
 ### Message Flow
 
-```
+```text
 QQ Client --> NapCat WebSocket --> json parse --> message_queue --> _process_loop --> Workflow.invoke()
 ```
 
@@ -149,7 +150,7 @@ Defined in `workflow/status/graph_status.py`:
 All settings managed via `ThinkingSettings` (Pydantic BaseSettings) in `thinking_settings.py`:
 
 | Setting | Default | Description |
-|---------|---------|-------------|
+| ------ | ------ | ----------------- |
 | MODEL_SELECTED | deepseek-v4-flash | Active model name |
 | DEBOUNCE_SECONDS | 3.0 | Message debounce cooldown |
 | WORKFLOW_TIMEOUT_SECONDS | 120.0 | Workflow execution timeout |
@@ -162,7 +163,7 @@ SQLite checkpoints via LangGraph SqliteSaver, three thread IDs (`raw_chat`, `QQ_
 
 ## Directory Structure
 
-```
+```text
 thinking/
 ├── main.py                         # Entry point
 ├── thinking_settings.py            # Pydantic Settings config
