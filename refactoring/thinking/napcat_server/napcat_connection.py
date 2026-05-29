@@ -4,6 +4,7 @@ import json
 import uuid
 import random
 import logging
+from collections import OrderedDict
 
 import asyncio
 import websockets
@@ -13,6 +14,7 @@ from thinking_settings import thinking_settings
 logger = logging.getLogger(__name__)
 
 _workflow = None
+_MAX_SEEN_MESSAGES = 1000
 
 
 def _get_workflow():
@@ -31,6 +33,15 @@ class NapCatClient:
         self._pending_requests: dict[str, asyncio.Future] = {}
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._connection_task: asyncio.Task | None = None
+        self._seen_message_ids: OrderedDict = OrderedDict()
+
+    def _is_duplicate(self, message_id: str) -> bool:
+        if message_id in self._seen_message_ids:
+            return True
+        self._seen_message_ids[message_id] = None
+        if len(self._seen_message_ids) > _MAX_SEEN_MESSAGES:
+            self._seen_message_ids.popitem(last=False)
+        return False
 
     async def process_messages(self):
         self._connection_task = asyncio.create_task(self._connect())
@@ -123,6 +134,11 @@ class NapCatClient:
     async def _process_event(self, data: dict):
         post_type = data.get("post_type")
         if post_type != "message":
+            return
+
+        message_id = data.get("message_id")
+        if message_id is not None and self._is_duplicate(str(message_id)):
+            logger.debug("Duplicate message_id=%s ignored", message_id)
             return
 
         message_type = data.get("message_type", "")
