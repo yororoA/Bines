@@ -7,7 +7,6 @@ __all__ = [
     "GraphStatus",
     "TaskItem",
     "ReplyInput",
-    "_RESET",
     "MAX_ITERATIONS",
     "MESSAGE_WINDOW_SIZE",
     "MESSAGE_TRIM_SIZE",

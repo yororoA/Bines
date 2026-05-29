@@ -66,6 +66,8 @@ def StatusTrimNode(state: GraphStatus) -> dict:
 
     if len(messages) >= MESSAGE_WINDOW_SIZE:
         trim_at = _find_trim_index(messages, MESSAGE_TRIM_SIZE)
+        if trim_at >= len(messages):
+            trim_at = len(messages)
         to_summarize = messages[:trim_at]
         to_keep = messages[trim_at:]
 

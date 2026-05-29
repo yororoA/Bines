@@ -46,6 +46,7 @@ class NapCatClient:
         self._debounce_timers: dict[str, asyncio.Task] = {}
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._pending_buffers: dict[str, list[str]] = {}
+        self._main_loop: asyncio.AbstractEventLoop | None = None
 
     def _is_duplicate(self, message_id: str) -> bool:
         if message_id in self._seen_message_ids:
@@ -155,6 +156,8 @@ class NapCatClient:
         headers = {"Authorization": f"Bearer {self.token}"}
         backoff = thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT
         max_backoff = 60
+
+        self._main_loop = asyncio.get_running_loop()
 
         while True:
             try:
@@ -275,6 +278,9 @@ class NapCatClient:
                 return True
             await asyncio.sleep(0.1)
         return False
+
+    def get_main_loop(self) -> asyncio.AbstractEventLoop | None:
+        return self._main_loop
 
     async def call_api(self, *, action, params=None):
         if not self.websocket:

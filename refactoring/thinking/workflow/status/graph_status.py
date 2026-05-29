@@ -45,6 +45,8 @@ class GraphStatus(TypedDict):
     tasks_done: Annotated[dict[str, list[TaskItem]], merge_tasks]
     thoughts: Annotated[list[str], cap_list]
     iteration_count: int
+    last_task_count: int
+    convergence_counter: int
     persona_snapshot: dict
     rag_recall: dict
     soul_prompt: str
