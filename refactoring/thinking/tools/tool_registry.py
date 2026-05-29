@@ -10,7 +10,6 @@ ToolCategory = str
 
 PERFORMER_TOOLS = "performer"
 REPLY_TOOLS = "reply"
-COMMON_TOOLS = "common"
 
 
 class ToolRegistry:
@@ -18,12 +17,10 @@ class ToolRegistry:
         self._tools: dict[ToolCategory, list[Any]] = {
             PERFORMER_TOOLS: [],
             REPLY_TOOLS: [],
-            COMMON_TOOLS: [],
         }
         self._authorized_imports: dict[ToolCategory, set[str]] = {
             PERFORMER_TOOLS: set(),
             REPLY_TOOLS: set(),
-            COMMON_TOOLS: set(),
         }
         self._discovered: bool = False
         self._defaults_registered: bool = False
@@ -97,8 +94,6 @@ def register_default_tools():
     registry._defaults_registered = True
 
     registry.register_tool(PERFORMER_TOOLS, webSearch, SEARCH_AUTHORIZED_IMPORTS)
-    for tool in get_search_tools():
-        registry.register_tool(PERFORMER_TOOLS, tool)
 
     registry.register_tool(REPLY_TOOLS, send_msg)
     registry.register_tool(REPLY_TOOLS, delete_msg)

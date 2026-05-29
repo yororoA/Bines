@@ -8,12 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 def _run_async(coro):
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
+    client = get_client()
+    main_loop = client.get_main_loop() if client else None
+    if main_loop and main_loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(coro, main_loop)
         return future.result(
             timeout=thinking_settings.NAPCAT_WS_API_RESPONSE_TIMEOUT + 5
         )

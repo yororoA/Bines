@@ -1,6 +1,7 @@
 from smolagents import tool, DuckDuckGoSearchTool, WebSearchTool, VisitWebpageTool
 
 _search_tool = None
+_search_tools = None
 
 
 def _get_search_tool():
@@ -27,7 +28,10 @@ def webSearch(query: str) -> str:
 
 
 def get_search_tools() -> list:
-    return [DuckDuckGoSearchTool(), WebSearchTool(), VisitWebpageTool()]
+    global _search_tools
+    if _search_tools is None:
+        _search_tools = [DuckDuckGoSearchTool(), WebSearchTool(), VisitWebpageTool()]
+    return list(_search_tools)
 
 
 SEARCH_AUTHORIZED_IMPORTS = ["datetime", "requests", "json", "httpx"]
