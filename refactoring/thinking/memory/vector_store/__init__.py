@@ -1,7 +1,6 @@
 from .chroma_store import (
     ChromaMemoryStore,
     get_memory_store,
-    COLLECTION_SUMMARY,
     COLLECTION_KNOWLEDGE,
     COLLECTION_PERSONA,
     COLLECTION_DIARY,
@@ -13,7 +12,6 @@ from .chroma_store import (
 __all__ = [
     "ChromaMemoryStore",
     "get_memory_store",
-    "COLLECTION_SUMMARY",
     "COLLECTION_KNOWLEDGE",
     "COLLECTION_PERSONA",
     "COLLECTION_DIARY",

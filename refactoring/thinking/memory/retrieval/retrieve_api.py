@@ -5,13 +5,11 @@ from typing import Any
 from ..vector_store.chroma_store import (
     ChromaMemoryStore,
     get_memory_store,
-    COLLECTION_SUMMARY,
     COLLECTION_KNOWLEDGE,
     COLLECTION_PERSONA,
     COLLECTION_SLICED_DIARY,
 )
 
-DEFAULT_SUMMARY_K = 3
 DEFAULT_KNOWLEDGE_K = 5
 DEFAULT_PERSONA_K = 4
 DEFAULT_DIARY_K = 2
@@ -22,7 +20,6 @@ RETRIEVAL_SCORE_THRESHOLD = 1.5
 
 def retrieve_memories(
     query: str,
-    summary_k: int = DEFAULT_SUMMARY_K,
     knowledge_k: int = DEFAULT_KNOWLEDGE_K,
     persona_k: int = DEFAULT_PERSONA_K,
     diary_k: int = DEFAULT_DIARY_K,
@@ -31,9 +28,6 @@ def retrieve_memories(
 ) -> dict[str, list[dict[str, Any]]]:
     memory_store = store or get_memory_store()
 
-    summaries = memory_store.search_with_filter(
-        COLLECTION_SUMMARY, query, k=summary_k, target_day_key=day_key
-    )
     knowledge = memory_store.search_with_filter(
         COLLECTION_KNOWLEDGE, query, k=knowledge_k, target_day_key=day_key
     )
@@ -45,7 +39,6 @@ def retrieve_memories(
     )
 
     return {
-        "summaries": summaries,
         "knowledge": knowledge,
         "persona": persona,
         "diary": diary,
@@ -58,7 +51,6 @@ def retrieve_for_reply(
 ) -> dict[str, list[dict[str, Any]]]:
     return retrieve_memories(
         query,
-        summary_k=3,
         knowledge_k=3,
         persona_k=4,
         diary_k=2,
@@ -72,7 +64,6 @@ def retrieve_for_manager(
 ) -> dict[str, list[dict[str, Any]]]:
     return retrieve_memories(
         query,
-        summary_k=3,
         knowledge_k=5,
         persona_k=2,
         diary_k=1,
@@ -86,7 +77,6 @@ def retrieve_for_performer(
 ) -> dict[str, list[dict[str, Any]]]:
     return retrieve_memories(
         query,
-        summary_k=1,
         knowledge_k=3,
         persona_k=0,
         diary_k=0,

@@ -15,12 +15,13 @@ from ..vector_store.chroma_store import (
     COLLECTION_DIARY,
 )
 from ..persona_state import PersonaState, persona_cache
+from ..lifecycle.buffer_diary import add_to_buffer
 from utils import generate_langchain_model
 from utils.time_utils import day_key
 
 logger = logging.getLogger(__name__)
 
-MemoryType = Literal["summary", "knowledge", "persona", "diary"]
+MemoryType = Literal["knowledge", "persona", "diary"]
 
 
 class MemoryJudgment(BaseModel):
@@ -89,8 +90,6 @@ _JUDGE_PROMPT_TEMPLATE = (
     "Your job is to decide whether a piece of conversational content is worth "
     "storing in long-term memory, and if so, which type of memory it belongs to.\n\n"
     "Memory types:\n"
-    "- summary: Periodic event summaries, task completion summaries, topic summaries. "
-    "NOT simple chat compression, but semantic event abstraction.\n"
     "- knowledge: Stable, reusable knowledge — technical facts, project knowledge, "
     "user's long-term work knowledge extracted from conversations.\n"
     "- persona: Long-term stable information about the user — preferences, habits, "
@@ -125,6 +124,10 @@ def judge_and_store(
         return judgment
 
     if judgment.memory_type == "summary":
+        add_to_buffer(
+            judgment.rewritten_content or content,
+            metadata={"topic": judgment.topic, "importance": judgment.importance},
+        )
         return judgment
 
     final_content = judgment.rewritten_content or content

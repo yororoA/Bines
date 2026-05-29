@@ -9,10 +9,8 @@ from memory import (
     MemoryJudgment,
     judge_and_store,
     add_to_buffer,
-    get_existing_diary_day_keys,
     consolidate_buffer_to_diary,
     get_memory_store,
-    COLLECTION_SUMMARY,
     COLLECTION_KNOWLEDGE,
     COLLECTION_DIARY,
 )
@@ -70,20 +68,12 @@ def _extract_context_for_memory(state: GraphStatus) -> str:
 
 def _should_trigger_diary(diary_triggered_day: str) -> bool:
     current_day = day_key()
-
-    if diary_triggered_day == current_day:
-        return False
-
-    existing_days = get_existing_diary_day_keys()
-    if current_day not in existing_days:
-        return True
-
-    return False
+    return diary_triggered_day != current_day
 
 
 def _run_memory_decay():
     store = get_memory_store()
-    for col in (COLLECTION_SUMMARY, COLLECTION_KNOWLEDGE, COLLECTION_DIARY):
+    for col in (COLLECTION_KNOWLEDGE, COLLECTION_DIARY):
         try:
             removed = store.decay_collection(col)
             if removed:

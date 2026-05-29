@@ -15,7 +15,6 @@ from utils.time_utils import day_key
 
 logger = logging.getLogger(__name__)
 
-COLLECTION_SUMMARY = "summary"
 COLLECTION_KNOWLEDGE = "knowledge"
 COLLECTION_PERSONA = "persona"
 COLLECTION_DIARY = "diary"
@@ -23,7 +22,6 @@ COLLECTION_SLICED_DIARY = "sliced_diary"
 COLLECTION_BUFFER = "buffer"
 
 ALL_COLLECTIONS = [
-    COLLECTION_SUMMARY,
     COLLECTION_KNOWLEDGE,
     COLLECTION_PERSONA,
     COLLECTION_DIARY,

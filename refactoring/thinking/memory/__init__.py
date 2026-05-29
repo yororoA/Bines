@@ -2,7 +2,6 @@ from .persona_state import PersonaState, PersonaCache, persona_cache
 from .vector_store import (
     ChromaMemoryStore,
     get_memory_store,
-    COLLECTION_SUMMARY,
     COLLECTION_KNOWLEDGE,
     COLLECTION_PERSONA,
     COLLECTION_DIARY,
@@ -31,7 +30,6 @@ __all__ = [
     "persona_cache",
     "ChromaMemoryStore",
     "get_memory_store",
-    "COLLECTION_SUMMARY",
     "COLLECTION_KNOWLEDGE",
     "COLLECTION_PERSONA",
     "COLLECTION_DIARY",
