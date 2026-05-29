@@ -29,7 +29,7 @@ class MemoryJudgment(BaseModel):
         description="Whether this content is worth storing in long-term memory."
     )
     memory_type: MemoryType = Field(
-        description="Which memory type: summary, knowledge, persona, or diary."
+        description="Which memory type: knowledge, persona, diary, or buffer."
     )
     importance: float = Field(
         default=5.0,
@@ -95,6 +95,7 @@ _JUDGE_PROMPT_TEMPLATE = (
     "- persona: Long-term stable information about the user — preferences, habits, "
     "tech stack, style preferences, stable identity traits. NOT temporary questions.\n"
     "- diary: Personal diary entries, emotional reflections, daily experiences.\n\n"
+    "- buffer: Raw conversation fragments to be consolidated into a diary later.\n\n"
     "Current persona context:\n{persona_context}\n\n"
     "Content to judge:\n{content}\n\n"
     "Decide: should this be stored? If yes, which type, importance level, "
