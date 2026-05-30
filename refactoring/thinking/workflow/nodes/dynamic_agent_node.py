@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from ..status import GraphStatus
+from ..cancel import get_cancel_event
 from memory import (
     PersonaState,
     MemoryJudgment,
@@ -82,6 +83,11 @@ def _run_memory_decay():
 
 
 def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
+    cancel_event = get_cancel_event()
+    if cancel_event.is_set():
+        logger.info("DynamicAgentNode cancelled")
+        return {}
+
     invocation_count = state.get("invocation_count", 0) + 1
     diary_triggered_day = state.get("diary_triggered_day", "")
     new_diary_triggered_day = diary_triggered_day

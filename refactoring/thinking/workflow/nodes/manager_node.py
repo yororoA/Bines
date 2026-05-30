@@ -8,6 +8,7 @@ from langgraph.types import Command, Send
 
 from utils import shared_langchain_model
 from ..status import GraphStatus, ManagerRoute, PerformerInput, ReplyInput, MAX_ITERATIONS
+from ..cancel import get_cancel_event
 from memory import PersonaState
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,18 @@ def _assemble_manager_context(state: GraphStatus) -> str:
 def ManagerNode(
     state: GraphStatus,
 ) -> Command[Literal["performer", "advance_reply", "final_reply"]]:
+    cancel_event = get_cancel_event()
+    if cancel_event.is_set():
+        logger.info("ManagerNode cancelled, routing to final_reply")
+        reply_input = _make_reply_input(
+            state,
+            message="[System: Workflow was cancelled.]",
+            soul_prompt=state.get("soul_prompt", ""),
+        )
+        return Command(
+            goto=[Send("final_reply", reply_input)],
+        )
+
     current_iteration = state.get("iteration_count", 0) + 1
     done_ids = _get_done_ids(state)
     task_count = len(done_ids)

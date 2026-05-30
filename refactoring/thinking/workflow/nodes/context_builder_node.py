@@ -7,6 +7,7 @@ from typing import Any
 from langchain.messages import HumanMessage
 
 from ..status import GraphStatus
+from ..cancel import get_cancel_event
 
 logger = logging.getLogger(__name__)
 from memory import (
@@ -111,6 +112,11 @@ def _build_rag_recall(query: str) -> dict[str, Any]:
 
 
 def ContextBuilderNode(state: GraphStatus) -> dict:
+    cancel_event = get_cancel_event()
+    if cancel_event.is_set():
+        logger.info("ContextBuilderNode cancelled")
+        return {}
+
     query = _extract_query(state)
     persona_snapshot = _load_persona(state)
     rag_recall = _build_rag_recall(query)

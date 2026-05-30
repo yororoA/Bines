@@ -6,6 +6,7 @@ from utils import shared_smol_model
 from smolagents import CodeAgent
 from tools import get_tool_registry, PERFORMER_TOOLS
 from ..status import PerformerInput, TaskItem
+from ..cancel import get_cancel_event
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,16 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
     current_hash = _soul_hash(soul_prompt)
 
     try:
+        cancel_event = get_cancel_event()
+        if cancel_event.is_set():
+            logger.info("PerformerNode cancelled for task %s", task_id)
+            return {
+                "tasks_done": {"performer": [TaskItem(
+                    task_id=task_id,
+                    description="[CANCELLED] Task was cancelled due to workflow timeout.",
+                )]}
+            }
+
         needs_rebuild = _PerformerAgent is None or current_hash != _cached_soul_hash
         if needs_rebuild:
             with _PerformerLock:
@@ -60,7 +71,7 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
         return {
             "tasks_done": {"performer": [TaskItem(task_id=task_id, description=str(result))]}
         }
-    except Exception as e:
+    except Exception:
         logger.exception("PerformerNode failed for task %s", task_id)
         return {
             "tasks_done": {"performer": [TaskItem(

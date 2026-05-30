@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from langchain.messages import SystemMessage
 from ..status import GraphStatus, RESET, MESSAGE_WINDOW_SIZE, MESSAGE_TRIM_SIZE
+from ..cancel import get_cancel_event
 from utils import shared_langchain_model
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,11 @@ def _summarize_messages(messages: list) -> str:
 
 
 def StatusTrimNode(state: GraphStatus) -> dict:
+    cancel_event = get_cancel_event()
+    if cancel_event.is_set():
+        logger.info("StatusTrimNode cancelled")
+        return {}
+
     messages = state.get("messages", [])
 
     result = {

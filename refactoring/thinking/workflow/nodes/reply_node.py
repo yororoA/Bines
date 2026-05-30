@@ -8,6 +8,7 @@ import uuid
 from smolagents import CodeAgent
 from utils import shared_smol_model
 from ..status import ReplyInput, TaskItem
+from ..cancel import get_cancel_event
 from memory import PersonaState, retrieve_for_reply, format_retrieval_results
 from tools import get_tool_registry, REPLY_TOOLS
 
@@ -69,6 +70,15 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
     global _ReplyAgent, _ReplyTools, _cached_prompt_hash
 
     try:
+        cancel_event = get_cancel_event()
+        if cancel_event.is_set():
+            logger.info("ReplyNode cancelled")
+            fallback = [TaskItem(task_id=f"reply_cancel_{uuid.uuid4().hex[:8]}", description="[CANCELLED] Workflow was cancelled due to timeout.")]
+            return {
+                "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": fallback},
+                "already_said": [],
+            }
+
         prompt = _build_reply_system_prompt(reply_input)
         current_hash = _prompt_hash(prompt)
 
@@ -105,7 +115,7 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
             "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": feedback},
             "already_said": already_said_entries,
         }
-    except Exception as e:
+    except Exception:
         logger.exception("ReplyNode failed")
         fallback = [TaskItem(task_id=f"reply_error_{uuid.uuid4().hex[:8]}", description="[REPLY_FAILED] Could not generate a reply. Please try rephrasing your message.")]
         return {
