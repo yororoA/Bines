@@ -83,8 +83,10 @@ async def main():
     except Exception:
         logger.exception("Unexpected error")
     finally:
+        from napcat_server.napcat_connection import close_workflow
         if napcat_client:
             await napcat_client.close()
+        close_workflow()
 
 
 if __name__ == "__main__":

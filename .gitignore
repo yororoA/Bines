@@ -56,3 +56,4 @@ ts_ai_sdk_gateway/.env.example
 test/
 
 memory_data/
+tests/
