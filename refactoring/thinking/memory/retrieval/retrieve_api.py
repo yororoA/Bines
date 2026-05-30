@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from thinking_settings import thinking_settings
 from ..vector_store.chroma_store import (
     ChromaMemoryStore,
     get_memory_store,
@@ -10,32 +11,28 @@ from ..vector_store.chroma_store import (
     COLLECTION_SLICED_DIARY,
 )
 
-DEFAULT_KNOWLEDGE_K = 5
-DEFAULT_PERSONA_K = 4
-DEFAULT_DIARY_K = 2
-
-
-RETRIEVAL_SCORE_THRESHOLD = 1.5
-
 
 def retrieve_memories(
     query: str,
-    knowledge_k: int = DEFAULT_KNOWLEDGE_K,
-    persona_k: int = DEFAULT_PERSONA_K,
-    diary_k: int = DEFAULT_DIARY_K,
+    knowledge_k: int | None = None,
+    persona_k: int | None = None,
+    diary_k: int | None = None,
     day_key: str | None = None,
     store: ChromaMemoryStore | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     memory_store = store or get_memory_store()
+    _knowledge_k = knowledge_k if knowledge_k is not None else thinking_settings.RETRIEVAL_KNOWLEDGE_K
+    _persona_k = persona_k if persona_k is not None else thinking_settings.RETRIEVAL_PERSONA_K
+    _diary_k = diary_k if diary_k is not None else thinking_settings.RETRIEVAL_DIARY_K
 
     knowledge = memory_store.search_with_filter(
-        COLLECTION_KNOWLEDGE, query, k=knowledge_k, target_day_key=day_key
+        COLLECTION_KNOWLEDGE, query, k=_knowledge_k, target_day_key=day_key
     )
     persona = memory_store.search_with_filter(
-        COLLECTION_PERSONA, query, k=persona_k, target_day_key=day_key
+        COLLECTION_PERSONA, query, k=_persona_k, target_day_key=day_key
     )
     diary = memory_store.search_with_filter(
-        COLLECTION_SLICED_DIARY, query, k=diary_k, target_day_key=day_key
+        COLLECTION_SLICED_DIARY, query, k=_diary_k, target_day_key=day_key
     )
 
     return {
