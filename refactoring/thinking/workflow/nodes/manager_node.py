@@ -153,8 +153,11 @@ def ManagerNode(
 
     context_str = _assemble_manager_context(state)
     invoke_messages = [SystemMessage(content=context_str)] + list(state.get("messages", []))
+    logger.info("ManagerNode: calling LLM with %d messages", len(invoke_messages))
     try:
         result: ManagerRoute = shared_langchain_model.get_structured(ManagerRoute).invoke(invoke_messages)
+        logger.info("ManagerNode: LLM response received, goto_final=%s, goto_advance=%s, tasks=%d",
+                    result.goto_final_reply, result.goto_advance_reply, len(result.performer_tasks))
     except Exception:
         logger.exception("ManagerModel invoke failed, falling back to final_reply")
         reply_input = _make_reply_input(state, soul_prompt=soul_prompt)

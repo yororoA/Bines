@@ -81,7 +81,7 @@ class Workflow:
 
     def _compile(self):
         base_dir = Path(__file__).resolve().parents[1]
-        checkpoints_dir = base_dir / "data/checkpoints"
+        checkpoints_dir = base_dir / "memory_data/checkpoints"
         checkpoints_dir.mkdir(exist_ok=True, parents=True)
 
         self._sqlite_conn = sqlite3.connect(
@@ -98,6 +98,7 @@ class Workflow:
         if timeout is None:
             timeout = thinking_settings.WORKFLOW_TIMEOUT_SECONDS
 
+        logger.info("Workflow.invoke: thread=%s, input=%s, timeout=%.1fs", thread_id, input[:100], timeout)
         initial_state = GraphStatus(
             messages=[HumanMessage(content=input)],
         )
@@ -106,7 +107,9 @@ class Workflow:
         _cancel_event.clear()
         future = self._executor.submit(self._app.invoke, initial_state, config)
         try:
-            return future.result(timeout=timeout)
+            result = future.result(timeout=timeout)
+            logger.info("Workflow.invoke: completed for thread=%s", thread_id)
+            return result
         except FuturesTimeoutError:
             logger.error(
                 "Workflow timeout after %.1fs for thread %s. "

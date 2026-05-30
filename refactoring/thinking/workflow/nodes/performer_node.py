@@ -65,8 +65,10 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
                     )
                     _cached_soul_hash = current_hash
 
+        logger.info("PerformerNode: running task %s: %s", task_id, task_description[:100])
         with _PerformerRunLock:
             result = _PerformerAgent.run(task_description)
+        logger.info("PerformerNode: task %s completed, result=%s", task_id, str(result)[:200])
 
         return {
             "tasks_done": {"performer": [TaskItem(task_id=task_id, description=str(result))]}

@@ -104,10 +104,12 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
                     )
                     _cached_prompt_hash = current_hash
 
+        logger.info("ReplyNode: calling agent with message=%s", reply_input.message[:100] if reply_input.message else "None")
         with _ReplyRunLock:
             feedback: list[TaskItem] = _ReplyAgent.run(
                 {"tasks": reply_input.tasks, "message": reply_input.message}
             )
+        logger.info("ReplyNode: agent returned %d feedback items", len(feedback))
 
         already_said_entries = [item.description for item in feedback if item.description]
 
