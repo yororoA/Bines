@@ -238,14 +238,17 @@ class NapCatClient:
                 try:
                     await self._process_event(data)
                     break
-                except Exception:
+                except (ConnectionError, TimeoutError, OSError) as exc:
                     if attempt < 2:
                         logger.warning(
-                            "Retry %d/3 for message processing", attempt + 1
+                            "Transient error (attempt %d/3): %s", attempt + 1, exc
                         )
                         await asyncio.sleep(1)
                     else:
-                        logger.exception("Failed to process message after 3 attempts")
+                        logger.exception("Transient error after 3 attempts")
+                except Exception:
+                    logger.exception("Permanent error processing message, skipping retries")
+                    break
 
     async def _process_event(self, data: dict):
         post_type = data.get("post_type")
