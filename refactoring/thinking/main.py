@@ -14,6 +14,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _validate_llm_provider_config() -> bool:
+    """Fail fast if no LLM provider is configured for the selected model."""
+    try:
+        from utils.model_registry import ensure_registry_initialized, get_model_registry
+
+        ensure_registry_initialized()
+        registry = get_model_registry()
+        provider = registry.find(thinking_settings.MODEL_SELECTED)
+        if provider:
+            return True
+
+        names = registry.all_model_names
+        logger.error(
+            "No provider configured for MODEL_SELECTED=%s. "
+            "Registered models=%s. Please fill thinking.env (see thinking.env.example).",
+            thinking_settings.MODEL_SELECTED,
+            names,
+        )
+        return False
+    except Exception:
+        logger.exception("LLM provider validation failed")
+        return False
+
+
 def _run_startup_buffer_consolidation():
     try:
         from memory import (
@@ -45,6 +69,9 @@ def _run_startup_buffer_consolidation():
 
 async def main():
     import napcat_server.global_client as gc
+
+    if not _validate_llm_provider_config():
+        return
 
     napcat_client = NapCatClient(
         thinking_settings.NAPCAT_WS_SERVER, thinking_settings.NAPCAT_WS_TOKEN
