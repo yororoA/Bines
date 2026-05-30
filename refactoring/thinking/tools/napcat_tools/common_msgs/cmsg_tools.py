@@ -3,7 +3,7 @@ from .types import SEND_MSG
 from .base import _call_api
 
 
-@tool("send qq message")
+@tool
 def send_msg(msg: SEND_MSG) -> dict | str:
     """
     通过 QQ 发送消息

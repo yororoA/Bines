@@ -11,7 +11,7 @@ from .types import (
 from .base import _call_api
 
 
-@tool("delete qq message")
+@tool
 def delete_msg(msg: DELETE_MSG) -> dict | str:
     """
     撤回已发送的QQ消息
@@ -25,7 +25,7 @@ def delete_msg(msg: DELETE_MSG) -> dict | str:
     return _call_api("delete_msg", msg.model_dump())
 
 
-@tool("get qq message detail")
+@tool
 def get_msg(msg: GET_MSG) -> dict | str:
     """
     获取QQ消息详情
@@ -39,7 +39,7 @@ def get_msg(msg: GET_MSG) -> dict | str:
     return _call_api("get_msg", msg.model_dump())
 
 
-@tool("send forward message")
+@tool
 def send_forward_msg(msg: SEND_FORWARD_MSG) -> dict | str:
     """
     发送合并转发消息，支持私聊和群聊
@@ -54,7 +54,7 @@ def send_forward_msg(msg: SEND_FORWARD_MSG) -> dict | str:
     return _call_api("send_forward_msg", params)
 
 
-@tool("send group forward message")
+@tool
 def send_group_forward_msg(msg: SEND_GROUP_FORWARD_MSG) -> dict | str:
     """
     发送群合并转发消息
@@ -69,7 +69,7 @@ def send_group_forward_msg(msg: SEND_GROUP_FORWARD_MSG) -> dict | str:
     return _call_api("send_group_forward_msg", params)
 
 
-@tool("send private forward message")
+@tool
 def send_private_forward_msg(msg: SEND_PRIVATE_FORWARD_MSG) -> dict | str:
     """
     发送私聊合并转发消息
@@ -84,7 +84,7 @@ def send_private_forward_msg(msg: SEND_PRIVATE_FORWARD_MSG) -> dict | str:
     return _call_api("send_private_forward_msg", params)
 
 
-@tool("get group message history")
+@tool
 def get_group_msg_history(msg: GET_GROUP_MSG_HISTORY) -> dict | str:
     """
     获取群历史消息
@@ -99,7 +99,7 @@ def get_group_msg_history(msg: GET_GROUP_MSG_HISTORY) -> dict | str:
     return _call_api("get_group_msg_history", params)
 
 
-@tool("get friend message history")
+@tool
 def get_friend_msg_history(msg: GET_FRIEND_MSG_HISTORY) -> dict | str:
     """
     获取好友(私聊)历史消息

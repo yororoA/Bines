@@ -2,7 +2,7 @@ from smolagents import tool
 from .base import _call_api
 
 
-@tool("get group list")
+@tool
 def get_group_list() -> dict | str:
     """
     获取当前机器人加入的所有群列表
@@ -13,7 +13,7 @@ def get_group_list() -> dict | str:
     return _call_api("get_group_list")
 
 
-@tool("get group info")
+@tool
 def get_group_info(group_id: str) -> dict | str:
     """
     获取指定群的详细信息
@@ -27,7 +27,7 @@ def get_group_info(group_id: str) -> dict | str:
     return _call_api("get_group_info", {"group_id": group_id})
 
 
-@tool("get group member list")
+@tool
 def get_group_member_list(group_id: str) -> dict | str:
     """
     获取指定群的成员列表
@@ -41,7 +41,7 @@ def get_group_member_list(group_id: str) -> dict | str:
     return _call_api("get_group_member_list", {"group_id": group_id})
 
 
-@tool("get group member info")
+@tool
 def get_group_member_info(group_id: str, user_id: str) -> dict | str:
     """
     获取指定群成员的详细信息

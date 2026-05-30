@@ -3,7 +3,7 @@ from .types import SEND_POKE
 from .base import _call_api
 
 
-@tool("send poke")
+@tool
 def send_poke(msg: SEND_POKE) -> dict | str:
     """
     发送戳一戳，群聊时传 group_id，不传则为私聊戳一戳
