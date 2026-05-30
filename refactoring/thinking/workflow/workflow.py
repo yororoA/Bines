@@ -1,6 +1,5 @@
 import logging
 import sqlite3
-import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from langchain.messages import HumanMessage
 logger = logging.getLogger(__name__)
 
 from .status import GraphStatus
+from .cancel import get_cancel_event
 from .nodes import (
     ManagerNode,
     PerformerNode,
@@ -20,12 +20,13 @@ from .nodes import (
     DynamicAgentNode,
 )
 
+_cancel_event = get_cancel_event()
+
 
 class Workflow:
     def __init__(self):
         self._app = self._compile()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow")
-        self._cancel_event = threading.Event()
         self._sqlite_conn: sqlite3.Connection | None = None
 
     def _build_Workflow(self):
@@ -97,10 +98,12 @@ class Workflow:
         if timeout is None:
             timeout = thinking_settings.WORKFLOW_TIMEOUT_SECONDS
 
-        initial_state = GraphStatus(messages=[HumanMessage(content=input)])
+        initial_state = GraphStatus(
+            messages=[HumanMessage(content=input)],
+        )
         config = {"configurable": {"thread_id": thread_id}}
 
-        self._cancel_event.clear()
+        _cancel_event.clear()
         future = self._executor.submit(self._app.invoke, initial_state, config)
         try:
             return future.result(timeout=timeout)
@@ -110,14 +113,14 @@ class Workflow:
                 "The task may still be running in background.",
                 timeout, thread_id,
             )
-            self._cancel_event.set()
+            _cancel_event.set()
             future.cancel()
             return {
                 "messages": [HumanMessage(content="[System: Workflow timed out. Please try again.]")],
             }
 
     def close(self):
-        self._cancel_event.set()
+        _cancel_event.set()
         self._executor.shutdown(wait=True, cancel_futures=True)
         if self._sqlite_conn:
             try:
