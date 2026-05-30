@@ -61,6 +61,10 @@ RAG_PERSIST_DIR=memory_data/chroma_db
 NAPCAT_WS_SERVER=ws://localhost:9998
 NAPCAT_WS_TOKEN=your-token
 BOT_NUMBER=your-bot-qq-number
+
+# LLM 超时（可选）
+LLM_REQUEST_TIMEOUT_SECONDS=30.0
+LLM_MAX_RETRIES=1
 ```
 
 ### 运行

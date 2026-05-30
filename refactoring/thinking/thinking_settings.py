@@ -20,6 +20,8 @@ class ThinkingSettings(BaseSettings):
     BOT_NUMBER: str = ""
     DEBOUNCE_SECONDS: float = 3.0
     WORKFLOW_TIMEOUT_SECONDS: float = 120.0
+    LLM_REQUEST_TIMEOUT_SECONDS: float = 30.0
+    LLM_MAX_RETRIES: int = 1
     DEDUP_THRESHOLD: float = 0.08
     MAX_INPUT_LENGTH: int = 4096
     DAY_KEY_CUTOFF_HOUR: int = 4
@@ -44,6 +46,20 @@ class ThinkingSettings(BaseSettings):
     def validate_timeout(cls, v: float) -> float:
         if v <= 0:
             raise ValueError('WORKFLOW_TIMEOUT_SECONDS must be positive')
+        return v
+
+    @field_validator('LLM_REQUEST_TIMEOUT_SECONDS')
+    @classmethod
+    def validate_llm_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError('LLM_REQUEST_TIMEOUT_SECONDS must be positive')
+        return v
+
+    @field_validator('LLM_MAX_RETRIES')
+    @classmethod
+    def validate_llm_retries(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError('LLM_MAX_RETRIES must be >= 0')
         return v
 
     @field_validator('DEDUP_THRESHOLD')
