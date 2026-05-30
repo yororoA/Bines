@@ -1,19 +1,10 @@
 from langchain.chat_models import init_chat_model, BaseChatModel
 
-from .model_registry import get_model_registry, register_default_providers
-
-_initialized = False
-
-
-def _init_registry():
-    global _initialized
-    if not _initialized:
-        register_default_providers()
-        _initialized = True
+from .model_registry import get_model_registry, ensure_registry_initialized
 
 
 def generate_langchain_model(model_name: str) -> BaseChatModel:
-    _init_registry()
+    ensure_registry_initialized()
     registry = get_model_registry()
     provider = registry.find(model_name)
     if not provider:

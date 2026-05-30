@@ -5,6 +5,7 @@ from .model_registry import (
     ModelProviderRegistry,
     get_model_registry,
     register_default_providers,
+    ensure_registry_initialized,
 )
 from .lazy_model import LazyLangChainModel, LazySmolModel, shared_langchain_model, shared_smol_model
 from .file_cache import FileCache, file_cache
@@ -17,6 +18,7 @@ __all__ = [
     "ModelProviderRegistry",
     "get_model_registry",
     "register_default_providers",
+    "ensure_registry_initialized",
     "LazyLangChainModel",
     "LazySmolModel",
     "shared_langchain_model",

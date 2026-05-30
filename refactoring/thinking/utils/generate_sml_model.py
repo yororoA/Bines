@@ -1,19 +1,10 @@
 from smolagents import OpenAIModel
 
-from .model_registry import get_model_registry, register_default_providers
-
-_initialized = False
-
-
-def _init_registry():
-    global _initialized
-    if not _initialized:
-        register_default_providers()
-        _initialized = True
+from .model_registry import get_model_registry, ensure_registry_initialized
 
 
 def generate_sml_model(model_id: str) -> OpenAIModel:
-    _init_registry()
+    ensure_registry_initialized()
     registry = get_model_registry()
     provider = registry.find(model_id)
     if not provider:
