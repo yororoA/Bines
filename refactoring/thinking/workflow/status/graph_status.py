@@ -3,7 +3,7 @@ from operator import add
 from langchain.messages import AnyMessage
 from .manager_route import TaskItem
 
-_RESET = type("_RESET", (), {"__repr__": lambda self: "_RESET"})()
+RESET = type("RESET", (), {"__repr__": lambda self: "RESET"})()
 
 MAX_THOUGHTS = 10
 MAX_ITERATIONS = 10
@@ -12,7 +12,7 @@ MESSAGE_TRIM_SIZE = 10
 
 
 def merge_tasks(left: dict, right: dict) -> dict:
-    if right is _RESET:
+    if right is RESET:
         return {}
     _left = left or {}
     _right = right or {}
@@ -28,14 +28,14 @@ def merge_tasks(left: dict, right: dict) -> dict:
 
 
 def cap_list(left: list[str], right: list[str]) -> list[str]:
-    if right is _RESET:
+    if right is RESET:
         return []
     merged = (left or []) + (right or [])
     return merged[-MAX_THOUGHTS:]
 
 
 def add_list_str(left: list[str], right: list[str]) -> list[str]:
-    if right is _RESET:
+    if right is RESET:
         return []
     return (left or []) + (right or [])
 

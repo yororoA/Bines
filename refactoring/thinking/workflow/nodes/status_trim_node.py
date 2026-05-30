@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from langchain.messages import SystemMessage
-from ..status import GraphStatus, _RESET, MESSAGE_WINDOW_SIZE, MESSAGE_TRIM_SIZE
+from ..status import GraphStatus, RESET, MESSAGE_WINDOW_SIZE, MESSAGE_TRIM_SIZE
 from utils import shared_langchain_model
 
 logger = logging.getLogger(__name__)
@@ -53,13 +53,13 @@ def StatusTrimNode(state: GraphStatus) -> dict:
     messages = state.get("messages", [])
 
     result = {
-        "tasks_done": _RESET,
-        "thoughts": _RESET,
+        "tasks_done": RESET,
+        "thoughts": RESET,
         "iteration_count": 0,
         "persona_snapshot": {},
         "rag_recall": {},
         "soul_prompt": "",
-        "already_said": _RESET,
+        "already_said": RESET,
         "diary_triggered_day": state.get("diary_triggered_day", ""),
         "invocation_count": state.get("invocation_count", 0),
     }

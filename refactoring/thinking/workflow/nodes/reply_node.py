@@ -107,7 +107,7 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
         }
     except Exception as e:
         logger.exception("ReplyNode failed")
-        fallback = [TaskItem(task_id=f"reply_error_{uuid.uuid4().hex[:8]}", description=str(reply_input.message or ""))]
+        fallback = [TaskItem(task_id=f"reply_error_{uuid.uuid4().hex[:8]}", description="[REPLY_FAILED] Could not generate a reply. Please try rephrasing your message.")]
         return {
             "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": fallback},
             "already_said": [],

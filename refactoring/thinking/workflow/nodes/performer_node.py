@@ -65,6 +65,6 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
         return {
             "tasks_done": {"performer": [TaskItem(
                 task_id=task_id,
-                description=f"[Error] Task failed: {e}",
+                description=f"[TASK_FAILED] The search task encountered an error and could not be completed. Task: {task_description[:100]}",
             )]}
         }

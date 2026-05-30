@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
@@ -24,6 +25,8 @@ class Workflow:
     def __init__(self):
         self._app = self._compile()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow")
+        self._cancel_event = threading.Event()
+        self._sqlite_conn: sqlite3.Connection | None = None
 
     def _build_Workflow(self):
         workflow = StateGraph(GraphStatus)
@@ -80,9 +83,11 @@ class Workflow:
         checkpoints_dir = base_dir / "data/checkpoints"
         checkpoints_dir.mkdir(exist_ok=True, parents=True)
 
-        conn = sqlite3.connect(checkpoints_dir / "checkpoints.db", check_same_thread=False, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        memory = SqliteSaver(conn)
+        self._sqlite_conn = sqlite3.connect(
+            checkpoints_dir / "checkpoints.db", check_same_thread=False, timeout=30
+        )
+        self._sqlite_conn.execute("PRAGMA journal_mode=WAL")
+        memory = SqliteSaver(self._sqlite_conn)
 
         return self._build_Workflow().compile(checkpointer=memory)
 
@@ -95,6 +100,7 @@ class Workflow:
         initial_state = GraphStatus(messages=[HumanMessage(content=input)])
         config = {"configurable": {"thread_id": thread_id}}
 
+        self._cancel_event.clear()
         future = self._executor.submit(self._app.invoke, initial_state, config)
         try:
             return future.result(timeout=timeout)
@@ -104,10 +110,22 @@ class Workflow:
                 "The task may still be running in background.",
                 timeout, thread_id,
             )
+            self._cancel_event.set()
             future.cancel()
             return {
                 "messages": [HumanMessage(content="[System: Workflow timed out. Please try again.]")],
             }
+
+    def close(self):
+        self._cancel_event.set()
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        if self._sqlite_conn:
+            try:
+                self._sqlite_conn.close()
+            except Exception:
+                logger.warning("Failed to close SQLite connection", exc_info=True)
+            self._sqlite_conn = None
+        logger.info("Workflow resources released")
 
     def inject_message(self, content: str, thread_id: str) -> None:
         try:

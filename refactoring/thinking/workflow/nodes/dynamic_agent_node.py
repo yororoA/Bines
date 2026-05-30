@@ -8,7 +8,6 @@ from memory import (
     PersonaState,
     MemoryJudgment,
     judge_and_store,
-    add_to_buffer,
     consolidate_buffer_to_diary,
     get_memory_store,
     COLLECTION_KNOWLEDGE,
@@ -100,12 +99,6 @@ def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
                 judgment: MemoryJudgment = judge_and_store(
                     context_text, persona=persona
                 )
-
-                if judgment.should_store and judgment.memory_type == "buffer":
-                    add_to_buffer(
-                        judgment.rewritten_content or context_text,
-                        metadata={"topic": judgment.topic, "importance": judgment.importance},
-                    )
 
                 metrics.token_estimate += len(context_text) // 4
             except Exception:
