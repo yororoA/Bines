@@ -116,14 +116,12 @@ class NapCatClient:
 
         workflow = _get_workflow()
         try:
-            task = asyncio.create_task(
-                asyncio.get_running_loop().run_in_executor(
-                    None,
-                    lambda: workflow.invoke(combined, thread_id=thread_id),
-                )
+            future = asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: workflow.invoke(combined, thread_id=thread_id),
             )
-            self._running_tasks[thread_id] = task
-            await task
+            self._running_tasks[thread_id] = future
+            await future
         except asyncio.CancelledError:
             logger.info("Workflow cancelled for %s", thread_id)
         except Exception:
