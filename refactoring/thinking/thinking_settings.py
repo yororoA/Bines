@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 
 
 class ThinkingSettings(BaseSettings):
@@ -19,14 +20,45 @@ class ThinkingSettings(BaseSettings):
     BOT_NUMBER: str = ""
     DEBOUNCE_SECONDS: float = 3.0
     WORKFLOW_TIMEOUT_SECONDS: float = 120.0
-    DEDUP_SIMILARITY_THRESHOLD: float = 0.08
+    DEDUP_THRESHOLD: float = 0.08
     MAX_INPUT_LENGTH: int = 4096
     DAY_KEY_CUTOFF_HOUR: int = 4
     CONVERGENCE_WINDOW: int = 3
+    RETRIEVAL_KNOWLEDGE_K: int = 5
+    RETRIEVAL_PERSONA_K: int = 4
+    RETRIEVAL_DIARY_K: int = 2
 
     model_config = SettingsConfigDict(
         env_file="thinking.env", env_file_encoding="utf-8"
     )
+
+    @field_validator('DEBOUNCE_SECONDS')
+    @classmethod
+    def validate_debounce(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError('DEBOUNCE_SECONDS must be positive')
+        return v
+
+    @field_validator('WORKFLOW_TIMEOUT_SECONDS')
+    @classmethod
+    def validate_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError('WORKFLOW_TIMEOUT_SECONDS must be positive')
+        return v
+
+    @field_validator('DEDUP_THRESHOLD')
+    @classmethod
+    def validate_dedup(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError('DEDUP_THRESHOLD must be between 0 and 1')
+        return v
+
+    @field_validator('MAX_INPUT_LENGTH')
+    @classmethod
+    def validate_max_input(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError('MAX_INPUT_LENGTH must be positive')
+        return v
 
 
 thinking_settings = ThinkingSettings()
