@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -34,18 +35,21 @@ DECAY_MIN_IMPORTANCE = 1.0
 DECAY_MAX_ENTRIES = 500
 
 _global_embeddings: HuggingFaceEmbeddings | None = None
+_embeddings_lock = threading.Lock()
 
 
 def _get_embeddings() -> HuggingFaceEmbeddings:
     global _global_embeddings
     if _global_embeddings is None:
-        model_name = thinking_settings.RAG_EMBEDDING_MODEL
-        model_kwargs = {}
-        if thinking_settings.HF_ENDPOINT:
-            model_kwargs["endpoint_url"] = thinking_settings.HF_ENDPOINT
-        _global_embeddings = HuggingFaceEmbeddings(
-            model_name=model_name, model_kwargs=model_kwargs
-        )
+        with _embeddings_lock:
+            if _global_embeddings is None:
+                model_name = thinking_settings.RAG_EMBEDDING_MODEL
+                model_kwargs = {}
+                if thinking_settings.HF_ENDPOINT:
+                    model_kwargs["endpoint_url"] = thinking_settings.HF_ENDPOINT
+                _global_embeddings = HuggingFaceEmbeddings(
+                    model_name=model_name, model_kwargs=model_kwargs
+                )
     return _global_embeddings
 
 
@@ -61,12 +65,16 @@ class ChromaMemoryStore:
             return
 
         self._collections: dict[str, Chroma] = {}
+        # NOTE: Using cosine distance for semantic dedup.
+        # If upgrading from L2-based collections, delete the existing
+        # memory_data/chroma_db/ directory to recreate with cosine metric.
         for name in ALL_COLLECTIONS:
             try:
                 self._collections[name] = Chroma(
                     collection_name=name,
                     embedding_function=self._embeddings,
                     persist_directory=str(Path(self._persist_dir).resolve()),
+                    collection_metadata={"hnsw:space": "cosine"},
                 )
             except Exception:
                 logger.error(
@@ -99,14 +107,14 @@ class ChromaMemoryStore:
             similar = store.similarity_search_with_score(content, k=1)
             if similar:
                 _, score = similar[0]
-                if score < thinking_settings.DEDUP_SIMILARITY_THRESHOLD:
+                if score < thinking_settings.DEDUP_THRESHOLD:
                     logger.debug(
                         "Skipping duplicate in %s (score=%.4f < threshold=%.4f)",
-                        collection, score, thinking_settings.DEDUP_SIMILARITY_THRESHOLD,
+                        collection, score, thinking_settings.DEDUP_THRESHOLD,
                     )
                     return _id
         except Exception:
-            logger.debug("Dedup check failed for %s, proceeding with add", collection)
+            logger.warning("Dedup check failed for %s, proceeding with add", collection, exc_info=True)
 
         meta = metadata or {}
         if "memory_type" not in meta:
@@ -238,10 +246,13 @@ class ChromaMemoryStore:
 
 
 _global_store: ChromaMemoryStore | None = None
+_store_lock = threading.Lock()
 
 
 def get_memory_store() -> ChromaMemoryStore:
     global _global_store
     if _global_store is None:
-        _global_store = ChromaMemoryStore()
+        with _store_lock:
+            if _global_store is None:
+                _global_store = ChromaMemoryStore()
     return _global_store

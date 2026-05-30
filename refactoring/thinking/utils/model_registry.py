@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,3 +84,16 @@ def register_default_providers():
             api_key=thinking_settings.MIMO_API_KEY,
             models=["mimo-v2.5", "mimo-v2.5-pro"],
         ))
+
+
+_registry_initialized = False
+_registry_init_lock = threading.Lock()
+
+
+def ensure_registry_initialized():
+    global _registry_initialized
+    if not _registry_initialized:
+        with _registry_init_lock:
+            if not _registry_initialized:
+                register_default_providers()
+                _registry_initialized = True

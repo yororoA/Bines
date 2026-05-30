@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ class WorkflowMetricsCollector:
 
     def __init__(self):
         self._node_calls: list[NodeMetrics] = []
+        self._lock = threading.Lock()
 
     @contextmanager
     def track_node(self, node_name: str):
@@ -34,9 +36,10 @@ class WorkflowMetricsCollector:
             raise
         finally:
             metrics.duration_ms = (time.perf_counter() - start) * 1000
-            self._node_calls.append(metrics)
-            if len(self._node_calls) > self.MAX_NODE_CALLS:
-                self._node_calls = self._node_calls[-self.MAX_NODE_CALLS:]
+            with self._lock:
+                self._node_calls.append(metrics)
+                if len(self._node_calls) > self.MAX_NODE_CALLS:
+                    self._node_calls = self._node_calls[-self.MAX_NODE_CALLS:]
             level = logging.WARNING if metrics.error else logging.INFO
             logger.log(
                 level,
@@ -48,13 +51,15 @@ class WorkflowMetricsCollector:
             )
 
     def get_summary(self) -> dict:
-        if not self._node_calls:
-            return {}
-        total_ms = sum(m.duration_ms for m in self._node_calls)
-        total_tokens = sum(m.token_estimate for m in self._node_calls)
-        errors = [m for m in self._node_calls if m.error]
+        with self._lock:
+            if not self._node_calls:
+                return {}
+            calls_snapshot = list(self._node_calls)
+        total_ms = sum(m.duration_ms for m in calls_snapshot)
+        total_tokens = sum(m.token_estimate for m in calls_snapshot)
+        errors = [m for m in calls_snapshot if m.error]
         return {
-            "total_nodes": len(self._node_calls),
+            "total_nodes": len(calls_snapshot),
             "total_duration_ms": round(total_ms, 1),
             "total_tokens_estimate": total_tokens,
             "error_count": len(errors),
@@ -65,12 +70,13 @@ class WorkflowMetricsCollector:
                     "tokens": m.token_estimate,
                     "error": m.error,
                 }
-                for m in self._node_calls
+                for m in calls_snapshot
             ],
         }
 
     def reset(self):
-        self._node_calls.clear()
+        with self._lock:
+            self._node_calls.clear()
 
 
 _current_collector = WorkflowMetricsCollector()

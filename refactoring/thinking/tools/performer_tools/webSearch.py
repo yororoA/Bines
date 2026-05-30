@@ -1,13 +1,18 @@
+import threading
+
 from smolagents import tool, DuckDuckGoSearchTool, WebSearchTool, VisitWebpageTool
 
 _search_tool = None
 _extra_tools = None
+_search_lock = threading.Lock()
 
 
 def _get_search_tool():
     global _search_tool
     if _search_tool is None:
-        _search_tool = DuckDuckGoSearchTool()
+        with _search_lock:
+            if _search_tool is None:
+                _search_tool = DuckDuckGoSearchTool()
     return _search_tool
 
 
@@ -30,7 +35,9 @@ def webSearch(query: str) -> str:
 def get_search_tools() -> list:
     global _extra_tools
     if _extra_tools is None:
-        _extra_tools = [WebSearchTool(), VisitWebpageTool()]
+        with _search_lock:
+            if _extra_tools is None:
+                _extra_tools = [WebSearchTool(), VisitWebpageTool()]
     return [_get_search_tool()] + list(_extra_tools)
 
 

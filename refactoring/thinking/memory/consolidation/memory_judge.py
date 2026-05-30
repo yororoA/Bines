@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 from typing import Any, Literal
 
@@ -73,15 +74,18 @@ class MemoryJudgment(BaseModel):
 
 _JUDGE_MODEL = None
 _JUDGE_MODEL_NAME: str = ""
+_judge_lock = threading.Lock()
 
 
 def _get_judge_model():
     global _JUDGE_MODEL, _JUDGE_MODEL_NAME
     current_name = thinking_settings.MODEL_SELECTED
     if _JUDGE_MODEL is None or current_name != _JUDGE_MODEL_NAME:
-        base_model = generate_langchain_model(current_name)
-        _JUDGE_MODEL = base_model.with_structured_output(MemoryJudgment)
-        _JUDGE_MODEL_NAME = current_name
+        with _judge_lock:
+            if _JUDGE_MODEL is None or current_name != _JUDGE_MODEL_NAME:
+                base_model = generate_langchain_model(current_name)
+                _JUDGE_MODEL = base_model.with_structured_output(MemoryJudgment)
+                _JUDGE_MODEL_NAME = current_name
     return _JUDGE_MODEL
 
 
