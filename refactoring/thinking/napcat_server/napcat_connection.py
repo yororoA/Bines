@@ -175,7 +175,7 @@ class NapCatClient:
         while True:
             try:
                 async with websockets.connect(
-                    self.uri, extra_headers=headers
+                    self.uri, additional_headers=headers
                 ) as websocket:
                     self.websocket = websocket
                     backoff = thinking_settings.NAPCAT_WS_RECONNECT_TIMEOUT
