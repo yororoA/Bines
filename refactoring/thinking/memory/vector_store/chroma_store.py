@@ -16,6 +16,16 @@ from utils.time_utils import day_key
 
 logger = logging.getLogger(__name__)
 
+
+def _to_chroma_where(filter_dict: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not filter_dict:
+        return None
+    if len(filter_dict) == 1:
+        key, value = next(iter(filter_dict.items()))
+        return {key: {"$eq": value}}
+    return {"$and": [{k: {"$eq": v}} for k, v in filter_dict.items()]}
+
+
 COLLECTION_KNOWLEDGE = "knowledge"
 COLLECTION_PERSONA = "persona"
 COLLECTION_DIARY = "diary"
@@ -44,11 +54,13 @@ def _get_embeddings() -> HuggingFaceEmbeddings:
         with _embeddings_lock:
             if _global_embeddings is None:
                 model_name = thinking_settings.RAG_EMBEDDING_MODEL
-                model_kwargs = {}
+                embeddings_kwargs = {}
                 if thinking_settings.HF_ENDPOINT:
-                    model_kwargs["endpoint_url"] = thinking_settings.HF_ENDPOINT
+                    embeddings_kwargs["encode_kwargs"] = {"device": "cpu"}
+                    import os
+                    os.environ["HF_ENDPOINT"] = thinking_settings.HF_ENDPOINT
                 _global_embeddings = HuggingFaceEmbeddings(
-                    model_name=model_name, model_kwargs=model_kwargs
+                    model_name=model_name, **embeddings_kwargs
                 )
     return _global_embeddings
 
@@ -138,7 +150,7 @@ class ChromaMemoryStore:
         filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         store = self._get_collection(collection)
-        results = store.similarity_search_with_score(query, k=k, filter=filter)
+        results = store.similarity_search_with_score(query, k=k, filter=_to_chroma_where(filter))
         entries = []
         for doc, score in results:
             entries.append(
@@ -173,7 +185,7 @@ class ChromaMemoryStore:
         filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         store = self._get_collection(collection)
-        results = store.get(include=["documents", "metadatas"], filter=filter)
+        results = store.get(include=["documents", "metadatas"], where=_to_chroma_where(filter))
         entries = []
         ids = results.get("ids", [])
         documents = results.get("documents", [])
