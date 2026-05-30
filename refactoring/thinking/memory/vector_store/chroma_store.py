@@ -99,7 +99,7 @@ class ChromaMemoryStore:
         content: str,
         metadata: dict[str, Any] | None = None,
         doc_id: str | None = None,
-    ) -> str:
+    ) -> str | None:
         store = self._get_collection(collection)
         _id = doc_id or uuid.uuid4().hex
 
@@ -112,7 +112,7 @@ class ChromaMemoryStore:
                         "Skipping duplicate in %s (score=%.4f < threshold=%.4f)",
                         collection, score, thinking_settings.DEDUP_THRESHOLD,
                     )
-                    return _id
+                    return None
         except Exception:
             logger.warning("Dedup check failed for %s, proceeding with add", collection, exc_info=True)
 

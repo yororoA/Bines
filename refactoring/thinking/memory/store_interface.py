@@ -10,7 +10,7 @@ class MemoryStore(Protocol):
         content: str,
         metadata: dict[str, Any] | None = None,
         doc_id: str | None = None,
-    ) -> str: ...
+    ) -> str | None: ...
 
     def search(
         self,

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
-from thinking_settings import thinking_settings
 from ..vector_store.chroma_store import (
     ChromaMemoryStore,
     get_memory_store,
@@ -11,8 +11,12 @@ from ..vector_store.chroma_store import (
     COLLECTION_DIARY,
     COLLECTION_SLICED_DIARY,
 )
-from utils import generate_langchain_model, shared_langchain_model
+from utils import shared_langchain_model
 from utils.time_utils import day_key
+
+logger = logging.getLogger(__name__)
+
+_MAX_DIARY_FRAGMENTS_CHARS = 8000
 
 
 def add_to_buffer(
@@ -55,6 +59,9 @@ def get_existing_diary_day_keys(
 def _summarize_diary_with_llm(buffer_contents: list[str], target_day_key: str) -> str:
     model = shared_langchain_model.get()
     fragments = "\n---\n".join(buffer_contents)
+    if len(fragments) > _MAX_DIARY_FRAGMENTS_CHARS:
+        fragments = fragments[:_MAX_DIARY_FRAGMENTS_CHARS]
+        logger.info("Diary fragments truncated to %d chars for LLM", _MAX_DIARY_FRAGMENTS_CHARS)
     prompt = (
         "You are a diary writer for an AI assistant. "
         "Below are conversation fragments and task summaries from a single day.\n"
@@ -102,16 +109,19 @@ def consolidate_buffer_to_diary(
     }
     diary_id = memory_store.add(COLLECTION_DIARY, diary_text, metadata=diary_meta)
 
-    paragraphs = _slice_diary_into_paragraphs(diary_text)
-    for i, para in enumerate(paragraphs):
-        slice_meta = {
-            "source": "sliced_diary",
-            "day_key": target_day_key,
-            "diary_id": diary_id,
-            "paragraph_index": i,
-            "created_at": datetime.now().isoformat(),
-        }
-        memory_store.add(COLLECTION_SLICED_DIARY, para, metadata=slice_meta)
+    if diary_id:
+        paragraphs = _slice_diary_into_paragraphs(diary_text)
+        for i, para in enumerate(paragraphs):
+            slice_meta = {
+                "source": "sliced_diary",
+                "day_key": target_day_key,
+                "diary_id": diary_id,
+                "paragraph_index": i,
+                "created_at": datetime.now().isoformat(),
+            }
+            memory_store.add(COLLECTION_SLICED_DIARY, para, metadata=slice_meta)
+    else:
+        logger.info("Diary for %s is duplicate, skipping slices", target_day_key)
 
     memory_store.delete_by_ids(COLLECTION_BUFFER, buffer_ids)
 

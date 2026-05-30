@@ -106,6 +106,8 @@ _JUDGE_PROMPT_TEMPLATE = (
     "and provide a cleaned/rewritten version suitable for retrieval."
 )
 
+_MAX_JUDGE_CONTENT_CHARS = 6000
+
 
 def judge_and_store(
     content: str,
@@ -117,9 +119,13 @@ def judge_and_store(
 
     persona_context = persona.to_prompt_string() if persona else ""
 
+    truncated_content = content[:_MAX_JUDGE_CONTENT_CHARS]
+    if len(content) > _MAX_JUDGE_CONTENT_CHARS:
+        logger.info("Content truncated from %d to %d chars for judge", len(content), _MAX_JUDGE_CONTENT_CHARS)
+
     prompt = _JUDGE_PROMPT_TEMPLATE.format(
         persona_context=persona_context or "No persona context available.",
-        content=content,
+        content=truncated_content,
     )
 
     model = _get_judge_model()
