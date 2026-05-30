@@ -15,7 +15,10 @@ def _run_async(coro):
         return future.result(
             timeout=thinking_settings.NAPCAT_WS_API_RESPONSE_TIMEOUT + 5
         )
-    return asyncio.run(coro)
+    raise RuntimeError(
+        "Main event loop is not available. "
+        "Cannot execute NapCat API call from a worker thread."
+    )
 
 
 def _call_api(action: str, params: dict | None = None) -> dict:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 import random
 import logging
@@ -14,15 +15,27 @@ from thinking_settings import thinking_settings
 logger = logging.getLogger(__name__)
 
 _workflow = None
+_workflow_lock = threading.Lock()
 _MAX_SEEN_MESSAGES = 1000
 
 
 def _get_workflow():
     global _workflow
     if _workflow is None:
-        from workflow import Workflow
-        _workflow = Workflow()
+        with _workflow_lock:
+            if _workflow is None:
+                from workflow import Workflow
+                _workflow = Workflow()
     return _workflow
+
+
+def close_workflow():
+    global _workflow
+    if _workflow is not None:
+        with _workflow_lock:
+            if _workflow is not None:
+                _workflow.close()
+                _workflow = None
 
 
 def _is_at_bot(message_segments: list[dict], bot_number: str) -> bool:
@@ -221,10 +234,18 @@ class NapCatClient:
     async def _process_loop(self):
         while True:
             data = await self._message_queue.get()
-            try:
-                await self._process_event(data)
-            except Exception:
-                logger.exception("Error processing queued message")
+            for attempt in range(3):
+                try:
+                    await self._process_event(data)
+                    break
+                except Exception:
+                    if attempt < 2:
+                        logger.warning(
+                            "Retry %d/3 for message processing", attempt + 1
+                        )
+                        await asyncio.sleep(1)
+                    else:
+                        logger.exception("Failed to process message after 3 attempts")
 
     async def _process_event(self, data: dict):
         post_type = data.get("post_type")
@@ -272,11 +293,17 @@ class NapCatClient:
             logger.debug("Injected non-trigger message into STM for %s", thread_id)
 
     async def _wait_for_connection(self, timeout: float = 30.0) -> bool:
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            if self.websocket:
-                return True
-            await asyncio.sleep(0.1)
+        if self.websocket:
+            return True
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+            while loop.time() < deadline:
+                if self.websocket:
+                    return True
+                await asyncio.sleep(0.5)
+        except Exception:
+            logger.exception("Error waiting for connection")
         return False
 
     def get_main_loop(self) -> asyncio.AbstractEventLoop | None:
@@ -298,7 +325,11 @@ class NapCatClient:
         payload = {"action": action, "params": params or {}, "echo": request_id}
         future = asyncio.Future()
         self._pending_requests[request_id] = future
-        await self.websocket.send(json.dumps(payload))
+        try:
+            await self.websocket.send(json.dumps(payload))
+        except Exception:
+            self._pending_requests.pop(request_id, None)
+            raise
         logger.debug("Requesting %s with params: %s", action, params)
 
         try:
