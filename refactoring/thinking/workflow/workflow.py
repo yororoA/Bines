@@ -29,6 +29,24 @@ class Workflow:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow")
         self._sqlite_conn: sqlite3.Connection | None = None
 
+    @staticmethod
+    def _patch_msgpack_serializer():
+        import ormsgpack
+        from langgraph.checkpoint.serde.jsonplus import _msgpack_default as _orig_default
+
+        def _patched_default(obj):
+            try:
+                return _orig_default(obj)
+            except TypeError:
+                return repr(obj)
+
+        import langgraph.checkpoint.serde.jsonplus as m
+        m._msgpack_default = _patched_default
+        m._msgpack_enc = lambda data: ormsgpack.packb(
+            data, default=_patched_default,
+            option=getattr(m, "_option", None),
+        )
+
     def _build_Workflow(self):
         workflow = StateGraph(GraphStatus)
 
@@ -80,6 +98,7 @@ class Workflow:
         return workflow
 
     def _compile(self):
+        self._patch_msgpack_serializer()
         base_dir = Path(__file__).resolve().parents[1]
         checkpoints_dir = base_dir / "memory_data/checkpoints"
         checkpoints_dir.mkdir(exist_ok=True, parents=True)
@@ -101,6 +120,7 @@ class Workflow:
         logger.info("Workflow.invoke: thread=%s, input=%s, timeout=%.1fs", thread_id, input[:100], timeout)
         initial_state = GraphStatus(
             messages=[HumanMessage(content=input)],
+            thread_id=thread_id,
         )
         config = {"configurable": {"thread_id": thread_id}}
 

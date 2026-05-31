@@ -54,13 +54,15 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
                     )
                     system_prompt = f"{soul_prompt}\n\n{base_prompt}" if soul_prompt else base_prompt
 
+                    import copy
+
+                    from smolagents.agents import EMPTY_PROMPT_TEMPLATES
+
                     _PerformerAgent = CodeAgent(
                         model=shared_smol_model.get(),
                         tools=tools,
                         additional_authorized_imports=["datetime", *imports],
-                        system_prompt=system_prompt,
-                        max_tokens=1024,
-                        max_retries=3,
+                        prompt_templates={**copy.deepcopy(EMPTY_PROMPT_TEMPLATES), "system_prompt": system_prompt},
                         max_steps=6,
                     )
                     _cached_soul_hash = current_hash
