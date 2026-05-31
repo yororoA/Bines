@@ -161,19 +161,19 @@ All settings managed via `ThinkingSettings` (Pydantic BaseSettings) in `thinking
 
 SQLite checkpoints via LangGraph SqliteSaver, three thread IDs (`raw_chat`, `QQ_private`, `QQ_group`).
 
-## Checkpoint Viewer
+## Data Viewer
 
-Web-based tool for inspecting LangGraph checkpoint data stored in SQLite.
+Web-based tool for inspecting LangGraph checkpoint data and ChromaDB memory collections.
 
 ### Architecture
 
 ```text
-checkpoint_viewer/
-├── __main__.py     # CLI entry (python -m checkpoint_viewer)
+data_viewer/
+├── __main__.py     # CLI entry (python -m data_viewer)
 ├── api.py          # FastAPI app with REST endpoints
-├── db.py           # Read-only SQLite access + JsonPlusSerializer deserialization
+├── db.py           # SQLite + ChromaDB data access
 └── static/
-    └── index.html  # Single-page frontend (dark theme)
+    └── index.html  # Single-page frontend with tab switching
 ```
 
 ### API Endpoints
@@ -184,18 +184,23 @@ checkpoint_viewer/
 | `GET /api/threads` | List all thread_ids with checkpoint counts |
 | `GET /api/threads/{thread_id}/checkpoints` | List checkpoints for a thread |
 | `GET /api/checkpoints/{checkpoint_id}` | Full deserialized checkpoint detail |
+| `GET /api/collections` | List all ChromaDB collections with item counts |
+| `GET /api/collections/{name}/items` | List items in a collection (supports `offset`, `limit`, `q` params) |
 
 ### Data Flow
 
 ```text
-SQLite (checkpoints.db) --> db.py (read-only, JsonPlusSerializer) --> api.py (FastAPI) --> index.html (fetch API)
+SQLite (checkpoints.db) ──┐
+                          ├──> db.py ──> api.py (FastAPI) ──> index.html
+ChromaDB (chroma_db/) ────┘
 ```
 
 ### Key Design
 
-- **Read-only access**: Uses `file:xxx?mode=ro` URI to prevent accidental data modification
+- **Read-only SQLite**: Uses `file:xxx?mode=ro` URI to prevent accidental data modification
 - **Lazy deserialization**: Checkpoint BLOBs deserialized on-demand via LangGraph's `JsonPlusSerializer`
 - **Frontend caching**: Thread list and checkpoint details cached in browser memory
+- **Tab-based UI**: Separate views for checkpoint and ChromaDB data
 
 ## Directory Structure
 
@@ -208,10 +213,10 @@ thinking/
 ├── Personal/
 │   └── SOUL.md                     # AI persona definition
 │
-├── checkpoint_viewer/              # Checkpoint inspection tool
+├── data_viewer/                    # Data inspection tool
 │   ├── __main__.py                 # CLI entry point
 │   ├── api.py                      # FastAPI routes
-│   ├── db.py                       # Read-only SQLite data access
+│   ├── db.py                       # SQLite + ChromaDB data access
 │   └── static/
 │       └── index.html              # Frontend page
 │
