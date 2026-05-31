@@ -7,6 +7,7 @@ import threading
 import uuid
 
 from smolagents import CodeAgent
+from langchain.messages import AIMessage
 from utils import shared_smol_model
 from ..status import ReplyInput, TaskItem
 from ..cancel import get_cancel_event
@@ -50,6 +51,7 @@ def _build_reply_system_prompt() -> str:
     already_said = ctx.get("already_said", [])
     conversation_history = ctx.get("conversation_history", "")
     thread_id = ctx.get("thread_id", "")
+    task_results = ctx.get("task_results", [])
 
     persona = PersonaState.from_dict(persona_snapshot)
 
@@ -66,17 +68,26 @@ def _build_reply_system_prompt() -> str:
         "You are a reply agent. Your ONLY job is to send a message to the user via the send_msg tool.\n"
         "CRITICAL RULES:\n"
         "1. You MUST call `send_msg(...)` to deliver your reply. Do NOT use print() — it does NOT send messages.\n"
-        "2. After calling send_msg, produce a feedback list and call final_answer.\n"
-        "3. The reply text must be in Chinese.\n\n"
+        "2. After ALL send_msg calls are done, produce a feedback list and call final_answer.\n"
+        "3. The reply text must be in Chinese.\n"
+        "4. Your input contains task instructions ONLY. The user's actual message is in [Conversation History] below.\n"
+        "5. If you see [image:URL] in the conversation, the user sent an image. If image description is available in the conversation, reference it naturally.\n"
+        "6. NEVER fabricate or hallucinate image content. If you don't have an actual image description, say you cannot see the image or ask the user to describe it.\n"
+        "7. Keep each send_msg text SHORT - **ABOUT TEN WORDS AT MOST**. "
+        "If your reply is long, split it into multiple sequential send_msg calls (*time should be wait between each call*, each with a natural break point. "
+        "This makes the conversation feel more natural and avoids wall-of-text messages.\n"
+        "   Good split: send_msg(\"第一段观点...\") then send_msg(\"接着补充...\") then send_msg(\"最后一句\")\n"
+        "   Bad: send_msg(\"一整大段话把所有内容塞进去\")\n\n"
         "Example workflow:\n"
         "<code>\n"
-        f"{ctx_str}\n"
+        f'{ctx_str.replace("your reply here", "第一段回复内容")}\n'
+        f'{ctx_str.replace("your reply here", "第二段回复内容") + chr(10) if ctx_str else ""}'
         "feedback = [{\"task_id\": \"reply_1\", \"description\": \"replied to user\"}]\n"
         "final_answer(feedback)\n"
         "</code>\n\n"
         "IMPORTANT: Always wrap code in <code>...</code> tags. Never output text outside code blocks.\n"
-        "IMPORTANT: Call `final_answer(feedback)` after send_msg. Do not add extra commentary.\n\n"
-        "IMPORTANT: After calling send_msg, your feedback list MUST include a mood entry with your new emotional state.\n"
+        "IMPORTANT: Call `final_answer(feedback)` after ALL send_msg calls. Do not add extra commentary.\n\n"
+        "IMPORTANT: After the last send_msg, your feedback list MUST include a mood entry with your new emotional state.\n"
         "Add this as the LAST item in the feedback list:\n"
         'feedback.append({"task_id": "mood_update", "mood_arousal": <0-100>, "mood_consecutive_triggers": <int>})\n'
         "mood_arousal: 0=fully relaxed, 30=slightly flustered, 60=tsundere, 85+=fully flustered.\n"
@@ -121,6 +132,12 @@ def _build_reply_system_prompt() -> str:
         formatted = format_retrieval_results(results)
         if formatted:
             parts.append(f"\n\n[RAG Context]\n{formatted}")
+
+    if task_results:
+        parts.append(
+            "\n\n[Task Results] The following tasks have been completed:\n"
+            + "\n".join(f"- {r}" for r in task_results)
+        )
 
     if conversation_history:
         parts.append(f"\n\n[Conversation History]\n{conversation_history}")
@@ -177,7 +194,9 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
             }
 
         ctx = get_context_manager()
+        ctx.set("reply_texts", [])
         ctx.set("reply_current_message", reply_input.message)
+        ctx.set("reply_tasks", reply_input.tasks)
 
         prompt = _build_reply_system_prompt()
         current_hash = _prompt_hash(prompt)
@@ -210,10 +229,10 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
                     )
                     _cached_prompt_hash = current_hash
 
-        logger.info("ReplyNode: calling agent with message=%s", reply_input.message[:100] if reply_input.message else "None")
+        logger.info("ReplyNode: calling agent with tasks=%d", len(reply_input.tasks))
         with _ReplyRunLock:
             task_str = _json.dumps(
-                {"tasks": reply_input.tasks, "message": reply_input.message},
+                {"tasks": [t.model_dump() if hasattr(t, "model_dump") else t for t in reply_input.tasks]},
                 ensure_ascii=False,
             )
             feedback_raw = _ReplyAgent.run(task_str)
@@ -240,11 +259,15 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
         ctx.append_to_list("already_said", already_said_entries)
         ctx.set("persona_mood", persona_mood)
 
-        return {
+        reply_texts = ctx.get("reply_texts", [])
+        result: dict = {
             "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": feedback},
             "already_said": already_said_entries,
             "persona_mood": persona_mood,
         }
+        if reply_texts:
+            result["messages"] = [AIMessage(content=t) for t in reply_texts]
+        return result
     except Exception:
         logger.exception("ReplyNode failed")
         fallback = [TaskItem(task_id=f"reply_error_{uuid.uuid4().hex[:8]}", description="[REPLY_FAILED] Could not generate a reply. Please try rephrasing your message.")]

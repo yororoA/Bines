@@ -9,7 +9,7 @@ from langchain.messages import HumanMessage
 
 logger = logging.getLogger(__name__)
 
-from .status import GraphStatus
+from .status import GraphStatus, MAX_ITERATIONS
 from .cancel import get_cancel_event
 from .context_manager import get_context_manager
 from .nodes import (
@@ -123,7 +123,10 @@ class Workflow:
             messages=[HumanMessage(content=input)],
             thread_id=thread_id,
         )
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": MAX_ITERATIONS * 4 + 10,
+        }
 
         _cancel_event.clear()
 

@@ -51,16 +51,21 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
                     tools = registry.get_tools(PERFORMER_TOOLS)
                     imports = registry.get_authorized_imports(PERFORMER_TOOLS)
 
+                    tool_names = [getattr(t, "__name__", type(t).__name__) for t in tools]
+                    logger.info("PerformerAgent tools loaded: count=%d, names=%s", len(tools), tool_names)
+
                     base_prompt = (
                         "You are a task execution agent. You have access to tools for:\n"
                         "- QQ messaging: send messages, recall/delete messages, send pokes, forward messages\n"
                         "- QQ data: get message details, group/friend message history, group list/info, member list/info\n"
-                        "- Web search: search the internet for information\n\n"
+                        "- Web search: search the internet for information\n"
+                        "- Image recognition: use visualRecognition(image_url) to describe images from URLs\n\n"
                         "CRITICAL RULES:\n"
                         "1. Read the task description and use the appropriate tool to complete it.\n"
                         "2. After calling a tool, produce a feedback list and call final_answer.\n"
                         "3. If the task requires sending a message, use send_msg with the correct target.\n"
-                        "4. Always wrap code in <code>...</code> tags.\n\n"
+                        "4. If the task involves image recognition, use visualRecognition(image_url=url).\n"
+                        "5. Always wrap code in <code>...</code> tags.\n\n"
                         "Example workflow:\n"
                         "<code>\n"
                         "# Call the appropriate tool based on task description\n"
