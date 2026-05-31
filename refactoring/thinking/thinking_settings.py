@@ -29,6 +29,9 @@ class ThinkingSettings(BaseSettings):
     RETRIEVAL_KNOWLEDGE_K: int = 5
     RETRIEVAL_PERSONA_K: int = 4
     RETRIEVAL_DIARY_K: int = 2
+    VISUAL_RECOGNITION_API_KEY: str = ""
+    VISUAL_RECOGNITION_API_URL: str = ""
+    VISUAL_RECOGNITION_MODEL: str = ""
 
     model_config = SettingsConfigDict(
         env_file="thinking.env", env_file_encoding="utf-8"
