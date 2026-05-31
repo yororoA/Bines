@@ -22,6 +22,7 @@ class ThinkingSettings(BaseSettings):
     WORKFLOW_TIMEOUT_SECONDS: float = 120.0
     LLM_REQUEST_TIMEOUT_SECONDS: float = 30.0
     LLM_MAX_RETRIES: int = 1
+    LLM_MAX_TOKENS: int = 4096
     DEDUP_THRESHOLD: float = 0.08
     MAX_INPUT_LENGTH: int = 4096
     DAY_KEY_CUTOFF_HOUR: int = 4

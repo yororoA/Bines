@@ -47,12 +47,15 @@ def visualRecognition(image_url: Union[str, list[str]]) -> str:
         visualRecognition(["https://example.com/a.jpg", "https://example.com/b.jpg"]) -> "Two images compared..."
         visualRecognition("data:image/png;base64,iVBORw0KGgo...") -> "A screenshot showing..."
     """
-    api_url = thinking_settings.VISUAL_RECOGNITION_API_URL
+    api_url = thinking_settings.VISUAL_RECOGNITION_API_URL.rstrip("/")
     api_key = thinking_settings.VISUAL_RECOGNITION_API_KEY
     model = thinking_settings.VISUAL_RECOGNITION_MODEL
 
     if not api_url or not api_key or not model:
         return "Error: Visual recognition is not configured. Please set VISUAL_RECOGNITION_API_URL, VISUAL_RECOGNITION_API_KEY, and VISUAL_RECOGNITION_MODEL."
+
+    if not api_url.endswith("/chat/completions"):
+        api_url = api_url + "/chat/completions"
 
     image_urls = [image_url] if isinstance(image_url, str) else image_url
 

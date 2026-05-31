@@ -272,7 +272,11 @@ class NapCatClient:
                 at_qq = seg_data.get("qq", "")
                 content_parts.append(f"@{at_qq}")
             elif seg_type == "image":
-                content_parts.append("[image]")
+                img_url = seg_data.get("url") or seg_data.get("file", "")
+                if img_url:
+                    content_parts.append(f"[image:{img_url}]")
+                else:
+                    content_parts.append("[image]")
         content = " ".join(content_parts) if content_parts else raw_message
 
         if len(content) > thinking_settings.MAX_INPUT_LENGTH:

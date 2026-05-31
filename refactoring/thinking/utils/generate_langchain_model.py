@@ -36,6 +36,7 @@ def generate_langchain_model(model_name: str) -> BaseChatModel:
 
     llm_timeout = thinking_settings.LLM_REQUEST_TIMEOUT_SECONDS
     llm_retries = thinking_settings.LLM_MAX_RETRIES
+    llm_max_tokens = thinking_settings.LLM_MAX_TOKENS
 
     if provider:
         return init_chat_model(
@@ -45,6 +46,7 @@ def generate_langchain_model(model_name: str) -> BaseChatModel:
             api_key=_require("LLM api_key", provider.api_key),
             timeout=llm_timeout,
             max_retries=llm_retries,
+            max_tokens=llm_max_tokens,
         )
 
     default = registry.get_default()
@@ -57,6 +59,7 @@ def generate_langchain_model(model_name: str) -> BaseChatModel:
             api_key=_require("LLM api_key", default.api_key),
             timeout=llm_timeout,
             max_retries=llm_retries,
+            max_tokens=llm_max_tokens,
         )
 
     # No registry providers registered. Fall back to env settings based on model family.
@@ -74,4 +77,5 @@ def generate_langchain_model(model_name: str) -> BaseChatModel:
         api_key=api_key,
         timeout=llm_timeout,
         max_retries=llm_retries,
+        max_tokens=llm_max_tokens,
     )
