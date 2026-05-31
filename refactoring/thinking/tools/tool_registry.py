@@ -70,6 +70,7 @@ def get_tool_registry() -> ToolRegistry:
 
 def register_default_tools():
     from tools.performer_tools.webSearch import webSearch, get_search_tools, SEARCH_AUTHORIZED_IMPORTS
+    from tools.performer_tools.visualRecognition import visualRecognition, VISUAL_RECOGNITION_AUTHORIZED_IMPORTS
     from tools.napcat_tools.common_msgs.cmsg_tools import send_msg
     from tools.napcat_tools.common_msgs.msg_tools import (
         delete_msg,
@@ -94,17 +95,19 @@ def register_default_tools():
     registry._defaults_registered = True
 
     registry.register_tool(PERFORMER_TOOLS, webSearch, SEARCH_AUTHORIZED_IMPORTS)
+    registry.register_tool(PERFORMER_TOOLS, visualRecognition, VISUAL_RECOGNITION_AUTHORIZED_IMPORTS)
+    registry.register_tool(PERFORMER_TOOLS, send_msg)
+    registry.register_tool(PERFORMER_TOOLS, delete_msg)
+    registry.register_tool(PERFORMER_TOOLS, get_msg)
+    registry.register_tool(PERFORMER_TOOLS, send_forward_msg)
+    registry.register_tool(PERFORMER_TOOLS, send_group_forward_msg)
+    registry.register_tool(PERFORMER_TOOLS, send_private_forward_msg)
+    registry.register_tool(PERFORMER_TOOLS, get_group_msg_history)
+    registry.register_tool(PERFORMER_TOOLS, get_friend_msg_history)
+    registry.register_tool(PERFORMER_TOOLS, get_group_list)
+    registry.register_tool(PERFORMER_TOOLS, get_group_info)
+    registry.register_tool(PERFORMER_TOOLS, get_group_member_list)
+    registry.register_tool(PERFORMER_TOOLS, get_group_member_info)
+    registry.register_tool(PERFORMER_TOOLS, send_poke)
 
     registry.register_tool(REPLY_TOOLS, send_msg)
-    registry.register_tool(REPLY_TOOLS, delete_msg)
-    registry.register_tool(REPLY_TOOLS, get_msg)
-    registry.register_tool(REPLY_TOOLS, send_forward_msg)
-    registry.register_tool(REPLY_TOOLS, send_group_forward_msg)
-    registry.register_tool(REPLY_TOOLS, send_private_forward_msg)
-    registry.register_tool(REPLY_TOOLS, get_group_msg_history)
-    registry.register_tool(REPLY_TOOLS, get_friend_msg_history)
-    registry.register_tool(REPLY_TOOLS, get_group_list)
-    registry.register_tool(REPLY_TOOLS, get_group_info)
-    registry.register_tool(REPLY_TOOLS, get_group_member_list)
-    registry.register_tool(REPLY_TOOLS, get_group_member_info)
-    registry.register_tool(REPLY_TOOLS, send_poke)

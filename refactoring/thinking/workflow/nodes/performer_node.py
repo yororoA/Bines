@@ -49,8 +49,22 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
                     imports = registry.get_authorized_imports(PERFORMER_TOOLS)
 
                     base_prompt = (
-                        "You are a helpful assistant that can search the web. "
-                        "Always make sure you know the current time."
+                        "You are a task execution agent. You have access to tools for:\n"
+                        "- QQ messaging: send messages, recall/delete messages, send pokes, forward messages\n"
+                        "- QQ data: get message details, group/friend message history, group list/info, member list/info\n"
+                        "- Web search: search the internet for information\n\n"
+                        "CRITICAL RULES:\n"
+                        "1. Read the task description and use the appropriate tool to complete it.\n"
+                        "2. After calling a tool, produce a feedback list and call final_answer.\n"
+                        "3. If the task requires sending a message, use send_msg with the correct target.\n"
+                        "4. Always wrap code in <code>...</code> tags.\n\n"
+                        "Example workflow:\n"
+                        "<code>\n"
+                        "# Call the appropriate tool based on task description\n"
+                        "result = tool_name(...)\n"
+                        "feedback = [{\"task_id\": \"task_001\", \"description\": str(result)}]\n"
+                        "final_answer(feedback)\n"
+                        "</code>"
                     )
                     system_prompt = f"{soul_prompt}\n\n{base_prompt}" if soul_prompt else base_prompt
 

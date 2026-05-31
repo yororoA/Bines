@@ -1,4 +1,5 @@
 from .performer_tools import webSearch, get_search_tools, SEARCH_AUTHORIZED_IMPORTS
+from .performer_tools import visualRecognition, VISUAL_RECOGNITION_AUTHORIZED_IMPORTS
 from .napcat_tools import (
     send_msg,
     delete_msg,
@@ -27,6 +28,8 @@ __all__ = [
     "webSearch",
     "get_search_tools",
     "SEARCH_AUTHORIZED_IMPORTS",
+    "visualRecognition",
+    "VISUAL_RECOGNITION_AUTHORIZED_IMPORTS",
     "send_msg",
     "delete_msg",
     "get_msg",
