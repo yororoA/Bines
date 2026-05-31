@@ -13,37 +13,12 @@ class TaskItem(BaseModel):
 
 class PerformerInput(BaseModel):
     task_item: TaskItem
-    soul_prompt: str = ""
 
 
 class ReplyInput(BaseModel):
     tasks: list[TaskItem] = Field(default_factory=list)
     Final: bool = Field(default=False)
     message: str = Field(default="")
-    persona_snapshot: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Persona context for the ReplyAgent to maintain personality consistency.",
-    )
-    already_said: list[str] = Field(
-        default_factory=list,
-        description="List of things already communicated to the user, to avoid repetition.",
-    )
-    soul_prompt: str = Field(
-        default="",
-        description="SOUL.md content defining the agent's core personality.",
-    )
-    rag_recall: dict[str, Any] = Field(
-        default_factory=dict,
-        description="RAG retrieval results from context_builder, passed to avoid redundant retrieval.",
-    )
-    thread_id: str = Field(
-        default="",
-        description="Thread identifier used to determine message routing context.",
-    )
-    persona_mood: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Current emotional state of the persona (arousal, consecutive_triggers).",
-    )
 
 
 class ManagerRoute(BaseModel):

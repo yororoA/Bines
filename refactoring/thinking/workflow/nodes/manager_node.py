@@ -9,6 +9,7 @@ from langgraph.types import Command, Send
 from utils import shared_langchain_model
 from ..status import GraphStatus, ManagerRoute, PerformerInput, ReplyInput, MAX_ITERATIONS
 from ..cancel import get_cancel_event
+from ..context_manager import get_context_manager
 from memory import PersonaState
 
 logger = logging.getLogger(__name__)
@@ -20,22 +21,13 @@ def _get_convergence_window() -> int:
 
 
 def _make_reply_input(
-    state: GraphStatus,
     *,
     final: bool = True,
     message: str = "",
-    soul_prompt: str = "",
 ) -> ReplyInput:
     return ReplyInput(
-        tasks=[],
         Final=final,
         message=message,
-        persona_snapshot=state.get("persona_snapshot", {}),
-        already_said=state.get("already_said", []),
-        soul_prompt=soul_prompt,
-        rag_recall=state.get("rag_recall", {}),
-        thread_id=state.get("thread_id", ""),
-        persona_mood=state.get("persona_mood", {}),
     )
 
 
@@ -63,12 +55,14 @@ def _check_convergence(state: GraphStatus, current_task_count: int) -> tuple[boo
     return counter >= _get_convergence_window(), counter
 
 
-def _assemble_manager_context(state: GraphStatus) -> str:
-    persona_snapshot = state.get("persona_snapshot", {})
-    rag_recall = state.get("rag_recall", {})
-    already_said = state.get("already_said", [])
-    thoughts = state.get("thoughts", [])
-    soul_prompt = state.get("soul_prompt", "")
+def _assemble_manager_context() -> str:
+    ctx = get_context_manager()
+    persona_snapshot = ctx.get("persona_snapshot", {})
+    rag_recall = ctx.get("rag_recall", {})
+    already_said = ctx.get("already_said", [])
+    soul_prompt = ctx.get("soul_prompt", "")
+
+    thoughts = ctx.get("thoughts", [])
 
     context_parts = []
 
@@ -104,13 +98,16 @@ def ManagerNode(
     if cancel_event.is_set():
         logger.info("ManagerNode cancelled, routing to final_reply")
         reply_input = _make_reply_input(
-            state,
             message="[System: Workflow was cancelled.]",
-            soul_prompt=state.get("soul_prompt", ""),
         )
         return Command(
             goto=[Send("final_reply", reply_input)],
         )
+
+    ctx = get_context_manager()
+    ctx.set("thoughts", state.get("thoughts", []))
+    ctx.set("already_said", state.get("already_said", []))
+    ctx.set("persona_mood", state.get("persona_mood", {}))
 
     current_iteration = state.get("iteration_count", 0) + 1
     done_ids = _get_done_ids(state)
@@ -121,8 +118,6 @@ def ManagerNode(
         "last_task_count": task_count,
     }
 
-    soul_prompt = state.get("soul_prompt", "")
-
     converged, new_counter = _check_convergence(state, task_count)
     state_update["convergence_counter"] = new_counter
 
@@ -132,14 +127,13 @@ def ManagerNode(
             current_iteration, task_count,
         )
         reply_input = _make_reply_input(
-            state,
             message=f"[system: all tasks completed, {task_count} tasks done]",
-            soul_prompt=soul_prompt,
         )
-        state_update["thoughts"] = [
+        thoughts_entry = (
             f"[Convergence] No new tasks for {_get_convergence_window()} iterations. "
             f"Total tasks: {task_count}"
-        ]
+        )
+        state_update["thoughts"] = [thoughts_entry]
         state_update["convergence_counter"] = 0
         return Command(
             update=state_update,
@@ -147,13 +141,13 @@ def ManagerNode(
         )
 
     if current_iteration >= MAX_ITERATIONS:
-        reply_input = _make_reply_input(state, soul_prompt=soul_prompt)
+        reply_input = _make_reply_input()
         return Command(
             update=state_update,
             goto=[Send("final_reply", reply_input)],
         )
 
-    context_str = _assemble_manager_context(state)
+    context_str = _assemble_manager_context()
     invoke_messages = [SystemMessage(content=context_str)] + list(state.get("messages", []))
     logger.info("ManagerNode: calling LLM with %d messages", len(invoke_messages))
     try:
@@ -162,7 +156,7 @@ def ManagerNode(
                     result.goto_final_reply, result.goto_advance_reply, len(result.performer_tasks))
     except Exception:
         logger.exception("ManagerModel invoke failed, falling back to final_reply")
-        reply_input = _make_reply_input(state, soul_prompt=soul_prompt)
+        reply_input = _make_reply_input()
         return Command(
             update=state_update,
             goto=[Send("final_reply", reply_input)],
@@ -171,18 +165,14 @@ def ManagerNode(
     state_update["thoughts"] = [result.thoughts]
 
     if result.goto_final_reply:
-        reply_input = _make_reply_input(
-            state, message=result.final_reply_hint or "", soul_prompt=soul_prompt,
-        )
+        reply_input = _make_reply_input(message=result.final_reply_hint or "")
         return Command(
             update=state_update,
             goto=[Send("final_reply", reply_input)],
         )
 
     if result.goto_advance_reply:
-        reply_input = _make_reply_input(
-            state, final=False, message=result.advance_reply_hint or "", soul_prompt=soul_prompt,
-        )
+        reply_input = _make_reply_input(final=False, message=result.advance_reply_hint or "")
         return Command(
             update=state_update,
             goto=[Send("advance_reply", reply_input)],
@@ -192,10 +182,10 @@ def ManagerNode(
     if pending_tasks:
         return Command(
             update=state_update,
-            goto=[Send("performer", PerformerInput(task_item=task, soul_prompt=soul_prompt)) for task in pending_tasks],
+            goto=[Send("performer", PerformerInput(task_item=task)) for task in pending_tasks],
         )
 
-    reply_input = _make_reply_input(state, soul_prompt=soul_prompt)
+    reply_input = _make_reply_input()
     return Command(
         update=state_update,
         goto=[Send("final_reply", reply_input)],

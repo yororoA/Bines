@@ -47,11 +47,8 @@ class GraphStatus(TypedDict):
     iteration_count: int
     last_task_count: int
     convergence_counter: int
-    persona_snapshot: dict
-    rag_recall: dict
-    soul_prompt: str
-    persona_mood: dict
     already_said: Annotated[list[str], add_list_str]
+    persona_mood: dict
     diary_triggered_day: str
     invocation_count: int
     thread_id: str

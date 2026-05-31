@@ -7,6 +7,7 @@ from smolagents import CodeAgent
 from tools import get_tool_registry, PERFORMER_TOOLS
 from ..status import PerformerInput, TaskItem
 from ..cancel import get_cancel_event
+from ..context_manager import get_context_manager
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,9 @@ def PerformerNode(performer_input: PerformerInput) -> dict[str, list[TaskItem]]:
     task_item = performer_input.task_item
     task_id = task_item.task_id
     task_description = task_item.description
-    soul_prompt = performer_input.soul_prompt or ""
+
+    ctx = get_context_manager()
+    soul_prompt = ctx.get("soul_prompt", "")
     current_hash = _soul_hash(soul_prompt)
 
     try:

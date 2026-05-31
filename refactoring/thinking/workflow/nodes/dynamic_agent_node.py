@@ -5,6 +5,7 @@ from typing import Any
 
 from ..status import GraphStatus
 from ..cancel import get_cancel_event
+from ..context_manager import get_context_manager
 from memory import (
     PersonaState,
     MemoryJudgment,
@@ -99,9 +100,9 @@ def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
 
         if context_text:
             try:
-                persona = PersonaState.from_dict(
-                    state.get("persona_snapshot", {})
-                )
+                ctx = get_context_manager()
+                persona_snapshot = ctx.get("persona_snapshot", {})
+                persona = PersonaState.from_dict(persona_snapshot)
                 judgment: MemoryJudgment = judge_and_store(
                     context_text, persona=persona
                 )

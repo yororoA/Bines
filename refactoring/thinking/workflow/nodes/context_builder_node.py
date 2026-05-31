@@ -8,6 +8,7 @@ from langchain.messages import HumanMessage
 
 from ..status import GraphStatus
 from ..cancel import get_cancel_event
+from ..context_manager import get_context_manager
 
 logger = logging.getLogger(__name__)
 from memory import (
@@ -41,6 +42,19 @@ def _extract_query(state: GraphStatus) -> str:
     if isinstance(content, str):
         return content
     return ""
+
+
+def _format_conversation_history(state: GraphStatus) -> str:
+    messages = state.get("messages", [])
+    if not messages:
+        return ""
+    parts = []
+    for msg in messages:
+        role = getattr(msg, "type", "unknown")
+        content = getattr(msg, "content", "")
+        if isinstance(content, str) and content:
+            parts.append(f"[{role}] {content}")
+    return "\n".join(parts)
 
 
 def _load_persona(state: GraphStatus) -> dict[str, Any]:
@@ -121,8 +135,17 @@ def ContextBuilderNode(state: GraphStatus) -> dict:
     persona_snapshot = _load_persona(state)
     rag_recall = _build_rag_recall(query)
     soul_prompt = _load_soul_prompt()
-    return {
+    conversation_history = _format_conversation_history(state)
+
+    ctx = get_context_manager()
+    ctx.update({
         "persona_snapshot": persona_snapshot,
         "rag_recall": rag_recall,
         "soul_prompt": soul_prompt,
-    }
+        "conversation_history": conversation_history,
+        "thread_id": state.get("thread_id", ""),
+        "already_said": state.get("already_said", []),
+        "persona_mood": state.get("persona_mood", {}),
+    })
+
+    return {}

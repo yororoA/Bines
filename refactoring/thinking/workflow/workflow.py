@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 from .status import GraphStatus
 from .cancel import get_cancel_event
+from .context_manager import get_context_manager
 from .nodes import (
     ManagerNode,
     PerformerNode,
@@ -125,7 +126,12 @@ class Workflow:
         config = {"configurable": {"thread_id": thread_id}}
 
         _cancel_event.clear()
-        future = self._executor.submit(self._app.invoke, initial_state, config)
+
+        def _run():
+            get_context_manager().reset()
+            return self._app.invoke(initial_state, config)
+
+        future = self._executor.submit(_run)
         try:
             result = future.result(timeout=timeout)
             logger.info("Workflow.invoke: completed for thread=%s", thread_id)

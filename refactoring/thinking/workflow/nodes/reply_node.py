@@ -10,7 +10,8 @@ from smolagents import CodeAgent
 from utils import shared_smol_model
 from ..status import ReplyInput, TaskItem
 from ..cancel import get_cancel_event
-from memory import PersonaState, retrieve_for_reply, format_retrieval_results
+from ..context_manager import get_context_manager
+from memory import PersonaState, retrieve_for_reply, format_retrieval_results, PersonaMood
 from tools import get_tool_registry, REPLY_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -40,10 +41,19 @@ def _parse_thread_id(thread_id: str) -> dict[str, str]:
     return {}
 
 
-def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
-    persona = PersonaState.from_dict(reply_input.persona_snapshot)
+def _build_reply_system_prompt() -> str:
+    ctx = get_context_manager()
+    persona_snapshot = ctx.get("persona_snapshot", {})
+    soul_prompt = ctx.get("soul_prompt", "")
+    persona_mood = ctx.get("persona_mood", {})
+    rag_recall = ctx.get("rag_recall", {})
+    already_said = ctx.get("already_said", [])
+    conversation_history = ctx.get("conversation_history", "")
+    thread_id = ctx.get("thread_id", "")
 
-    thread_ctx = _parse_thread_id(reply_input.thread_id)
+    persona = PersonaState.from_dict(persona_snapshot)
+
+    thread_ctx = _parse_thread_id(thread_id)
     ctx_lines = []
     if thread_ctx.get("message_type") == "private":
         ctx_lines.append(f'send_msg(msg={{"message_type": "private", "user_id": "{thread_ctx["user_id"]}", "message": [{{"type": "text", "data": {{"text": "your reply here"}}}}]}})')
@@ -75,11 +85,10 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
 
     parts = [base_prompt]
 
-    if reply_input.soul_prompt:
-        parts.append(reply_input.soul_prompt)
+    if soul_prompt:
+        parts.append(soul_prompt)
 
-    mood_dict = reply_input.persona_mood or {}
-    from memory.persona_state import PersonaMood
+    mood_dict = persona_mood or {}
     mood = PersonaMood.from_dict(mood_dict)
     prev_arousal = mood_dict.get("prev_arousal", mood.arousal)
 
@@ -105,19 +114,21 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
     if profile_str:
         parts.append(f"\n\n{profile_str}")
 
-    rag = reply_input.rag_recall
-    if rag and rag.get("formatted"):
-        parts.append(f"\n\n[RAG Context]\n{rag['formatted']}")
-    elif reply_input.message:
-        results = retrieve_for_reply(reply_input.message)
+    if rag_recall and rag_recall.get("formatted"):
+        parts.append(f"\n\n[RAG Context]\n{rag_recall['formatted']}")
+    elif ctx.get("reply_current_message"):
+        results = retrieve_for_reply(ctx.get("reply_current_message"))
         formatted = format_retrieval_results(results)
         if formatted:
             parts.append(f"\n\n[RAG Context]\n{formatted}")
 
-    if reply_input.already_said:
+    if conversation_history:
+        parts.append(f"\n\n[Conversation History]\n{conversation_history}")
+
+    if already_said:
         already_said_str = (
             "\n\n[Already Said] You have already told the user: "
-            + "; ".join(reply_input.already_said[-5:])
+            + "; ".join(already_said[-5:])
             + "\nAvoid repeating these points."
         )
         parts.append(already_said_str)
@@ -125,7 +136,7 @@ def _build_reply_system_prompt(reply_input: ReplyInput) -> str:
     return "\n".join(parts)
 
 
-def _extract_mood(feedback_raw, reply_input: ReplyInput) -> dict:
+def _extract_mood(feedback_raw) -> dict:
     try:
         mood_item = None
         items = feedback_raw if isinstance(feedback_raw, list) else []
@@ -138,7 +149,8 @@ def _extract_mood(feedback_raw, reply_input: ReplyInput) -> dict:
             new_triggers = int(mood_item.get("mood_consecutive_triggers", 0))
             new_arousal = max(0.0, min(100.0, new_arousal))
             new_triggers = max(0, new_triggers)
-            prev_mood = reply_input.persona_mood or {}
+            ctx = get_context_manager()
+            prev_mood = ctx.get("persona_mood", {})
             return {
                 "arousal": new_arousal,
                 "consecutive_triggers": new_triggers,
@@ -157,13 +169,17 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
         if cancel_event.is_set():
             logger.info("ReplyNode cancelled")
             fallback = [TaskItem(task_id=f"reply_cancel_{uuid.uuid4().hex[:8]}", description="[CANCELLED] Workflow was cancelled due to timeout.")]
+            ctx = get_context_manager()
             return {
                 "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": fallback},
                 "already_said": [],
-                "persona_mood": {},
+                "persona_mood": ctx.get("persona_mood", {}),
             }
 
-        prompt = _build_reply_system_prompt(reply_input)
+        ctx = get_context_manager()
+        ctx.set("reply_current_message", reply_input.message)
+
+        prompt = _build_reply_system_prompt()
         current_hash = _prompt_hash(prompt)
 
         needs_rebuild = _ReplyAgent is None or current_hash != _cached_prompt_hash
@@ -196,9 +212,8 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
 
         logger.info("ReplyNode: calling agent with message=%s", reply_input.message[:100] if reply_input.message else "None")
         with _ReplyRunLock:
-            thread_ctx = _parse_thread_id(reply_input.thread_id)
             task_str = _json.dumps(
-                {"tasks": reply_input.tasks, "message": reply_input.message, "thread_context": thread_ctx},
+                {"tasks": reply_input.tasks, "message": reply_input.message},
                 ensure_ascii=False,
             )
             feedback_raw = _ReplyAgent.run(task_str)
@@ -207,17 +222,23 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
         if isinstance(feedback_raw, str):
             feedback = [TaskItem(task_id=f"reply_{uuid.uuid4().hex[:8]}", description=feedback_raw[:500])]
         elif isinstance(feedback_raw, list):
-            feedback = [
-                TaskItem(**item) if isinstance(item, dict)
-                else TaskItem(task_id=f"reply_{uuid.uuid4().hex[:8]}", description=str(item)[:500])
-                for item in feedback_raw
-            ]
+            feedback = []
+            for item in feedback_raw:
+                if isinstance(item, dict):
+                    if "description" not in item:
+                        continue
+                    feedback.append(TaskItem(**item))
+                else:
+                    feedback.append(TaskItem(task_id=f"reply_{uuid.uuid4().hex[:8]}", description=str(item)[:500]))
         else:
             feedback = [TaskItem(task_id=f"reply_{uuid.uuid4().hex[:8]}", description=str(feedback_raw)[:500])]
 
         already_said_entries = [item.description for item in feedback if item.description]
 
-        persona_mood = _extract_mood(feedback_raw, reply_input)
+        persona_mood = _extract_mood(feedback_raw)
+
+        ctx.append_to_list("already_said", already_said_entries)
+        ctx.set("persona_mood", persona_mood)
 
         return {
             "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": feedback},
@@ -227,8 +248,9 @@ def ReplyNode(reply_input: ReplyInput) -> dict[str, list[TaskItem]]:
     except Exception:
         logger.exception("ReplyNode failed")
         fallback = [TaskItem(task_id=f"reply_error_{uuid.uuid4().hex[:8]}", description="[REPLY_FAILED] Could not generate a reply. Please try rephrasing your message.")]
+        ctx = get_context_manager()
         return {
             "tasks_done": {"final_reply" if reply_input.Final else "advance_reply": fallback},
             "already_said": [],
-            "persona_mood": {},
+            "persona_mood": ctx.get("persona_mood", {}),
         }
