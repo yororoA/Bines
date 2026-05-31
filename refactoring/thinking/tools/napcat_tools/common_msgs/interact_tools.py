@@ -4,16 +4,18 @@ from .base import _call_api
 
 
 @tool
-def send_poke(msg: SEND_POKE) -> dict | str:
+def send_poke(msg: dict | SEND_POKE) -> dict | str:
     """
     发送戳一戳，群聊时传 group_id，不传则为私聊戳一戳
 
     Args:
-        msg (SEND_POKE): 戳一戳参数
+        msg (dict | SEND_POKE): 戳一戳参数
 
     Returns:
         dict|str: 操作结果
     """
+    if isinstance(msg, dict):
+        msg = SEND_POKE(**msg)
     params = msg.model_dump(exclude_none=True)
     if msg.group_id:
         return _call_api("group_poke", params)

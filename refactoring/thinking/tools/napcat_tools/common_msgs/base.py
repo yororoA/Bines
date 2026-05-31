@@ -24,9 +24,12 @@ def _run_async(coro):
 def _call_api(action: str, params: dict | None = None) -> dict:
     client = get_client()
     if not client:
+        logger.warning("NapCat _call_api: client not connected, action=%s", action)
         return {"error": "NapCat client is not connected"}
     try:
+        logger.info("NapCat _call_api: action=%s, params=%s", action, str(params)[:200])
         res = _run_async(client.call_api(action=action, params=params or {}))
+        logger.info("NapCat _call_api: action=%s, result=%s", action, str(res)[:200])
         return res
     except Exception as e:
         logger.exception("NapCat API call failed: %s", action)

@@ -43,10 +43,12 @@ class SEND_MSG(BaseModel):
         + "\nFor example, private for a single user, group for a group of users."
     )
     user_id: Optional[str] = Field(
-        description="The user ID of the recipient of the message. Fill in if message_type is private."
+        default=None,
+        description="The user ID of the recipient of the message. Fill in if message_type is private.",
     )
     group_id: Optional[str] = Field(
-        description="The group ID of the recipient of the message. Fill in if message_type is group."
+        default=None,
+        description="The group ID of the recipient of the message. Fill in if message_type is group.",
     )
     message: list[MSG_SEGMENT] = Field(description="The content of the message.")
 

@@ -12,7 +12,7 @@ from .base import _call_api
 
 
 @tool
-def delete_msg(msg: DELETE_MSG) -> dict | str:
+def delete_msg(msg: dict | DELETE_MSG) -> dict | str:
     """
     撤回已发送的QQ消息
 
@@ -22,11 +22,13 @@ def delete_msg(msg: DELETE_MSG) -> dict | str:
     Returns:
         dict|str: 操作结果
     """
+    if isinstance(msg, dict):
+        msg = DELETE_MSG(**msg)
     return _call_api("delete_msg", msg.model_dump())
 
 
 @tool
-def get_msg(msg: GET_MSG) -> dict | str:
+def get_msg(msg: dict | GET_MSG) -> dict | str:
     """
     获取QQ消息详情
 
@@ -36,11 +38,13 @@ def get_msg(msg: GET_MSG) -> dict | str:
     Returns:
         dict|str: 消息详情
     """
+    if isinstance(msg, dict):
+        msg = GET_MSG(**msg)
     return _call_api("get_msg", msg.model_dump())
 
 
 @tool
-def send_forward_msg(msg: SEND_FORWARD_MSG) -> dict | str:
+def send_forward_msg(msg: dict | SEND_FORWARD_MSG) -> dict | str:
     """
     发送合并转发消息，支持私聊和群聊
 
@@ -50,12 +54,14 @@ def send_forward_msg(msg: SEND_FORWARD_MSG) -> dict | str:
     Returns:
         dict|str: 包含 message_id 和 forward_id 的结果
     """
+    if isinstance(msg, dict):
+        msg = SEND_FORWARD_MSG(**msg)
     params = msg.model_dump(exclude_none=True)
     return _call_api("send_forward_msg", params)
 
 
 @tool
-def send_group_forward_msg(msg: SEND_GROUP_FORWARD_MSG) -> dict | str:
+def send_group_forward_msg(msg: dict | SEND_GROUP_FORWARD_MSG) -> dict | str:
     """
     发送群合并转发消息
 
@@ -65,12 +71,14 @@ def send_group_forward_msg(msg: SEND_GROUP_FORWARD_MSG) -> dict | str:
     Returns:
         dict|str: 包含 message_id 和 forward_id 的结果
     """
+    if isinstance(msg, dict):
+        msg = SEND_GROUP_FORWARD_MSG(**msg)
     params = msg.model_dump(exclude_none=True)
     return _call_api("send_group_forward_msg", params)
 
 
 @tool
-def send_private_forward_msg(msg: SEND_PRIVATE_FORWARD_MSG) -> dict | str:
+def send_private_forward_msg(msg: dict | SEND_PRIVATE_FORWARD_MSG) -> dict | str:
     """
     发送私聊合并转发消息
 
@@ -80,12 +88,14 @@ def send_private_forward_msg(msg: SEND_PRIVATE_FORWARD_MSG) -> dict | str:
     Returns:
         dict|str: 包含 message_id 和 forward_id 的结果
     """
+    if isinstance(msg, dict):
+        msg = SEND_PRIVATE_FORWARD_MSG(**msg)
     params = msg.model_dump(exclude_none=True)
     return _call_api("send_private_forward_msg", params)
 
 
 @tool
-def get_group_msg_history(msg: GET_GROUP_MSG_HISTORY) -> dict | str:
+def get_group_msg_history(msg: dict | GET_GROUP_MSG_HISTORY) -> dict | str:
     """
     获取群历史消息
 
@@ -95,12 +105,14 @@ def get_group_msg_history(msg: GET_GROUP_MSG_HISTORY) -> dict | str:
     Returns:
         dict|str: 消息列表
     """
+    if isinstance(msg, dict):
+        msg = GET_GROUP_MSG_HISTORY(**msg)
     params = msg.model_dump(exclude_none=True)
     return _call_api("get_group_msg_history", params)
 
 
 @tool
-def get_friend_msg_history(msg: GET_FRIEND_MSG_HISTORY) -> dict | str:
+def get_friend_msg_history(msg: dict | GET_FRIEND_MSG_HISTORY) -> dict | str:
     """
     获取好友(私聊)历史消息
 
@@ -110,5 +122,7 @@ def get_friend_msg_history(msg: GET_FRIEND_MSG_HISTORY) -> dict | str:
     Returns:
         dict|str: 消息列表
     """
+    if isinstance(msg, dict):
+        msg = GET_FRIEND_MSG_HISTORY(**msg)
     params = msg.model_dump(exclude_none=True)
     return _call_api("get_friend_msg_history", params)
