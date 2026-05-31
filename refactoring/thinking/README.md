@@ -21,6 +21,7 @@ napcat_server/          tools/                  workflow/
 - **人设系统**: 基于 SOUL.md 的动态人设，支持热重载
 - **工具注册**: 动态工具注册机制，支持 performer/reply/common 三类工具
 - **模型管理**: 多 Provider 注册，懒加载模型缓存
+- **Checkpoint Viewer**: Web 界面查看 LangGraph checkpoint 状态数据，支持浏览 thread_id、消息历史、任务状态
 
 ## 快速开始
 
@@ -73,6 +74,21 @@ LLM_MAX_RETRIES=1
 python main.py
 ```
 
+### Checkpoint Viewer
+
+查看 LangGraph checkpoint 状态数据的 Web 工具：
+
+```bash
+python -m checkpoint_viewer
+```
+
+启动后访问 `http://127.0.0.1:8501`，支持：
+- 浏览所有 thread_id 及其 checkpoint 数量
+- 查看每个 checkpoint 的消息历史、任务状态、思维链
+- 搜索过滤 thread_id
+
+自定义端口：`python -m checkpoint_viewer --port 9000`
+
 ## 项目结构
 
 ```
@@ -83,6 +99,13 @@ thinking/
 │
 ├── Personal/
 │   └── SOUL.md                     # AI 人设定义
+│
+├── checkpoint_viewer/              # Checkpoint 查看工具
+│   ├── api.py                      # FastAPI 路由
+│   ├── db.py                       # SQLite 只读数据访问
+│   ├── __main__.py                 # CLI 启动入口
+│   └── static/
+│       └── index.html              # 前端页面
 │
 ├── memory/                         # 记忆系统
 │   ├── persona_state.py            # 人设数据模型 + 缓存

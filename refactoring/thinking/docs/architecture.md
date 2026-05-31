@@ -161,6 +161,42 @@ All settings managed via `ThinkingSettings` (Pydantic BaseSettings) in `thinking
 
 SQLite checkpoints via LangGraph SqliteSaver, three thread IDs (`raw_chat`, `QQ_private`, `QQ_group`).
 
+## Checkpoint Viewer
+
+Web-based tool for inspecting LangGraph checkpoint data stored in SQLite.
+
+### Architecture
+
+```text
+checkpoint_viewer/
+├── __main__.py     # CLI entry (python -m checkpoint_viewer)
+├── api.py          # FastAPI app with REST endpoints
+├── db.py           # Read-only SQLite access + JsonPlusSerializer deserialization
+└── static/
+    └── index.html  # Single-page frontend (dark theme)
+```
+
+### API Endpoints
+
+| Endpoint | Description |
+| ------ | ----------------- |
+| `GET /` | Frontend page |
+| `GET /api/threads` | List all thread_ids with checkpoint counts |
+| `GET /api/threads/{thread_id}/checkpoints` | List checkpoints for a thread |
+| `GET /api/checkpoints/{checkpoint_id}` | Full deserialized checkpoint detail |
+
+### Data Flow
+
+```text
+SQLite (checkpoints.db) --> db.py (read-only, JsonPlusSerializer) --> api.py (FastAPI) --> index.html (fetch API)
+```
+
+### Key Design
+
+- **Read-only access**: Uses `file:xxx?mode=ro` URI to prevent accidental data modification
+- **Lazy deserialization**: Checkpoint BLOBs deserialized on-demand via LangGraph's `JsonPlusSerializer`
+- **Frontend caching**: Thread list and checkpoint details cached in browser memory
+
 ## Directory Structure
 
 ```text
@@ -171,6 +207,13 @@ thinking/
 │
 ├── Personal/
 │   └── SOUL.md                     # AI persona definition
+│
+├── checkpoint_viewer/              # Checkpoint inspection tool
+│   ├── __main__.py                 # CLI entry point
+│   ├── api.py                      # FastAPI routes
+│   ├── db.py                       # Read-only SQLite data access
+│   └── static/
+│       └── index.html              # Frontend page
 │
 ├── memory/
 │   ├── persona_state.py            # Persona data model + cache

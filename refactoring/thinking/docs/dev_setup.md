@@ -59,6 +59,42 @@ python main.py
 
 The system will connect to the NapCat WebSocket and begin listening for QQ messages.
 
+## Checkpoint Viewer
+
+A web-based tool for inspecting LangGraph checkpoint data:
+
+```bash
+# Start with default port (8501)
+python -m checkpoint_viewer
+
+# Custom port
+python -m checkpoint_viewer --port 9000
+
+# Custom database path
+python -m checkpoint_viewer --db-path /path/to/checkpoints.db
+
+# Custom host (allow external access)
+python -m checkpoint_viewer --host 0.0.0.0
+```
+
+Then open `http://127.0.0.1:8501` in your browser.
+
+### Configuration
+
+Add to `thinking.env` to customize the default port:
+
+```env
+VIEWER_PORT=8501
+```
+
+### Features
+
+- Browse all thread_ids with checkpoint counts
+- View checkpoint timeline with step numbers and source
+- Inspect deserialized GraphStatus (messages, tasks, thoughts)
+- Search/filter thread_ids
+- Read-only database access (no data modification)
+
 ## Adding a New Model Provider
 
 1. Register the provider programmatically:
