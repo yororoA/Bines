@@ -34,6 +34,8 @@ def _make_reply_input(
         already_said=state.get("already_said", []),
         soul_prompt=soul_prompt,
         rag_recall=state.get("rag_recall", {}),
+        thread_id=state.get("thread_id", ""),
+        persona_mood=state.get("persona_mood", {}),
     )
 
 

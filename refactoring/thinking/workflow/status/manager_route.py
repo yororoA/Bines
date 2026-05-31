@@ -36,6 +36,14 @@ class ReplyInput(BaseModel):
         default_factory=dict,
         description="RAG retrieval results from context_builder, passed to avoid redundant retrieval.",
     )
+    thread_id: str = Field(
+        default="",
+        description="Thread identifier used to determine message routing context.",
+    )
+    persona_mood: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Current emotional state of the persona (arousal, consecutive_triggers).",
+    )
 
 
 class ManagerRoute(BaseModel):

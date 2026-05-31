@@ -50,6 +50,8 @@ class GraphStatus(TypedDict):
     persona_snapshot: dict
     rag_recall: dict
     soul_prompt: str
+    persona_mood: dict
     already_said: Annotated[list[str], add_list_str]
     diary_triggered_day: str
     invocation_count: int
+    thread_id: str

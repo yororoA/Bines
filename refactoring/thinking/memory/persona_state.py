@@ -79,3 +79,39 @@ class PersonaCache:
 
 
 persona_cache = PersonaCache()
+
+
+@dataclass
+class PersonaMood:
+    arousal: float = 0.0
+    consecutive_triggers: int = 0
+
+    @staticmethod
+    def arousal_level(arousal: float) -> str:
+        if arousal <= 30:
+            return "base"
+        elif arousal <= 60:
+            return "slight"
+        elif arousal <= 85:
+            return "moderate"
+        else:
+            return "high"
+
+    def clamp(self):
+        self.arousal = max(0.0, min(100.0, self.arousal))
+        return self
+
+    def to_dict(self) -> dict:
+        return {
+            "arousal": self.arousal,
+            "consecutive_triggers": self.consecutive_triggers,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> PersonaMood:
+        if not data:
+            return cls()
+        return cls(
+            arousal=float(data.get("arousal", 0)),
+            consecutive_triggers=int(data.get("consecutive_triggers", 0)),
+        ).clamp()
