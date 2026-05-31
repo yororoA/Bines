@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from langchain_core.messages import SystemMessage
+
 from thinking_settings import thinking_settings
 from ..vector_store.chroma_store import (
     ChromaMemoryStore,
@@ -17,7 +19,7 @@ from ..vector_store.chroma_store import (
 )
 from ..persona_state import PersonaState, persona_cache
 from ..lifecycle.buffer_diary import add_to_buffer
-from utils import generate_langchain_model
+from utils import generate_langchain_model, lazy_model
 from utils.time_utils import day_key
 
 logger = logging.getLogger(__name__)
@@ -84,7 +86,7 @@ def _get_judge_model():
         with _judge_lock:
             if _JUDGE_MODEL is None or current_name != _JUDGE_MODEL_NAME:
                 base_model = generate_langchain_model(current_name)
-                _JUDGE_MODEL = base_model.with_structured_output(MemoryJudgment)
+                _JUDGE_MODEL = lazy_model._make_json_schema_injector(MemoryJudgment) | base_model.with_structured_output(MemoryJudgment, method="json_mode")
                 _JUDGE_MODEL_NAME = current_name
     return _JUDGE_MODEL
 
@@ -129,7 +131,7 @@ def judge_and_store(
     )
 
     model = _get_judge_model()
-    judgment: MemoryJudgment = model.invoke(prompt)
+    judgment: MemoryJudgment = model.invoke([SystemMessage(content=prompt)])
 
     if not judgment.should_store:
         return judgment
