@@ -14,6 +14,10 @@ def main():
         help="SQLite checkpoint 数据库路径 (默认 memory_data/checkpoints/checkpoints.db)",
     )
     parser.add_argument(
+        "--chroma-path", type=str, default=None,
+        help="ChromaDB 数据目录路径 (默认 memory_data/chroma_db)",
+    )
+    parser.add_argument(
         "--host", type=str, default="127.0.0.1",
         help="监听地址 (默认 127.0.0.1)",
     )
@@ -31,6 +35,10 @@ def main():
     if db_path is None:
         db_path = Path(__file__).resolve().parents[1] / "memory_data" / "checkpoints" / "checkpoints.db"
 
+    chroma_path = args.chroma_path
+    if chroma_path is None:
+        chroma_path = Path(__file__).resolve().parents[1] / "memory_data" / "chroma_db"
+
     if not Path(db_path).exists():
         print(f"Error: database not found at {db_path}", file=sys.stderr)
         sys.exit(1)
@@ -43,8 +51,8 @@ def main():
 
     from .api import create_app
 
-    app = create_app(db_path)
-    print(f"Checkpoint Viewer running at http://{args.host}:{port}")
+    app = create_app(db_path, chroma_path)
+    print(f"Data Viewer running at http://{args.host}:{port}")
     print(f"Database: {db_path}")
     uvicorn.run(app, host=args.host, port=port, log_level="info")
 

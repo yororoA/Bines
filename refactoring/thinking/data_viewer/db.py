@@ -3,11 +3,20 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import chromadb
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 _serde = JsonPlusSerializer()
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "memory_data" / "checkpoints" / "checkpoints.db"
+DEFAULT_CHROMA_PATH = Path(__file__).resolve().parents[1] / "memory_data" / "chroma_db"
+
+COLLECTION_NAMES = ["knowledge", "persona", "diary", "sliced_diary", "buffer"]
+
+
+def get_chroma_client(chroma_path: Path | str | None = None) -> chromadb.ClientAPI:
+    path = str(chroma_path or DEFAULT_CHROMA_PATH)
+    return chromadb.PersistentClient(path=path)
 
 
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -196,3 +205,61 @@ def _safe_serialize(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return _safe_serialize(obj.__dict__)
     return str(obj)
+
+
+def list_collections(client: chromadb.ClientAPI) -> list[dict[str, Any]]:
+    collections = client.list_collections()
+    results = []
+    for col in collections:
+        collection = client.get_collection(col.name)
+        results.append({
+            "name": col.name,
+            "count": collection.count(),
+        })
+    return sorted(results, key=lambda x: COLLECTION_NAMES.index(x["name"]) if x["name"] in COLLECTION_NAMES else 999)
+
+
+def get_collection_items(
+    client: chromadb.ClientAPI,
+    collection_name: str,
+    offset: int = 0,
+    limit: int = 50,
+    query: str | None = None,
+) -> dict[str, Any]:
+    collection = client.get_collection(collection_name)
+    total = collection.count()
+
+    if query:
+        all_data = collection.get(include=["documents", "metadatas"])
+        ids, documents, metadatas = all_data["ids"], all_data["documents"], all_data["metadatas"]
+        filtered = [
+            (id_, doc, meta)
+            for id_, doc, meta in zip(ids, documents, metadatas)
+            if query.lower() in (doc or "").lower()
+        ]
+        total_filtered = len(filtered)
+        page = filtered[offset:offset + limit]
+        return {
+            "total": total_filtered,
+            "offset": offset,
+            "limit": limit,
+            "items": [
+                {"id": id_, "document": doc, "metadata": meta or {}}
+                for id_, doc, meta in page
+            ],
+        }
+
+    data = collection.get(
+        include=["documents", "metadatas"],
+        offset=offset,
+        limit=limit,
+    )
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": [
+            {"id": id_, "document": doc, "metadata": meta or {}}
+            for id_, doc, meta in zip(data["ids"], data["documents"], data["metadatas"])
+        ],
+    }
