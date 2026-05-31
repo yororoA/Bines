@@ -16,3 +16,6 @@ httpx
 websockets
 
 sentence-transformers
+
+fastapi
+uvicorn[standard]

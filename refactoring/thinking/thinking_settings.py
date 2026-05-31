@@ -32,6 +32,7 @@ class ThinkingSettings(BaseSettings):
     VISUAL_RECOGNITION_API_KEY: str = ""
     VISUAL_RECOGNITION_API_URL: str = ""
     VISUAL_RECOGNITION_MODEL: str = ""
+    VIEWER_PORT: int = 8501
 
     model_config = SettingsConfigDict(
         env_file="thinking.env", env_file_encoding="utf-8"
