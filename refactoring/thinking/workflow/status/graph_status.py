@@ -11,6 +11,12 @@ MESSAGE_WINDOW_SIZE = 20
 MESSAGE_TRIM_SIZE = 10
 
 
+def _replaceable_add_messages(left: list, right) -> list:
+    if isinstance(right, dict) and right.get("__replace__"):
+        return list(right["value"])
+    return (left or []) + (right or [])
+
+
 def merge_tasks(left: dict, right: dict) -> dict:
     if right is RESET:
         return {}
@@ -41,7 +47,7 @@ def add_list_str(left: list[str], right: list[str]) -> list[str]:
 
 
 class GraphStatus(TypedDict):
-    messages: Annotated[list[AnyMessage], add]
+    messages: Annotated[list[AnyMessage], _replaceable_add_messages]
     tasks_done: Annotated[dict[str, list[TaskItem]], merge_tasks]
     thoughts: Annotated[list[str], cap_list]
     iteration_count: int

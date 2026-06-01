@@ -5,6 +5,7 @@ from langchain.messages import SystemMessage
 from ..status import GraphStatus, RESET, MESSAGE_WINDOW_SIZE, MESSAGE_TRIM_SIZE
 from ..cancel import get_cancel_event
 from utils import shared_langchain_model
+from memory import get_memory_store, COLLECTION_BUFFER
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,18 @@ def _summarize_messages(messages: list) -> str:
         return ""
 
 
+def _store_summary_to_buffer(summary: str) -> None:
+    try:
+        store = get_memory_store()
+        store.add(
+            COLLECTION_BUFFER,
+            summary,
+            metadata={"source": "message_trim"},
+        )
+    except Exception:
+        logger.warning("Failed to store trim summary to buffer", exc_info=True)
+
+
 def StatusTrimNode(state: GraphStatus) -> dict:
     cancel_event = get_cancel_event()
     if cancel_event.is_set():
@@ -77,17 +90,21 @@ def StatusTrimNode(state: GraphStatus) -> dict:
         to_keep = messages[trim_at:]
 
         summary = _summarize_messages(to_summarize)
+
         if summary:
+            _store_summary_to_buffer(summary)
             summary_msg = SystemMessage(
                 content=f"[Earlier conversation summary]\n{summary}"
             )
-            result["messages"] = [summary_msg] + to_keep
+            trimmed = [summary_msg] + to_keep
         else:
-            result["messages"] = to_keep
+            trimmed = to_keep
+
+        result["messages"] = {"__replace__": True, "value": trimmed}
 
         logger.info(
             "Message window trimmed: %d -> %d messages",
-            len(messages), len(to_keep) + (1 if summary else 0),
+            len(messages), len(trimmed),
         )
 
     return result
