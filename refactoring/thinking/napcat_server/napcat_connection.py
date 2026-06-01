@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import Future as ConcurrentFuture
 import json
+import logging
+import random
 import threading
 import uuid
-import random
-import logging
 from collections import OrderedDict
 
-import asyncio
 import websockets
 
 from thinking_settings import thinking_settings
@@ -57,7 +58,7 @@ class NapCatClient:
         self._connection_task: asyncio.Task | None = None
         self._seen_message_ids: OrderedDict = OrderedDict()
         self._debounce_timers: dict[str, asyncio.Task] = {}
-        self._running_tasks: dict[str, asyncio.Task] = {}
+        self._running_tasks: dict[str, asyncio.Task | ConcurrentFuture] = {}
         self._pending_buffers: dict[str, list[str]] = {}
         self._main_loop: asyncio.AbstractEventLoop | None = None
 

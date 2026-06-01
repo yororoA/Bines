@@ -3,7 +3,6 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 
 from .db import (
     get_checkpoint_detail,

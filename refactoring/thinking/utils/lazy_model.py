@@ -5,7 +5,7 @@ import logging
 import threading
 from typing import Any, Sequence
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel
 

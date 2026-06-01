@@ -73,10 +73,6 @@ def StatusTrimNode(state: GraphStatus) -> dict:
 
     result = {
         "tasks_done": RESET,
-        "thoughts": RESET,
-        "iteration_count": 0,
-        "last_task_count": -1,
-        "convergence_counter": 0,
         "already_said": RESET,
         "diary_triggered_day": state.get("diary_triggered_day", ""),
         "invocation_count": state.get("invocation_count", 0),
