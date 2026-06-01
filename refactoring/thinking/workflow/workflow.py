@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
@@ -13,9 +14,7 @@ from .status import GraphStatus, MAX_ITERATIONS
 from .cancel import get_cancel_event
 from .context_manager import get_context_manager
 from .nodes import (
-    ManagerNode,
     PerformerNode,
-    ReplyNode,
     ContextBuilderNode,
     StatusTrimNode,
     DynamicAgentNode,
@@ -26,10 +25,10 @@ _cancel_event = get_cancel_event()
 
 class Workflow:
     def __init__(self):
-        self._app = self._compile()
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow")
         self._sqlite_conn: sqlite3.Connection | None = None
         self._checkpointer: SqliteSaver | None = None
+        self._app = self._compile()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow")
 
     @staticmethod
     def _patch_msgpack_serializer():
@@ -58,24 +57,9 @@ class Workflow:
             description="Builds conversational context from STM, RAG, and persona.",
         )
         workflow.add_node(
-            "manager",
-            ManagerNode,
-            description="The manager node responsible for task planning and advance_reply decisions.",
-        )
-        workflow.add_node(
             "performer",
             PerformerNode,
-            description="The performer node responsible for executing tasks assigned by the manager.",
-        )
-        workflow.add_node(
-            "advance_reply",
-            ReplyNode,
-            description="Generates intermediate replies to keep the user informed during task execution.",
-        )
-        workflow.add_node(
-            "final_reply",
-            ReplyNode,
-            description="Generates the final reply to the user after all tasks are completed.",
+            description="The autonomous agent that handles all user requests end-to-end.",
         )
         workflow.add_node(
             "status_trim",
@@ -90,10 +74,8 @@ class Workflow:
 
         workflow.set_entry_point("context_builder")
 
-        workflow.add_edge("context_builder", "manager")
-        workflow.add_edge("performer", "manager")
-        workflow.add_edge("advance_reply", "manager")
-        workflow.add_edge("final_reply", "dynamic_agent")
+        workflow.add_edge("context_builder", "performer")
+        workflow.add_edge("performer", "dynamic_agent")
         workflow.add_edge("dynamic_agent", "status_trim")
         workflow.add_edge("status_trim", END)
 
@@ -115,59 +97,76 @@ class Workflow:
         return self._build_Workflow().compile(checkpointer=memory)
 
     def _prune_checkpoints(self, thread_id: str) -> None:
-        if not self._checkpointer:
+        if not self._sqlite_conn:
+            logger.warning("Prune: sqlite_conn is None, skipping")
             return
         try:
-            with self._checkpointer.cursor() as cur:
+            cur = self._sqlite_conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM checkpoints "
+                    "WHERE thread_id = ? AND checkpoint_ns = ''",
+                    (thread_id,),
+                )
+                total = cur.fetchone()[0]
+                logger.info("Prune: found %d checkpoints for thread=%s", total, thread_id)
+                if total <= 1:
+                    return
+
                 cur.execute(
                     "SELECT checkpoint_id FROM checkpoints "
                     "WHERE thread_id = ? AND checkpoint_ns = '' "
-                    "ORDER BY checkpoint_id DESC",
+                    "ORDER BY checkpoint_id DESC LIMIT 1",
                     (thread_id,),
                 )
-                rows = cur.fetchall()
-                if len(rows) <= 1:
+                keep = cur.fetchone()
+                if not keep:
                     return
+                keep_id = keep[0]
 
-                to_delete = [row[0] for row in rows[1:]]
-                placeholders = ",".join("?" for _ in to_delete)
                 cur.execute(
-                    f"DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = '' "
-                    f"AND checkpoint_id IN ({placeholders})",
-                    [thread_id] + to_delete,
+                    "DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = '' "
+                    "AND checkpoint_id != ?",
+                    (thread_id, keep_id),
                 )
                 cur.execute(
-                    f"DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' "
-                    f"AND checkpoint_id IN ({placeholders})",
-                    [thread_id] + to_delete,
+                    "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' "
+                    "AND checkpoint_id != ?",
+                    (thread_id, keep_id),
                 )
-
-            logger.info(
-                "Pruned %d old checkpoints for thread=%s",
-                len(to_delete), thread_id,
-            )
+                self._sqlite_conn.commit()
+                deleted = total - 1
+                logger.info(
+                    "Pruned %d old checkpoints for thread=%s, kept=%s",
+                    deleted, thread_id, keep_id,
+                )
+            finally:
+                cur.close()
         except Exception:
             logger.warning(
                 "Failed to prune checkpoints for thread=%s", thread_id, exc_info=True
             )
 
-    def invoke(self, input: str, thread_id: str, timeout: float | None = None):
+    def invoke(self, input: str, thread_id: str, timeout: float | None = None, cancel_event: threading.Event | None = None):
         from thinking_settings import thinking_settings
 
         if timeout is None:
             timeout = thinking_settings.WORKFLOW_TIMEOUT_SECONDS
 
+        active_cancel_event = cancel_event if cancel_event is not None else _cancel_event
+
         logger.info("Workflow.invoke: thread=%s, input=%s, timeout=%.1fs", thread_id, input[:100], timeout)
         initial_state = GraphStatus(
             messages=[HumanMessage(content=input)],
             thread_id=thread_id,
+            cancel_event=active_cancel_event,
         )
         config = {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": MAX_ITERATIONS * 4 + 10,
         }
 
-        _cancel_event.clear()
+        active_cancel_event.clear()
 
         def _run():
             get_context_manager().reset()
@@ -185,7 +184,7 @@ class Workflow:
                 "The task may still be running in background.",
                 timeout, thread_id,
             )
-            _cancel_event.set()
+            active_cancel_event.set()
             future.cancel()
             return {
                 "messages": [HumanMessage(content="[System: Workflow timed out. Please try again.]")],

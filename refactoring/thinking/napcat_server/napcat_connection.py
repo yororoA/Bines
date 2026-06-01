@@ -88,6 +88,8 @@ class NapCatClient:
                 pass
 
         if thread_id in self._running_tasks:
+            from workflow.cancel import cancel_thread
+            cancel_thread(thread_id)
             self._running_tasks[thread_id].cancel()
             try:
                 await self._running_tasks[thread_id]
@@ -114,11 +116,14 @@ class NapCatClient:
         combined = "\n".join(messages)
         logger.info("Debounce triggered for %s with %d buffered message(s)", thread_id, len(messages))
 
+        from workflow.cancel import get_thread_cancel_event
         workflow = _get_workflow()
+        cancel_event = get_thread_cancel_event(thread_id)
+        cancel_event.clear()
         try:
             future = asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: workflow.invoke(combined, thread_id=thread_id),
+                lambda: workflow.invoke(combined, thread_id=thread_id, cancel_event=cancel_event),
             )
             self._running_tasks[thread_id] = future
             await future
@@ -134,6 +139,8 @@ class NapCatClient:
         await self._process_loop()
 
     async def close(self):
+        from workflow.cancel import cancel_all_threads
+        cancel_all_threads()
         for timer in self._debounce_timers.values():
             timer.cancel()
         for task in self._running_tasks.values():

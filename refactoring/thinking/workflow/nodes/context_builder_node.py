@@ -126,7 +126,7 @@ def _build_rag_recall(query: str) -> dict[str, Any]:
 
 
 def ContextBuilderNode(state: GraphStatus) -> dict:
-    cancel_event = get_cancel_event()
+    cancel_event = state.get("cancel_event") or get_cancel_event()
     if cancel_event.is_set():
         logger.info("ContextBuilderNode cancelled")
         return {}
@@ -146,6 +146,7 @@ def ContextBuilderNode(state: GraphStatus) -> dict:
         "thread_id": state.get("thread_id", ""),
         "already_said": state.get("already_said", []),
         "persona_mood": state.get("persona_mood", {}),
+        "cancel_event": cancel_event,
     })
 
     return {}
