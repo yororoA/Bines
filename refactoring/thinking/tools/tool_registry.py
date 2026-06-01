@@ -9,18 +9,15 @@ logger = logging.getLogger(__name__)
 ToolCategory = str
 
 PERFORMER_TOOLS = "performer"
-REPLY_TOOLS = "reply"
 
 
 class ToolRegistry:
     def __init__(self):
         self._tools: dict[ToolCategory, list[Any]] = {
             PERFORMER_TOOLS: [],
-            REPLY_TOOLS: [],
         }
         self._authorized_imports: dict[ToolCategory, set[str]] = {
             PERFORMER_TOOLS: set(),
-            REPLY_TOOLS: set(),
         }
         self._discovered: bool = False
         self._defaults_registered: bool = False
@@ -109,5 +106,3 @@ def register_default_tools():
     registry.register_tool(PERFORMER_TOOLS, get_group_member_list)
     registry.register_tool(PERFORMER_TOOLS, get_group_member_info)
     registry.register_tool(PERFORMER_TOOLS, send_poke)
-
-    registry.register_tool(REPLY_TOOLS, send_msg)
