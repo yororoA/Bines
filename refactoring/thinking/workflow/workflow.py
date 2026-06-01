@@ -29,6 +29,7 @@ class Workflow:
         self._app = self._compile()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow")
         self._sqlite_conn: sqlite3.Connection | None = None
+        self._checkpointer: SqliteSaver | None = None
 
     @staticmethod
     def _patch_msgpack_serializer():
@@ -109,8 +110,46 @@ class Workflow:
         )
         self._sqlite_conn.execute("PRAGMA journal_mode=WAL")
         memory = SqliteSaver(self._sqlite_conn)
+        self._checkpointer = memory
 
         return self._build_Workflow().compile(checkpointer=memory)
+
+    def _prune_checkpoints(self, thread_id: str) -> None:
+        if not self._checkpointer:
+            return
+        try:
+            with self._checkpointer.cursor() as cur:
+                cur.execute(
+                    "SELECT checkpoint_id FROM checkpoints "
+                    "WHERE thread_id = ? AND checkpoint_ns = '' "
+                    "ORDER BY checkpoint_id DESC",
+                    (thread_id,),
+                )
+                rows = cur.fetchall()
+                if len(rows) <= 1:
+                    return
+
+                to_delete = [row[0] for row in rows[1:]]
+                placeholders = ",".join("?" for _ in to_delete)
+                cur.execute(
+                    f"DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = '' "
+                    f"AND checkpoint_id IN ({placeholders})",
+                    [thread_id] + to_delete,
+                )
+                cur.execute(
+                    f"DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' "
+                    f"AND checkpoint_id IN ({placeholders})",
+                    [thread_id] + to_delete,
+                )
+
+            logger.info(
+                "Pruned %d old checkpoints for thread=%s",
+                len(to_delete), thread_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to prune checkpoints for thread=%s", thread_id, exc_info=True
+            )
 
     def invoke(self, input: str, thread_id: str, timeout: float | None = None):
         from thinking_settings import thinking_settings
@@ -138,6 +177,7 @@ class Workflow:
         try:
             result = future.result(timeout=timeout)
             logger.info("Workflow.invoke: completed for thread=%s", thread_id)
+            self._prune_checkpoints(thread_id)
             return result
         except FuturesTimeoutError:
             logger.error(
