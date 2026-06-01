@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
-from typing import Any, Optional
+from pydantic import BaseModel, Field
 
 
 class TaskItem(BaseModel):
@@ -9,48 +8,3 @@ class TaskItem(BaseModel):
         description="Unique identifier for the task, e.g., 'weather_001'"
     )
     description: str = Field(description="Detailed purpose of the task")
-
-
-class PerformerInput(BaseModel):
-    task_item: TaskItem
-
-
-class ReplyInput(BaseModel):
-    tasks: list[TaskItem] = Field(default_factory=list)
-    Final: bool = Field(default=False)
-    message: str = Field(default="")
-
-
-class ManagerRoute(BaseModel):
-    performer_tasks: list[TaskItem] = Field(
-        default_factory=list,
-        description="List of tasks to send to performer nodes. "
-        "Leave empty if no more tasks are needed.",
-    )
-    goto_advance_reply: bool = Field(
-        default=False,
-        description="Whether to send an intermediate progress update before continuing.",
-    )
-    advance_reply_hint: Optional[str] = Field(
-        default=None,
-        description="Hint for what the advance reply should convey. "
-        "Only used when goto_advance_reply is True.",
-    )
-    goto_final_reply: bool = Field(
-        default=False,
-        description="Whether to skip performer and go directly to final_reply.",
-    )
-    final_reply_hint: Optional[str] = Field(
-        default=None,
-        description="Hint for what the final reply should convey. "
-        "Only used when goto_final_reply is True.",
-    )
-    thoughts: str = Field(
-        description="The thoughts of your current decision.",
-    )
-
-    @model_validator(mode="after")
-    def validate_exclusive_routing(self) -> ManagerRoute:
-        if self.goto_advance_reply and self.goto_final_reply:
-            self.goto_advance_reply = False
-        return self

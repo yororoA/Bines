@@ -1,11 +1,11 @@
+import threading
 from typing import Annotated, TypedDict
-from operator import add
+
 from langchain.messages import AnyMessage
 from .manager_route import TaskItem
 
 RESET = type("RESET", (), {"__repr__": lambda self: "RESET"})()
 
-MAX_THOUGHTS = 10
 MAX_ITERATIONS = 10
 MESSAGE_WINDOW_SIZE = 20
 MESSAGE_TRIM_SIZE = 10
@@ -33,13 +33,6 @@ def merge_tasks(left: dict, right: dict) -> dict:
     return merged
 
 
-def cap_list(left: list[str], right: list[str]) -> list[str]:
-    if right is RESET:
-        return []
-    merged = (left or []) + (right or [])
-    return merged[-MAX_THOUGHTS:]
-
-
 def add_list_str(left: list[str], right: list[str]) -> list[str]:
     if right is RESET:
         return []
@@ -49,12 +42,9 @@ def add_list_str(left: list[str], right: list[str]) -> list[str]:
 class GraphStatus(TypedDict):
     messages: Annotated[list[AnyMessage], _replaceable_add_messages]
     tasks_done: Annotated[dict[str, list[TaskItem]], merge_tasks]
-    thoughts: Annotated[list[str], cap_list]
-    iteration_count: int
-    last_task_count: int
-    convergence_counter: int
     already_said: Annotated[list[str], add_list_str]
     persona_mood: dict
     diary_triggered_day: str
     invocation_count: int
     thread_id: str
+    cancel_event: threading.Event
