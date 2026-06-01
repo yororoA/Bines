@@ -2,7 +2,7 @@
 
 ## Overview
 
-Thinking is an AI Agent conversational system built on LangGraph, integrated with QQ via NapCat WebSocket protocol. It features a 7-node workflow pipeline with a comprehensive memory system and persona-based role playing.
+Thinking is an AI Agent conversational system built on LangGraph, integrated with QQ via NapCat WebSocket protocol. It features a 4-node workflow pipeline with a comprehensive memory system and persona-based role playing.
 
 **Key Technologies**: LangGraph, LangChain, ChromaDB, SmolAgents, Pydantic Settings
 
@@ -21,23 +21,16 @@ napcat_server/          tools/                  workflow/
 ## Workflow Pipeline
 
 ```text
-context_builder --> manager --> performer --> manager (loop)
-                     |                          |
-                     +--> advance_reply --------+
-                     |
-                     +--> final_reply --> dynamic_agent --> status_trim --> END
+context_builder --> performer --> dynamic_agent --> status_trim --> END
 ```
 
 ### Node Responsibilities
 
 | Node | File | Responsibility |
 | ------ | ------ | ----------------- |
-| context_builder | `workflow/nodes/context_builder_node.py` | Load SOUL.md persona, RAG retrieval, persona snapshot |
-| manager | `workflow/nodes/manager_node.py` | LLM-driven task planning & routing (ManagerRoute structured output) |
-| performer | `workflow/nodes/performer_node.py` | Execute search/action tasks via smolagents CodeAgent |
-| advance_reply | `workflow/nodes/reply_node.py` | Intermediate progress notification |
-| final_reply | `workflow/nodes/reply_node.py` | Final response with persona injection |
-| dynamic_agent | `workflow/nodes/dynamic_agent_node.py` | Memory write, buffer-to-diary consolidation, memory decay |
+| context_builder | `workflow/nodes/context_builder_node.py` | Load SOUL.md persona, RAG retrieval, persona snapshot, conversation history |
+| performer | `workflow/nodes/performer_node.py` | Autonomous agent that handles all user requests end-to-end via smolagents CodeAgent |
+| dynamic_agent | `workflow/nodes/dynamic_agent_node.py` | Memory write via judge_and_store, buffer-to-diary consolidation, memory decay |
 | status_trim | `workflow/nodes/status_trim_node.py` | Clear ephemeral state, message window trimming with LLM summarization |
 
 ## Memory System
@@ -46,7 +39,6 @@ context_builder --> manager --> performer --> manager (loop)
 
 | Collection | Purpose |
 | ------ | ----------------- |
-| `summary` | Event summaries, topic abstractions |
 | `knowledge` | Stable reusable knowledge (tech facts, project info) |
 | `persona` | User long-term traits (preferences, habits, tech stack) |
 | `diary` | Daily diary entries |
@@ -56,20 +48,21 @@ context_builder --> manager --> performer --> manager (loop)
 ### Memory Lifecycle
 
 ```text
-Conversation --> judge_and_store (LLM) --> [summary] --> buffer --> daily consolidation --> diary + sliced_diary
-                                         --> [knowledge] --> ChromaDB
+Conversation --> judge_and_store (LLM) --> [knowledge] --> ChromaDB
                                          --> [persona] --> ChromaDB (with cache invalidation)
                                          --> [diary] --> ChromaDB
+                                         --> [buffer] --> daily consolidation --> diary + sliced_diary
 ```
 
 ### Decay Mechanism
 
-Knowledge collections (summary, knowledge, diary) decay over time:
+Knowledge and diary collections decay over time:
 
 - Half-life: 30 days
 - Importance-based exponential decay
+- Min effective importance threshold
 - Max entries cap: 500 per collection
-- Triggered every 5 invocations
+- Triggered every 5 invocations (via `DynamicAgentNode`)
 
 ## Model System
 
@@ -99,13 +92,25 @@ registry.register(ModelProvider(
 
 ### Tool Registry
 
-`tools/tool_registry.py` provides dynamic tool registration:
+`tools/tool_registry.py` provides dynamic tool registration with a single `PERFORMER_TOOLS` category:
 
-| Category | Typical Tools | Consumer |
-| ------ | ----------------- |
-| `PERFORMER_TOOLS` | webSearch, DuckDuckGoSearch, WebSearch, VisitWebpage | performer_node |
-| `REPLY_TOOLS` | send_msg (QQ) | reply_node |
-| `COMMON_TOOLS` | get_time | all nodes |
+| Tool | Module | Description |
+| ------ | ------ | ----------------- |
+| webSearch | `performer_tools/webSearch.py` | DuckDuckGo web search |
+| visualRecognition | `performer_tools/visualRecognition.py` | Image content recognition via vision LLM API |
+| send_msg | `napcat_tools/common_msgs/cmsg_tools.py` | Send QQ messages |
+| delete_msg | `napcat_tools/common_msgs/msg_tools.py` | Recall QQ messages |
+| get_msg | `napcat_tools/common_msgs/msg_tools.py` | Get QQ message details |
+| send_forward_msg | `napcat_tools/common_msgs/msg_tools.py` | Send merged forward messages |
+| send_group_forward_msg | `napcat_tools/common_msgs/msg_tools.py` | Send group merged forward messages |
+| send_private_forward_msg | `napcat_tools/common_msgs/msg_tools.py` | Send private merged forward messages |
+| get_group_msg_history | `napcat_tools/common_msgs/msg_tools.py` | Get group message history |
+| get_friend_msg_history | `napcat_tools/common_msgs/msg_tools.py` | Get private message history |
+| get_group_list | `napcat_tools/common_msgs/group_tools.py` | Get all group list |
+| get_group_info | `napcat_tools/common_msgs/group_tools.py` | Get group detailed info |
+| get_group_member_list | `napcat_tools/common_msgs/group_tools.py` | Get group member list |
+| get_group_member_info | `napcat_tools/common_msgs/group_tools.py` | Get group member detailed info |
+| send_poke | `napcat_tools/common_msgs/interact_tools.py` | Send poke interaction |
 
 **Adding a new tool:**
 
@@ -127,8 +132,9 @@ QQ Client --> NapCat WebSocket --> json parse --> message_queue --> _process_loo
 ### Connection Management
 
 - Exponential backoff with jitter for reconnection
-- Separate process_loop consuming from asyncio.Queue
+- Separate `_process_loop` consuming from `asyncio.Queue`
 - API call timeout with connection wait
+- Message deduplication via seen message ID tracking (max 1000 entries)
 - Debounce cooldown (configurable via `DEBOUNCE_SECONDS`, default 3.0s)
 
 ## State Management
@@ -137,13 +143,29 @@ QQ Client --> NapCat WebSocket --> json parse --> message_queue --> _process_loo
 
 Defined in `workflow/status/graph_status.py`:
 
-- `messages` - Conversation messages (with reducer-based window trimming)
-- `tasks_done` - Completed tasks (merge dedup)
-- `thoughts` - Manager thought chain (capped at 10)
-- `iteration_count` - Loop iteration count
-- `persona_snapshot` / `rag_recall` / `soul_prompt` - Context snapshots
-- `advance_reply_content` - Intermediate reply content
-- `final_reply_content` - Final reply content
+| Field | Type | Description |
+| ------ | ------ | ----------------- |
+| `messages` | `list[AnyMessage]` | Conversation messages (with replace reducer for window trimming) |
+| `tasks_done` | `dict[str, list[TaskItem]]` | Completed tasks per agent (merge dedup) |
+| `already_said` | `list[str]` | Previously sent reply texts to avoid repetition |
+| `persona_mood` | `dict` | Current persona mood state |
+| `diary_triggered_day` | `str` | Last day diary was triggered |
+| `invocation_count` | `int` | Total workflow invocation counter |
+| `thread_id` | `str` | Conversation thread identifier |
+| `cancel_event` | `threading.Event` | Cancellation event for workflow interruption |
+
+### ContextManager
+
+`workflow/context_manager.py` provides thread-safe per-invocation context sharing between nodes:
+
+- `persona_snapshot` - Cached persona state
+- `rag_recall` - RAG retrieval results
+- `soul_prompt` - Loaded SOUL.md content
+- `conversation_history` - Formatted message history
+- `reply_texts` - Texts sent during performer execution
+- `already_said` - Accumulated sent messages
+- `persona_mood` - Current mood state
+- `target_type` / `target_id` - Resolved QQ message target
 
 ### Configuration
 
@@ -151,15 +173,24 @@ All settings managed via `ThinkingSettings` (Pydantic BaseSettings) in `thinking
 
 | Setting | Default | Description |
 | ------ | ------ | ----------------- |
-| MODEL_SELECTED | deepseek-v4-flash | Active model name |
-| DEBOUNCE_SECONDS | 3.0 | Message debounce cooldown |
-| WORKFLOW_TIMEOUT_SECONDS | 120.0 | Workflow execution timeout |
-| DEDUP_SIMILARITY_THRESHOLD | 0.08 | Memory dedup similarity threshold |
-| MAX_INPUT_LENGTH | 4096 | Max input message length |
+| `MODEL_SELECTED` | deepseek-v4-flash | Active model name |
+| `DEBOUNCE_SECONDS` | 3.0 | Message debounce cooldown |
+| `WORKFLOW_TIMEOUT_SECONDS` | 120.0 | Workflow execution timeout |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | 30.0 | Per-request LLM timeout |
+| `LLM_MAX_RETRIES` | 1 | LLM request retry count |
+| `LLM_MAX_TOKENS` | 4096 | Max tokens per LLM call |
+| `DEDUP_THRESHOLD` | 0.08 | Memory dedup similarity threshold |
+| `MAX_INPUT_LENGTH` | 4096 | Max input message length |
+| `RETRIEVAL_KNOWLEDGE_K` | 5 | Knowledge retrieval count |
+| `RETRIEVAL_PERSONA_K` | 4 | Persona retrieval count |
+| `RETRIEVAL_DIARY_K` | 2 | Diary retrieval count |
+| `CONVERGENCE_WINDOW` | 3 | Convergence detection window |
+| `DAY_KEY_CUTOFF_HOUR` | 4 | Day boundary hour for day_key |
+| `RAG_EMBEDDING_MODEL` | BAAI/bge-small-zh-v1.5 | Embedding model for RAG |
 
 ### Persistence
 
-SQLite checkpoints via LangGraph SqliteSaver, three thread IDs (`raw_chat`, `QQ_private`, `QQ_group`).
+SQLite checkpoints via LangGraph SqliteSaver with WAL mode. Single checkpoint retained per thread (old checkpoints pruned after each invocation).
 
 ## Data Viewer
 
@@ -221,26 +252,34 @@ thinking/
 │       └── index.html              # Frontend page
 │
 ├── memory/
-│   ├── persona_state.py            # Persona data model + cache
+│   ├── persona_state.py            # Persona data model + cache + mood
+│   ├── store_interface.py          # MemoryStore Protocol
 │   ├── consolidation/
-│   │   └── memory_judge.py         # LLM memory classifier
+│   │   └── memory_judge.py         # LLM memory classifier (judge_and_store)
 │   ├── lifecycle/
 │   │   └── buffer_diary.py         # Buffer-to-diary consolidation
 │   ├── retrieval/
-│   │   └── retrieve_api.py         # Scene-specific retrieval
+│   │   └── retrieve_api.py         # Scene-specific retrieval (reply/manager/performer)
 │   └── vector_store/
-│       └── chroma_store.py         # ChromaDB wrapper (6 collections)
+│       └── chroma_store.py         # ChromaDB wrapper (5 collections + decay)
 │
 ├── napcat_server/
-│   └── napcat_connection.py        # WebSocket + message queue
+│   ├── napcat_connection.py        # WebSocket client, message queue, debounce
+│   └── global_client.py            # Global client singleton
 │
 ├── tools/
 │   ├── tool_registry.py            # Dynamic tool registry
 │   ├── performer_tools/
-│   │   └── webSearch.py            # Web search tools
+│   │   ├── webSearch.py            # Web search tools (DuckDuckGo)
+│   │   └── visualRecognition.py    # Image recognition via vision API
 │   └── napcat_tools/
 │       └── common_msgs/
-│           └── cmsg_tools.py       # QQ message sending
+│           ├── base.py             # Async API call helper
+│           ├── types.py            # Pydantic message type models
+│           ├── cmsg_tools.py       # QQ message sending
+│           ├── msg_tools.py        # QQ message operations
+│           ├── group_tools.py      # QQ group operations
+│           └── interact_tools.py   # QQ interaction (poke)
 │
 ├── utils/
 │   ├── generate_langchain_model.py # LangChain model factory
@@ -253,14 +292,14 @@ thinking/
 │
 └── workflow/
     ├── workflow.py                 # LangGraph StateGraph compilation
+    ├── cancel.py                   # Cancellation event management
+    ├── context_manager.py          # Per-invocation context sharing
     ├── status/
-    │   ├── graph_status.py         # GraphStatus TypedDict
-    │   └── manager_route.py        # ManagerRoute / TaskItem / ReplyInput
+    │   ├── graph_status.py         # GraphStatus TypedDict + reducers
+    │   └── manager_route.py        # TaskItem model
     └── nodes/
         ├── context_builder_node.py
-        ├── manager_node.py
         ├── performer_node.py
-        ├── reply_node.py
         ├── dynamic_agent_node.py
         └── status_trim_node.py
 ```
@@ -269,6 +308,7 @@ thinking/
 
 - **Registry Pattern**: Model providers and tools use registries for dynamic extensibility
 - **Lazy Initialization**: Models loaded on first use, thread-safe
-- **Convergence Detection**: Manager loop auto-exits when task count stabilizes
 - **Exponential Decay**: Memory entries decay based on time and importance
 - **Sliding Window**: Messages trimmed at 20 with LLM summarization of earliest 10
+- **Debounce**: Rapid consecutive messages buffered and processed together
+- **Cancellation**: Thread-safe cancellation via `threading.Event` for interrupting workflows
