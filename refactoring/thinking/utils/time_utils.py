@@ -11,9 +11,24 @@ def day_key(timestamp: datetime | None = None) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+_CJK_RANGES = [
+    (0x4E00, 0x9FFF),
+    (0x3400, 0x4DBF),
+    (0x2E80, 0x2EFF),
+    (0x3000, 0x303F),
+    (0xFF00, 0xFFEF),
+]
+
+
 def estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
+    tokens = 0.0
+    for ch in text:
+        code = ord(ch)
+        if any(start <= code <= end for start, end in _CJK_RANGES):
+            tokens += 1.5
+        else:
+            tokens += 0.25
+    return int(tokens)
 
 
-STREAM_TOKEN_LIMIT = 8192
-SUMMARY_TOKEN_WINDOW = 4096
+DIARY_TOKEN_LIMIT = 10240

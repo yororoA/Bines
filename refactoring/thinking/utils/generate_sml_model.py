@@ -17,7 +17,7 @@ def generate_sml_model(model_id: str) -> OpenAIModel:
             )
         from thinking_settings import thinking_settings
         return OpenAIModel(
-            model_id="deepseek-v4-flash",
+            model_id=model_id,
             api_base=thinking_settings.DEEPSEEK_API_URL,
             api_key=thinking_settings.DEEPSEEK_API_KEY,
         )
