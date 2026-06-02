@@ -103,7 +103,7 @@ def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
                 ctx = get_context_manager()
                 persona_snapshot = ctx.get("persona_snapshot", {})
                 persona = PersonaState.from_dict(persona_snapshot)
-                judgment: MemoryJudgment = judge_and_store(
+                judge_and_store(
                     context_text, persona=persona
                 )
 

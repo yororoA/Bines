@@ -11,7 +11,7 @@ from langchain.messages import HumanMessage
 logger = logging.getLogger(__name__)
 
 from .status import GraphStatus, MAX_ITERATIONS
-from .cancel import get_cancel_event
+from .cancel import get_cancel_event, remove_thread_cancel_event
 from .context_manager import get_context_manager
 from .nodes import (
     PerformerNode,
@@ -28,7 +28,7 @@ class Workflow:
         self._sqlite_conn: sqlite3.Connection | None = None
         self._checkpointer: SqliteSaver | None = None
         self._app = self._compile()
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow")
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="workflow")
 
     @staticmethod
     def _patch_msgpack_serializer():
@@ -177,6 +177,7 @@ class Workflow:
             result = future.result(timeout=timeout)
             logger.info("Workflow.invoke: completed for thread=%s", thread_id)
             self._prune_checkpoints(thread_id)
+            remove_thread_cancel_event(thread_id)
             return result
         except FuturesTimeoutError:
             logger.error(
@@ -186,6 +187,7 @@ class Workflow:
             )
             active_cancel_event.set()
             future.cancel()
+            remove_thread_cancel_event(thread_id)
             return {
                 "messages": [HumanMessage(content="[System: Workflow timed out. Please try again.]")],
             }

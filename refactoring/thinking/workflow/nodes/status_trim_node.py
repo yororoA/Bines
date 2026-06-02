@@ -16,6 +16,8 @@ def _find_trim_index(messages: list, max_index: int) -> int:
     for i in range(min(max_index, len(messages))):
         if isinstance(messages[i], HumanMessage):
             best = i
+    if best == 0:
+        return max_index
     return best
 
 

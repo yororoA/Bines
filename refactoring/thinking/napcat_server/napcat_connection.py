@@ -117,7 +117,7 @@ class NapCatClient:
         combined = "\n".join(messages)
         logger.info("Debounce triggered for %s with %d buffered message(s)", thread_id, len(messages))
 
-        from workflow.cancel import get_thread_cancel_event
+        from workflow.cancel import get_thread_cancel_event, remove_thread_cancel_event
         workflow = _get_workflow()
         cancel_event = get_thread_cancel_event(thread_id)
         cancel_event.clear()
@@ -134,6 +134,7 @@ class NapCatClient:
             logger.exception("Error in debounced workflow (thread=%s)", thread_id)
         finally:
             self._running_tasks.pop(thread_id, None)
+            remove_thread_cancel_event(thread_id)
 
     async def process_messages(self):
         self._connection_task = asyncio.create_task(self._connect())

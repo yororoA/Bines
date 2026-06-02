@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 _PerformerAgent = None
 _PerformerLock = threading.Lock()
-_PerformerRunLock = threading.Lock()
 _cached_soul_hash: str | None = None
 
 _MAX_STEPS = 10
@@ -251,20 +250,18 @@ def PerformerNode(state: GraphStatus) -> dict:
     soul_prompt = ctx.get("soul_prompt", "")
     current_hash = _soul_hash(soul_prompt)
 
-    needs_rebuild = _PerformerAgent is None or current_hash != _cached_soul_hash
-    if needs_rebuild:
-        with _PerformerLock:
-            if _PerformerAgent is None or current_hash != _cached_soul_hash:
-                base_prompt = _build_system_prompt(soul_prompt, all_tool_names)
-                logger.info("PerformerNode: building agent, tools=%s", all_tool_names)
-                _PerformerAgent = CodeAgent(
-                    model=shared_smol_model.get(),
-                    tools=all_tools,
-                    additional_authorized_imports=["datetime", *all_imports],
-                    prompt_templates={**copy.deepcopy(EMPTY_PROMPT_TEMPLATES), "system_prompt": base_prompt},
-                    max_steps=_MAX_STEPS,
-                )
-                _cached_soul_hash = current_hash
+    with _PerformerLock:
+        if _PerformerAgent is None or current_hash != _cached_soul_hash:
+            base_prompt = _build_system_prompt(soul_prompt, all_tool_names)
+            logger.info("PerformerNode: building agent, tools=%s", all_tool_names)
+            _PerformerAgent = CodeAgent(
+                model=shared_smol_model.get(),
+                tools=all_tools,
+                additional_authorized_imports=["datetime", *all_imports],
+                prompt_templates={**copy.deepcopy(EMPTY_PROMPT_TEMPLATES), "system_prompt": base_prompt},
+                max_steps=_MAX_STEPS,
+            )
+            _cached_soul_hash = current_hash
 
     context_str = _build_context(state)
 
@@ -288,8 +285,7 @@ def PerformerNode(state: GraphStatus) -> dict:
 
     logger.info("PerformerNode: running task, user_msg=%s", user_msg[:100])
     try:
-        with _PerformerRunLock:
-            feedback_raw = _PerformerAgent.run(task_input)
+        feedback_raw = _PerformerAgent.run(task_input)
         logger.info("PerformerNode: completed, result=%s", str(feedback_raw)[:200])
 
         feedback = _parse_feedback(feedback_raw)
@@ -298,7 +294,6 @@ def PerformerNode(state: GraphStatus) -> dict:
         sent_texts = ctx.get("reply_texts", [])
         result: dict = {
             "tasks_done": {"performer": feedback},
-            "already_said": sent_texts,
             "persona_mood": persona_mood,
         }
         if sent_texts:

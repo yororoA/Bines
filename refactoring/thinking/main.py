@@ -38,7 +38,7 @@ def _validate_llm_provider_config() -> bool:
         return False
 
 
-def _run_startup_buffer_consolidation():
+async def _run_startup_buffer_consolidation():
     try:
         from memory import (
             get_buffer_by_day,
@@ -77,7 +77,7 @@ async def main():
         thinking_settings.NAPCAT_WS_SERVER, thinking_settings.NAPCAT_WS_TOKEN
     )
     gc.napcat_client = napcat_client
-    _run_startup_buffer_consolidation()
+    await _run_startup_buffer_consolidation()
 
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
