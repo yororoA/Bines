@@ -1,22 +1,9 @@
-import threading
 from typing import Union
 
 import httpx
 from smolagents import tool
 
 from thinking_settings import thinking_settings
-
-_vision_client = None
-_vision_lock = threading.Lock()
-
-
-def _get_vision_client() -> httpx.Client:
-    global _vision_client
-    if _vision_client is None:
-        with _vision_lock:
-            if _vision_client is None:
-                _vision_client = httpx.Client(timeout=thinking_settings.LLM_REQUEST_TIMEOUT_SECONDS)
-    return _vision_client
 
 
 def _build_image_content(image_url: str) -> dict:
@@ -62,8 +49,6 @@ def visualRecognition(image_url: Union[str, list[str]]) -> str:
     if not image_urls:
         return "Error: No image URL provided."
 
-    client = _get_vision_client()
-
     content_parts = [_build_image_content(url) for url in image_urls]
 
     if len(image_urls) == 1:
@@ -93,6 +78,7 @@ def visualRecognition(image_url: Union[str, list[str]]) -> str:
         "max_completion_tokens": 2048,
     }
 
+    client = httpx.Client(timeout=thinking_settings.LLM_REQUEST_TIMEOUT_SECONDS)
     try:
         response = client.post(api_url, headers=headers, json=payload)
         response.raise_for_status()
@@ -107,6 +93,8 @@ def visualRecognition(image_url: Union[str, list[str]]) -> str:
         return f"Error: Failed to connect to visual recognition API: {str(e)}"
     except Exception as e:
         return f"Error: Unexpected error during visual recognition: {str(e)}"
+    finally:
+        client.close()
 
 
 VISUAL_RECOGNITION_AUTHORIZED_IMPORTS = ["json", "httpx"]

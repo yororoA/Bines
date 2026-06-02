@@ -66,7 +66,7 @@ def get_tool_registry() -> ToolRegistry:
 
 
 def register_default_tools():
-    from tools.performer_tools.webSearch import webSearch, get_search_tools, SEARCH_AUTHORIZED_IMPORTS
+    from tools.performer_tools.webSearch import webSearch, SEARCH_AUTHORIZED_IMPORTS
     from tools.performer_tools.visualRecognition import visualRecognition, VISUAL_RECOGNITION_AUTHORIZED_IMPORTS
     from tools.napcat_tools.common_msgs.cmsg_tools import send_msg
     from tools.napcat_tools.common_msgs.msg_tools import (
