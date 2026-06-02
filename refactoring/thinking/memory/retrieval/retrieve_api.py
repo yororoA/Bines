@@ -17,7 +17,7 @@ def retrieve_memories(
     knowledge_k: int | None = None,
     persona_k: int | None = None,
     diary_k: int | None = None,
-    day_key: str | None = None,
+    target_day_key: str | None = None,
     store: ChromaMemoryStore | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     memory_store = store or get_memory_store()
@@ -25,13 +25,13 @@ def retrieve_memories(
     _persona_k = persona_k if persona_k is not None else thinking_settings.RETRIEVAL_PERSONA_K
     _diary_k = diary_k if diary_k is not None else thinking_settings.RETRIEVAL_DIARY_K
 
-    knowledge = memory_store.search_with_filter(
+    knowledge = memory_store.search(
         COLLECTION_KNOWLEDGE, query, k=_knowledge_k, target_day_key=day_key
     )
-    persona = memory_store.search_with_filter(
+    persona = memory_store.search(
         COLLECTION_PERSONA, query, k=_persona_k, target_day_key=day_key
     )
-    diary = memory_store.search_with_filter(
+    diary = memory_store.search(
         COLLECTION_SLICED_DIARY, query, k=_diary_k, target_day_key=day_key
     )
 

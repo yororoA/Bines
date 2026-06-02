@@ -18,13 +18,6 @@ class MemoryStore(Protocol):
         query: str,
         k: int = 3,
         filter: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]: ...
-
-    def search_with_filter(
-        self,
-        collection: str,
-        query: str,
-        k: int = 3,
         target_day_key: str | None = None,
         extra_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]: ...

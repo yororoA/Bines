@@ -12,11 +12,9 @@ from ..vector_store.chroma_store import (
     COLLECTION_SLICED_DIARY,
 )
 from utils import shared_langchain_model
-from utils.time_utils import day_key
+from utils.time_utils import day_key, estimate_tokens, DIARY_TOKEN_LIMIT
 
 logger = logging.getLogger(__name__)
-
-_MAX_DIARY_FRAGMENTS_CHARS = 8000
 
 
 def add_to_buffer(
@@ -59,9 +57,11 @@ def get_existing_diary_day_keys(
 def _summarize_diary_with_llm(buffer_contents: list[str], target_day_key: str) -> str:
     model = shared_langchain_model.get()
     fragments = "\n---\n".join(buffer_contents)
-    if len(fragments) > _MAX_DIARY_FRAGMENTS_CHARS:
-        fragments = fragments[:_MAX_DIARY_FRAGMENTS_CHARS]
-        logger.info("Diary fragments truncated to %d chars for LLM", _MAX_DIARY_FRAGMENTS_CHARS)
+    estimated_tokens = estimate_tokens(fragments)
+    if estimated_tokens > DIARY_TOKEN_LIMIT:
+        ratio = DIARY_TOKEN_LIMIT / estimated_tokens
+        fragments = fragments[:int(len(fragments) * ratio)]
+        logger.info("Diary fragments truncated from %d tokens to ~%d tokens for LLM", estimated_tokens, DIARY_TOKEN_LIMIT)
     prompt = (
         "You are a diary writer for an AI assistant. "
         "Below are conversation fragments and task summaries from a single day.\n"

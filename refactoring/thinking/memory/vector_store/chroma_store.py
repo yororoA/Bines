@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 def _to_chroma_where(filter_dict: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not filter_dict:
+    if filter_dict is None:
         return None
+    if len(filter_dict) == 0:
+        return {}
     if len(filter_dict) == 1:
         key, value = next(iter(filter_dict.items()))
         return {key: {"$eq": value}}
@@ -148,9 +150,18 @@ class ChromaMemoryStore:
         query: str,
         k: int = 3,
         filter: dict[str, Any] | None = None,
+        target_day_key: str | None = None,
+        extra_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         store = self._get_collection(collection)
-        results = store.similarity_search_with_score(query, k=k, filter=_to_chroma_where(filter))
+        chroma_filter = dict(filter) if filter else {}
+        if target_day_key:
+            chroma_filter["day_key"] = target_day_key
+        if extra_filter:
+            chroma_filter.update(extra_filter)
+        if not chroma_filter:
+            chroma_filter = None
+        results = store.similarity_search_with_score(query, k=k, filter=_to_chroma_where(chroma_filter))
         entries = []
         for doc, score in results:
             entries.append(
@@ -161,23 +172,6 @@ class ChromaMemoryStore:
                 }
             )
         return entries
-
-    def search_with_filter(
-        self,
-        collection: str,
-        query: str,
-        k: int = 3,
-        target_day_key: str | None = None,
-        extra_filter: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
-        chroma_filter: dict[str, Any] = {}
-        if target_day_key:
-            chroma_filter["day_key"] = target_day_key
-        if extra_filter:
-            chroma_filter.update(extra_filter)
-        if not chroma_filter:
-            chroma_filter = None
-        return self.search(collection, query, k=k, filter=chroma_filter)
 
     def get_all(
         self,
