@@ -285,7 +285,8 @@ def PerformerNode(state: GraphStatus) -> dict:
 
     logger.info("PerformerNode: running task, user_msg=%s", user_msg[:100])
     try:
-        feedback_raw = _PerformerAgent.run(task_input)
+        with _PerformerLock:
+            feedback_raw = _PerformerAgent.run(task_input)
         logger.info("PerformerNode: completed, result=%s", str(feedback_raw)[:200])
 
         feedback = _parse_feedback(feedback_raw)

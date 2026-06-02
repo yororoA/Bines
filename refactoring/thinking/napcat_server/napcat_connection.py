@@ -32,11 +32,13 @@ def _get_workflow():
 
 def close_workflow():
     global _workflow
-    if _workflow is not None:
-        with _workflow_lock:
-            if _workflow is not None:
-                _workflow.close()
-                _workflow = None
+    w = None
+    with _workflow_lock:
+        if _workflow is not None:
+            w = _workflow
+            _workflow = None
+    if w is not None:
+        w.close()
 
 
 def _is_at_bot(message_segments: list[dict], bot_number: str) -> bool:
@@ -61,6 +63,7 @@ class NapCatClient:
         self._running_tasks: dict[str, asyncio.Task | ConcurrentFuture] = {}
         self._pending_buffers: dict[str, list[str]] = {}
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._task_lock = threading.Lock()
 
     def _is_duplicate(self, message_id: str) -> bool:
         if message_id in self._seen_message_ids:
@@ -81,27 +84,29 @@ class NapCatClient:
         return False
 
     async def _handle_debounce(self, thread_id: str, content: str):
-        if thread_id in self._debounce_timers:
-            self._debounce_timers[thread_id].cancel()
+        with self._task_lock:
+            old_timer = self._debounce_timers.pop(thread_id, None)
+            old_task = self._running_tasks.pop(thread_id, None)
+        if old_timer is not None:
+            old_timer.cancel()
             try:
-                await self._debounce_timers[thread_id]
+                await old_timer
             except asyncio.CancelledError:
                 pass
-
-        if thread_id in self._running_tasks:
+        if old_task is not None:
             from workflow.cancel import cancel_thread
             cancel_thread(thread_id)
-            self._running_tasks[thread_id].cancel()
+            old_task.cancel()
             try:
-                await self._running_tasks[thread_id]
+                await old_task
             except asyncio.CancelledError:
                 pass
-            self._running_tasks.pop(thread_id, None)
 
-        self._pending_buffers.setdefault(thread_id, []).append(content)
-        self._debounce_timers[thread_id] = asyncio.create_task(
-            self._debounce_callback(thread_id)
-        )
+        with self._task_lock:
+            self._pending_buffers.setdefault(thread_id, []).append(content)
+            self._debounce_timers[thread_id] = asyncio.create_task(
+                self._debounce_callback(thread_id)
+            )
 
     async def _debounce_callback(self, thread_id: str):
         try:
@@ -109,8 +114,9 @@ class NapCatClient:
         except asyncio.CancelledError:
             return
 
-        self._debounce_timers.pop(thread_id, None)
-        messages = self._pending_buffers.pop(thread_id, [])
+        with self._task_lock:
+            self._debounce_timers.pop(thread_id, None)
+            messages = self._pending_buffers.pop(thread_id, [])
         if not messages:
             return
 
@@ -126,14 +132,16 @@ class NapCatClient:
                 None,
                 lambda: workflow.invoke(combined, thread_id=thread_id, cancel_event=cancel_event),
             )
-            self._running_tasks[thread_id] = future
+            with self._task_lock:
+                self._running_tasks[thread_id] = future
             await future
         except asyncio.CancelledError:
             logger.info("Workflow cancelled for %s", thread_id)
         except Exception:
             logger.exception("Error in debounced workflow (thread=%s)", thread_id)
         finally:
-            self._running_tasks.pop(thread_id, None)
+            with self._task_lock:
+                self._running_tasks.pop(thread_id, None)
             remove_thread_cancel_event(thread_id)
 
     async def process_messages(self):
@@ -143,23 +151,26 @@ class NapCatClient:
     async def close(self):
         from workflow.cancel import cancel_all_threads
         cancel_all_threads()
-        for timer in self._debounce_timers.values():
+        with self._task_lock:
+            timers = list(self._debounce_timers.values())
+            tasks = list(self._running_tasks.values())
+            self._debounce_timers.clear()
+            self._running_tasks.clear()
+            self._pending_buffers.clear()
+        for timer in timers:
             timer.cancel()
-        for task in self._running_tasks.values():
+        for task in tasks:
             task.cancel()
-        for timer in self._debounce_timers.values():
+        for timer in timers:
             try:
                 await timer
             except asyncio.CancelledError:
                 pass
-        for task in self._running_tasks.values():
+        for task in tasks:
             try:
                 await task
             except asyncio.CancelledError:
                 pass
-        self._debounce_timers.clear()
-        self._running_tasks.clear()
-        self._pending_buffers.clear()
 
         if self._connection_task and not self._connection_task.done():
             self._connection_task.cancel()

@@ -10,35 +10,59 @@ logger = logging.getLogger(__name__)
 class ContextManager:
     def __init__(self):
         self._lock = threading.Lock()
-        self._data: dict[str, Any] = {}
+        self._contexts: dict[str, dict[str, Any]] = {}
+        self._local = threading.local()
 
-    def get(self, key: str, default: Any = None) -> Any:
-        with self._lock:
-            return self._data.get(key, default)
+    def set_active_thread(self, thread_id: str) -> None:
+        self._local.thread_id = thread_id
 
-    def get_all(self) -> dict[str, Any]:
-        with self._lock:
-            return dict(self._data)
+    def _get_active_thread(self) -> str:
+        tid = getattr(self._local, "thread_id", None)
+        if tid is None:
+            raise RuntimeError(
+                "ContextManager: no active thread_id. "
+                "Call set_active_thread() before accessing context."
+            )
+        return tid
 
-    def set(self, key: str, value: Any) -> None:
+    def _get_ctx(self, thread_id: str | None = None) -> dict[str, Any]:
+        tid = thread_id or self._get_active_thread()
         with self._lock:
-            self._data[key] = value
+            if tid not in self._contexts:
+                self._contexts[tid] = {}
+            return self._contexts[tid]
 
-    def update(self, updates: dict[str, Any]) -> None:
-        with self._lock:
-            self._data.update(updates)
+    def get(self, key: str, default: Any = None, thread_id: str | None = None) -> Any:
+        ctx = self._get_ctx(thread_id)
+        return ctx.get(key, default)
 
-    def append_to_list(self, key: str, items: list) -> None:
+    def get_all(self, thread_id: str | None = None) -> dict[str, Any]:
+        ctx = self._get_ctx(thread_id)
         with self._lock:
-            existing = self._data.get(key, [])
-            if not isinstance(existing, list):
-                existing = []
-            self._data[key] = existing + items
+            return dict(ctx)
 
-    def reset(self) -> None:
+    def set(self, key: str, value: Any, thread_id: str | None = None) -> None:
+        ctx = self._get_ctx(thread_id)
+        ctx[key] = value
+
+    def update(self, updates: dict[str, Any], thread_id: str | None = None) -> None:
+        ctx = self._get_ctx(thread_id)
+        ctx.update(updates)
+
+    def append_to_list(self, key: str, items: list, thread_id: str | None = None) -> None:
+        ctx = self._get_ctx(thread_id)
+        existing = ctx.get(key, [])
+        if not isinstance(existing, list):
+            existing = []
+        ctx[key] = existing + items
+
+    def reset(self, thread_id: str | None = None) -> None:
+        tid = thread_id or getattr(self._local, "thread_id", None)
+        if tid is None:
+            return
         with self._lock:
-            self._data.clear()
-            logger.debug("ContextManager reset")
+            self._contexts.pop(tid, None)
+            logger.debug("ContextManager reset for thread=%s", tid)
 
 
 _context_manager = ContextManager()

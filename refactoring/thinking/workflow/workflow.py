@@ -169,7 +169,9 @@ class Workflow:
         active_cancel_event.clear()
 
         def _run():
-            get_context_manager().reset()
+            ctx = get_context_manager()
+            ctx.set_active_thread(thread_id)
+            ctx.reset(thread_id)
             return self._app.invoke(initial_state, config)
 
         future = self._executor.submit(_run)
@@ -187,7 +189,6 @@ class Workflow:
             )
             active_cancel_event.set()
             future.cancel()
-            remove_thread_cancel_event(thread_id)
             return {
                 "messages": [HumanMessage(content="[System: Workflow timed out. Please try again.]")],
             }

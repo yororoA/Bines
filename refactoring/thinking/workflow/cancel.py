@@ -19,8 +19,8 @@ def get_thread_cancel_event(thread_id: str) -> threading.Event:
 def cancel_thread(thread_id: str) -> None:
     with _thread_events_lock:
         event = _thread_events.get(thread_id)
-    if event is not None:
-        event.set()
+        if event is not None:
+            event.set()
 
 
 def cancel_all_threads() -> None:
@@ -32,8 +32,8 @@ def cancel_all_threads() -> None:
 def clear_thread_cancel_event(thread_id: str) -> None:
     with _thread_events_lock:
         event = _thread_events.get(thread_id)
-    if event is not None:
-        event.clear()
+        if event is not None:
+            event.clear()
 
 
 def remove_thread_cancel_event(thread_id: str) -> None:
