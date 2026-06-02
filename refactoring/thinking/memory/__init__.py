@@ -14,7 +14,6 @@ from .retrieval import (
     retrieve_memories,
     retrieve_for_reply,
     retrieve_for_manager,
-    retrieve_for_performer,
     format_retrieval_results,
 )
 from .consolidation import MemoryJudgment, judge_and_store
@@ -42,7 +41,6 @@ __all__ = [
     "retrieve_memories",
     "retrieve_for_reply",
     "retrieve_for_manager",
-    "retrieve_for_performer",
     "format_retrieval_results",
     "MemoryJudgment",
     "judge_and_store",

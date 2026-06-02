@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from thinking_settings import thinking_settings
+from utils.time_utils import day_key
 from ..vector_store.chroma_store import (
     ChromaMemoryStore,
     get_memory_store,
@@ -26,13 +27,13 @@ def retrieve_memories(
     _diary_k = diary_k if diary_k is not None else thinking_settings.RETRIEVAL_DIARY_K
 
     knowledge = memory_store.search(
-        COLLECTION_KNOWLEDGE, query, k=_knowledge_k, target_day_key=day_key
+        COLLECTION_KNOWLEDGE, query, k=_knowledge_k, target_day_key=day_key()
     )
     persona = memory_store.search(
-        COLLECTION_PERSONA, query, k=_persona_k, target_day_key=day_key
+        COLLECTION_PERSONA, query, k=_persona_k, target_day_key=day_key()
     )
     diary = memory_store.search(
-        COLLECTION_SLICED_DIARY, query, k=_diary_k, target_day_key=day_key
+        COLLECTION_SLICED_DIARY, query, k=_diary_k, target_day_key=day_key()
     )
 
     return {
@@ -64,19 +65,6 @@ def retrieve_for_manager(
         knowledge_k=5,
         persona_k=2,
         diary_k=1,
-        store=store,
-    )
-
-
-def retrieve_for_performer(
-    query: str,
-    store: ChromaMemoryStore | None = None,
-) -> dict[str, list[dict[str, Any]]]:
-    return retrieve_memories(
-        query,
-        knowledge_k=3,
-        persona_k=0,
-        diary_k=0,
         store=store,
     )
 
