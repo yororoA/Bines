@@ -39,32 +39,38 @@ def _validate_llm_provider_config() -> bool:
 
 
 async def _run_startup_buffer_consolidation():
-    try:
-        from memory import (
-            get_buffer_by_day,
-            get_existing_diary_day_keys,
-            consolidate_buffer_to_diary,
-        )
-        from utils.time_utils import day_key
+    # 修复：使用 loop.run_in_executor() 包装同步操作，避免阻塞事件循环
+    # 之前直接 await 同步操作，会阻塞事件循环长达数分钟（包括 LLM 调用和 Chroma 写入）
+    def _sync_consolidation():
+        try:
+            from memory import (
+                get_buffer_by_day,
+                get_existing_diary_day_keys,
+                consolidate_buffer_to_diary,
+            )
+            from utils.time_utils import day_key
 
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
-        yesterday_key = day_key(yesterday)
+            now = datetime.now()
+            yesterday = now - timedelta(days=1)
+            yesterday_key = day_key(yesterday)
 
-        existing_days = get_existing_diary_day_keys()
-        if yesterday_key in existing_days:
-            return
+            existing_days = get_existing_diary_day_keys()
+            if yesterday_key in existing_days:
+                return
 
-        buffer_entries = get_buffer_by_day(yesterday_key)
-        if not buffer_entries:
-            return
+            buffer_entries = get_buffer_by_day(yesterday_key)
+            if not buffer_entries:
+                return
 
-        logger.info("Consolidating buffer for %s (%d entries)", yesterday_key, len(buffer_entries))
-        result = consolidate_buffer_to_diary(yesterday_key)
-        if result:
-            logger.info("Startup buffer consolidation completed for %s", yesterday_key)
-    except Exception:
-        logger.exception("Startup buffer consolidation failed")
+            logger.info("Consolidating buffer for %s (%d entries)", yesterday_key, len(buffer_entries))
+            result = consolidate_buffer_to_diary(yesterday_key)
+            if result:
+                logger.info("Startup buffer consolidation completed for %s", yesterday_key)
+        except Exception:
+            logger.exception("Startup buffer consolidation failed")
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _sync_consolidation)
 
 
 async def main():

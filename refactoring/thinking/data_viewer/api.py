@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,14 +23,17 @@ def create_app(
     db_path: str | Path | None = None,
     chroma_path: str | Path | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="Data Viewer", version="0.2.0")
-
     conn = get_connection(db_path)
     chroma = get_chroma_client(chroma_path)
 
-    @app.on_event("shutdown")
-    def _close_db():
+    # 修复：使用 FastAPI lifespan context manager 替代废弃的 @app.on_event("shutdown")
+    # 之前使用 @app.on_event("shutdown")，在新版 FastAPI 中已废弃
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
         conn.close()
+
+    app = FastAPI(title="Data Viewer", version="0.2.0", lifespan=lifespan)
 
     @app.get("/api/threads")
     def api_list_threads() -> list[dict[str, Any]]:

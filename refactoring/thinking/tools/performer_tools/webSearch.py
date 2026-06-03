@@ -1,9 +1,8 @@
 import threading
 
-from smolagents import tool, DuckDuckGoSearchTool, WebSearchTool, VisitWebpageTool
+from smolagents import tool, DuckDuckGoSearchTool
 
 _search_tool = None
-_extra_tools = None
 _search_lock = threading.Lock()
 
 
@@ -30,15 +29,6 @@ def webSearch(query: str) -> str:
         webSearch("Who is the current president of the United States?") -> "The current president is Joe Biden."
     """
     return str(_get_search_tool()(query))
-
-
-def get_search_tools() -> list:
-    global _extra_tools
-    if _extra_tools is None:
-        with _search_lock:
-            if _extra_tools is None:
-                _extra_tools = [WebSearchTool(), VisitWebpageTool()]
-    return [_get_search_tool()] + list(_extra_tools)
 
 
 SEARCH_AUTHORIZED_IMPORTS = ["datetime", "requests", "json", "httpx"]

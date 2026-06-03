@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import Future as ConcurrentFuture
 import json
 import logging
 import random
@@ -60,7 +59,9 @@ class NapCatClient:
         self._connection_task: asyncio.Task | None = None
         self._seen_message_ids: OrderedDict = OrderedDict()
         self._debounce_timers: dict[str, asyncio.Task] = {}
-        self._running_tasks: dict[str, asyncio.Task | ConcurrentFuture] = {}
+        # 修复：使用 asyncio.Future 替代 ConcurrentFuture，类型注解与实际类型匹配
+        # 之前使用 ConcurrentFuture，但实际存储的是 asyncio.Future（来自 run_in_executor）
+        self._running_tasks: dict[str, asyncio.Task | asyncio.Future] = {}
         self._pending_buffers: dict[str, list[str]] = {}
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._task_lock = threading.Lock()
