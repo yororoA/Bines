@@ -166,7 +166,11 @@ class Workflow:
             "recursion_limit": MAX_ITERATIONS * 4 + 10,
         }
 
-        active_cancel_event.clear()
+        # 修复：只 clear 传入的 cancel_event，不 clear 全局 _cancel_event
+        # 之前直接 clear active_cancel_event，可能误清全局事件，影响其他 workflow
+        if cancel_event is not None:
+            cancel_event.clear()
+        # 注意：不 clear 全局 _cancel_event，避免影响其他 workflow
 
         def _run():
             ctx = get_context_manager()

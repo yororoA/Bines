@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 _PerformerAgent = None
 _PerformerLock = threading.Lock()
 _cached_soul_hash: str | None = None
+# 注意：_PerformerLock 用于保护 _PerformerAgent 的创建和运行
+# 由于 CodeAgent 是全局单例，且 run() 方法可能不是线程安全的，
+# 因此需要锁保护。但当前锁范围包括整个 run() 调用，导致所有 workflow 串行化。
+# 未来可考虑为每个 workflow 创建独立的 CodeAgent 实例以提高并发性。
 
 _MAX_STEPS = 10
 
@@ -176,6 +180,8 @@ def _build_context(state: GraphStatus) -> str:
 
 
 def _extract_mood(feedback_raw) -> dict:
+    # 修复：正确设置 prev_arousal 字段，用于判断情绪变化趋势
+    # 之前缺失此字段，导致无法判断情绪是从高到低还是从低到高
     try:
         mood_item = None
         items = feedback_raw if isinstance(feedback_raw, list) else []
@@ -190,6 +196,7 @@ def _extract_mood(feedback_raw) -> dict:
             new_triggers = max(0, new_triggers)
             ctx = get_context_manager()
             prev_mood = ctx.get("persona_mood", {})
+            # prev_arousal 取上一轮的 arousal 值，用于判断情绪变化趋势
             return {
                 "arousal": new_arousal,
                 "consecutive_triggers": new_triggers,

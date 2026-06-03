@@ -8,6 +8,9 @@ logger = logging.getLogger(__name__)
 
 
 class ContextManager:
+    # 线程安全设计：使用锁保护所有 context 操作
+    # 注意：ThreadPoolExecutor worker 会被复用，threading.local 的 thread_id 可能被覆盖
+    # 因此需要确保每个 workflow 的 context 互相隔离，避免串扰
     def __init__(self):
         self._lock = threading.Lock()
         self._contexts: dict[str, dict[str, Any]] = {}
@@ -43,18 +46,21 @@ class ContextManager:
 
     def set(self, key: str, value: Any, thread_id: str | None = None) -> None:
         ctx = self._get_ctx(thread_id)
-        ctx[key] = value
+        with self._lock:
+            ctx[key] = value
 
     def update(self, updates: dict[str, Any], thread_id: str | None = None) -> None:
         ctx = self._get_ctx(thread_id)
-        ctx.update(updates)
+        with self._lock:
+            ctx.update(updates)
 
     def append_to_list(self, key: str, items: list, thread_id: str | None = None) -> None:
         ctx = self._get_ctx(thread_id)
-        existing = ctx.get(key, [])
-        if not isinstance(existing, list):
-            existing = []
-        ctx[key] = existing + items
+        with self._lock:
+            existing = ctx.get(key, [])
+            if not isinstance(existing, list):
+                existing = []
+            ctx[key] = existing + items
 
     def reset(self, thread_id: str | None = None) -> None:
         tid = thread_id or getattr(self._local, "thread_id", None)

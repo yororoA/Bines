@@ -8,7 +8,6 @@ from ..cancel import get_cancel_event
 from ..context_manager import get_context_manager
 from memory import (
     PersonaState,
-    MemoryJudgment,
     judge_and_store,
     consolidate_buffer_to_diary,
     get_memory_store,
@@ -84,7 +83,9 @@ def _run_memory_decay():
 
 
 def DynamicAgentNode(state: GraphStatus) -> dict[str, Any]:
-    cancel_event = get_cancel_event()
+    # 修复：使用 per-thread cancel event 优先，确保取消信号一致性
+    # 之前只使用全局 cancel_event，导致 per-thread 取消无法被感知
+    cancel_event = state.get("cancel_event") or get_cancel_event()
     if cancel_event.is_set():
         logger.info("DynamicAgentNode cancelled")
         return {}

@@ -66,7 +66,9 @@ def _store_summary_to_buffer(summary: str) -> None:
 
 
 def StatusTrimNode(state: GraphStatus) -> dict:
-    cancel_event = get_cancel_event()
+    # 修复：使用 per-thread cancel event 优先，确保取消信号一致性
+    # 之前只使用全局 cancel_event，导致 per-thread 取消无法被感知
+    cancel_event = state.get("cancel_event") or get_cancel_event()
     if cancel_event.is_set():
         logger.info("StatusTrimNode cancelled")
         return {}

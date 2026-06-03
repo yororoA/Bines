@@ -68,6 +68,8 @@ def _get_embeddings() -> HuggingFaceEmbeddings:
 
 
 class ChromaMemoryStore:
+    # 修复：添加锁保护去重逻辑和写入操作，避免并发场景下的竞态条件
+    # 之前没有锁保护，可能导致两路同时 add 时重复入库
     def __init__(self, persist_dir: str | None = None):
         self._persist_dir = persist_dir or thinking_settings.RAG_PERSIST_DIR
         try:
@@ -79,6 +81,7 @@ class ChromaMemoryStore:
             return
 
         self._collections: dict[str, Chroma] = {}
+        self._add_lock = threading.Lock()
         # NOTE: Using cosine distance for semantic dedup.
         # If upgrading from L2-based collections, delete the existing
         # memory_data/chroma_db/ directory to recreate with cosine metric.
@@ -117,32 +120,35 @@ class ChromaMemoryStore:
         store = self._get_collection(collection)
         _id = doc_id or uuid.uuid4().hex
 
-        try:
-            similar = store.similarity_search_with_score(content, k=1)
-            if similar:
-                _, score = similar[0]
-                if score < thinking_settings.DEDUP_THRESHOLD:
-                    logger.debug(
-                        "Skipping duplicate in %s (score=%.4f < threshold=%.4f)",
-                        collection, score, thinking_settings.DEDUP_THRESHOLD,
-                    )
-                    return None
-        except Exception:
-            logger.warning("Dedup check failed for %s, proceeding with add", collection, exc_info=True)
+        # 使用锁保护去重逻辑和写入操作，避免并发场景下的竞态条件
+        # 之前没有锁保护，可能导致两路同时 add 时重复入库
+        with self._add_lock:
+            try:
+                similar = store.similarity_search_with_score(content, k=1)
+                if similar:
+                    _, score = similar[0]
+                    if score < thinking_settings.DEDUP_THRESHOLD:
+                        logger.debug(
+                            "Skipping duplicate in %s (score=%.4f < threshold=%.4f)",
+                            collection, score, thinking_settings.DEDUP_THRESHOLD,
+                        )
+                        return None
+            except Exception:
+                logger.warning("Dedup check failed for %s, proceeding with add", collection, exc_info=True)
 
-        meta = metadata or {}
-        if "memory_type" not in meta:
-            meta["memory_type"] = collection
-        if "created_at" not in meta:
-            meta["created_at"] = datetime.now().isoformat()
-        if "day_key" not in meta:
-            meta["day_key"] = day_key()
-        store.add_texts(
-            texts=[content],
-            metadatas=[meta],
-            ids=[_id],
-        )
-        return _id
+            meta = metadata or {}
+            if "memory_type" not in meta:
+                meta["memory_type"] = collection
+            if "created_at" not in meta:
+                meta["created_at"] = datetime.now().isoformat()
+            if "day_key" not in meta:
+                meta["day_key"] = day_key()
+            store.add_texts(
+                texts=[content],
+                metadatas=[meta],
+                ids=[_id],
+            )
+            return _id
 
     def search(
         self,
