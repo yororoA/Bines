@@ -21,19 +21,23 @@ def retrieve_memories(
     target_day_key: str | None = None,
     store: ChromaMemoryStore | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
+    # target_day_key 参数：指定检索特定日期的记忆，用于历史记忆检索
+    # 如果不传入，则使用当天日期（day_key()），支持检索历史记忆
     memory_store = store or get_memory_store()
     _knowledge_k = knowledge_k if knowledge_k is not None else thinking_settings.RETRIEVAL_KNOWLEDGE_K
     _persona_k = persona_k if persona_k is not None else thinking_settings.RETRIEVAL_PERSONA_K
     _diary_k = diary_k if diary_k is not None else thinking_settings.RETRIEVAL_DIARY_K
 
+    # 使用传入的 target_day_key 参数，支持检索历史记忆
+    # 修复：之前硬编码为 day_key()，导致只能检索当天记忆，长期记忆系统失效
     knowledge = memory_store.search(
-        COLLECTION_KNOWLEDGE, query, k=_knowledge_k, target_day_key=day_key()
+        COLLECTION_KNOWLEDGE, query, k=_knowledge_k, target_day_key=target_day_key
     )
     persona = memory_store.search(
-        COLLECTION_PERSONA, query, k=_persona_k, target_day_key=day_key()
+        COLLECTION_PERSONA, query, k=_persona_k, target_day_key=target_day_key
     )
     diary = memory_store.search(
-        COLLECTION_SLICED_DIARY, query, k=_diary_k, target_day_key=day_key()
+        COLLECTION_SLICED_DIARY, query, k=_diary_k, target_day_key=target_day_key
     )
 
     return {

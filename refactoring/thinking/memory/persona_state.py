@@ -84,8 +84,11 @@ persona_cache = PersonaCache()
 
 @dataclass
 class PersonaMood:
+    # prev_arousal 字段：记录上一轮的 arousal 值，用于判断情绪变化趋势
+    # 修复：之前缺失此字段，导致无法判断情绪是从高到低还是从低到高
     arousal: float = 0.0
     consecutive_triggers: int = 0
+    prev_arousal: float = 0.0
 
     @staticmethod
     def arousal_level(arousal: float) -> str:
@@ -106,6 +109,7 @@ class PersonaMood:
         return {
             "arousal": self.arousal,
             "consecutive_triggers": self.consecutive_triggers,
+            "prev_arousal": self.prev_arousal,
         }
 
     @classmethod
@@ -115,4 +119,5 @@ class PersonaMood:
         return cls(
             arousal=float(data.get("arousal", 0)),
             consecutive_triggers=int(data.get("consecutive_triggers", 0)),
+            prev_arousal=float(data.get("prev_arousal", 0)),
         ).clamp()
