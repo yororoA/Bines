@@ -1,0 +1,64 @@
+flowchart TB
+    subgraph LOCAL_FILES["Thinking 进程本地 JSON"]
+        PERMANENT["memory_permanent.json<br/>角色事实与规则"]
+        DYNAMIC["memory_dynamic.json<br/>关系 / 地点 / 物品 / 状态"]
+        SHORT["memory_short.json<br/>最近 25 轮"]
+        GROUP_BUF["qq_msg_buffer.json<br/>群聊热数据"]
+        PRIVATE_BUF["qq_msg_private_buffer.json<br/>私聊热数据"]
+    end
+
+    subgraph THINKING_MEM["Thinking 记忆编排"]
+        BUILD["get_full_context_messages"]
+        ADD["add_interaction"]
+        EPISODE["窗口摘要线程<br/>SummaryWorker"]
+        QQMGR["QQBufferManager"]
+        DIARY_JOB["04:00 / 上线归纳"]
+        DYNAMIC_AGENT["DynamicMemoryToolAgent"]
+    end
+
+    subgraph RPC_LAYER["轻量 RAG Client"]
+        CLIENT["RAGMemory / RAGServerClient<br/>每次创建短生命周期 REQ"]
+    end
+
+    subgraph RAG_PROCESS["独立 RAG Server 进程"]
+        RPC["REP Dispatcher<br/>method -> handler"]
+        EMB["HuggingFace Embedding<br/>单例"]
+        CHAT["chat_memory"]
+        SUMMARY_BUF["summary_buffer"]
+        DIARY["long_term_diary"]
+        QQHISTORY["qq_history_store"]
+    end
+
+    PERMANENT --> BUILD
+    DYNAMIC --> BUILD
+    SHORT --> BUILD
+    GROUP_BUF --> BUILD
+    PRIVATE_BUF --> BUILD
+    CLIENT --> BUILD
+    BUILD --> PROMPT["MainAgent Context"]
+
+    LOCAL_REPLY["ASR / MANUAL 完整交互"] --> ADD --> SHORT
+    SHORT -->|"达到 25 轮"| EPISODE
+    EPISODE -->|"摘要 + tags + importance"| CLIENT
+    EPISODE --> DYNAMIC_AGENT --> DYNAMIC
+
+    QQ_INPUT["QQ 用户消息 / Bot 回复 / qq_log"] --> QQMGR
+    QQMGR --> GROUP_BUF
+    QQMGR --> PRIVATE_BUF
+    QQMGR -->|"会话摘要 + 原始记录"| CLIENT
+
+    CLIENT <-->|"ZMQ REQ/REP"| RPC
+    RPC --> EMB
+    EMB --> CHAT
+    EMB --> SUMMARY_BUF
+    EMB --> DIARY
+    EMB --> QQHISTORY
+
+    SUMMARY_BUF --> DIARY_JOB
+    CHAT --> DIARY_JOB
+    DIARY_JOB -->|"副 RP 模型写日记"| CLIENT
+    DIARY_JOB -->|"成功后删除已归档 ids"| SUMMARY_BUF
+
+    SUMMARY_BUF --> CLIENT
+    DIARY --> CLIENT
+    QQHISTORY --> CLIENT

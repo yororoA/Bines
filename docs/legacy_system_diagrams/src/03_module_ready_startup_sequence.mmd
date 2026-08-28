@@ -1,0 +1,39 @@
+sequenceDiagram
+    participant C as Classification
+    participant D as Display
+    participant S as Speaking
+    participant V as Visual
+    participant R as RAG Server
+    participant H as Hearing
+    participant B as Bored Detector
+    participant T as Thinking
+    participant Q as ChatBot
+
+    C->>C: bind MODULE_READY_REP
+    par 各模块独立初始化
+        D->>D: 创建 GUI、连接订阅、启动 ZMQ QThread
+        S->>S: bind TTS_AUDIO_PUB、启动 TTS worker
+        V->>V: 打开摄像头、启动 recognition_loop
+        R->>R: 加载 Embedding、打开 ChromaDB、bind REP
+        H->>H: 加载 ASR/PUNC/声纹、打开麦克风
+        B->>B: bind BORED_PUB 后进入检测循环
+        T->>T: bind 输出端口和 START_THINKING_REP
+        Q->>Q: 连接 NapCat 并发布 QQ_PUB
+    end
+    D->>C: REQ module_ready(Display)
+    C-->>D: REP ok
+    S->>C: REQ module_ready(Speaking)
+    C-->>S: REP ok
+    V->>C: REQ module_ready(Visual)
+    C-->>V: REP ok
+    R->>C: REQ module_ready(RAG Server)
+    C-->>R: REP ok
+    H->>C: REQ module_ready(Hearing)
+    C-->>H: REP ok
+    Note over C,T: 不等待 Bored Detector 和 ChatBot
+    C->>T: REQ "start"
+    T-->>C: REP "ok"
+    T->>T: 启动 Status WS
+    T->>T: 初始化 LayeredMemorySystem
+    T->>T: 启动 RAG GC、日记归纳、屏幕监控
+    T->>T: 进入 ZMQ poll loop

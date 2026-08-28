@@ -1,0 +1,18 @@
+stateDiagram-v2
+    [*] --> NoSlot
+    NoSlot --> Buffering: 第一条 QQ 消息
+    Buffering --> Buffering: 同槽新消息<br/>append + reset timer
+    Buffering --> TimerExpired: 3 秒无新消息
+    TimerExpired --> SubmitNow: Thinking 空闲
+    TimerExpired --> Pending: Thinking 正在处理
+    SubmitNow --> Processing: worker 获得 processing_lock
+    SubmitNow --> Pending: 获取锁时发现竞态
+    Processing --> Interrupted: 新消息设置 INTERRUPT_REQUESTED
+    Interrupted --> Finalizing: 当前流式/工具检查点感知
+    Processing --> Finalizing: 正常完成
+    Finalizing --> PendingSubmit: finally 取出 Pending
+    PendingSubmit --> Processing: executor.submit
+    Finalizing --> NoSlot: 无 Pending
+    Pending --> Pending: 后续输入追加到 Pending 文本
+    Pending --> Processing: 当前轮 finally 提交
+    Processing --> NoSlot: 回复完成

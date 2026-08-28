@@ -1,0 +1,38 @@
+flowchart TB
+    BROWSER["浏览器管理页"] --> API["Flask API"]
+
+    subgraph PROCESS["进程生命周期"]
+        API --> START{"start one / start all"}
+        START --> PORTS["查询 SERVICE_BIND_PORTS"]
+        PORTS --> CLEAN["port_cleanup"]
+        CLEAN --> POPEN["subprocess.Popen<br/>cwd + interpreter + script"]
+        POPEN --> OUT["stdout reader thread"]
+        POPEN --> ERR["stderr reader thread"]
+        OUT --> QUEUE["per-service log_queue"]
+        ERR --> QUEUE
+        QUEUE --> POLL["GET logs / SSE stream"]
+        POLL --> BROWSER
+
+        API --> STOP["stop service"]
+        STOP --> TERM["terminate -> wait 5s"]
+        TERM -->|"超时"| KILL["kill"]
+    end
+
+    subgraph RUNTIME["运行时控制"]
+        API --> GAME["POST game_mode"]
+        GAME --> SYSCMD["PUB syscmd<br/>enable/disable_game_mode"]
+        SYSCMD --> THINKING["Thinking"]
+
+        API --> PRESENCE["POST presence"]
+        PRESENCE --> PFILE["原子写 presence_state.json"]
+        PRESENCE --> PUBLISH["PUB syscmd update_presence"]
+        PUBLISH --> THINKING
+
+        API --> TOOLCFG["POST tool_agent_tools"]
+        TOOLCFG --> TOOLFILE["写 tool_agent_schema.json"]
+        TOOLFILE -.->|"下次 ToolAgent 调用时重读"| THINKING
+
+        API --> SCREENCFG["POST realtime_screen_config"]
+        SCREENCFG --> SCREENFILE["写配置 + 同步 get_screen_info enabled"]
+        SCREENCFG --> SCREENPROC["启动或停止 Realtime Screen"]
+    end

@@ -1,0 +1,20 @@
+flowchart TD
+    BEGIN["round = 1"] --> REQUEST["MainAgent.run_one_turn_streaming"]
+    REQUEST --> ERROR{"HTTP / stream error?"}
+    ERROR -->|5xx 且未满 3 次| RETRY["等待 3 秒"] --> REQUEST
+    ERROR -->|其他错误或重试耗尽| ERROR_REPLY["发送错误回复 + end"]
+    ERROR -->|否| RESULT{"包含 tool_calls?"}
+
+    RESULT -->|否| SEGMENT["流式文本按双空格发送"]
+    SEGMENT --> SAVE["保存本轮并结束"]
+
+    RESULT -->|是| APPEND["追加 assistant(tool_calls)"]
+    APPEND --> EXECUTE["执行每个 router tool"]
+    EXECUTE --> TOOL_MSG["追加 role=tool 结果"]
+    TOOL_MSG --> NEXT{"round < 5 且未被打断?"}
+    NEXT -->|是| REQUEST
+    NEXT -->|否| SAVE
+
+    REQUEST --> INTERRUPT{"interrupt_requested?"}
+    INTERRUPT -->|是| PARTIAL["停止读取 stream<br/>保留已输出片段"]
+    PARTIAL --> END_SIGNAL["发送 end，finally 提交 Pending"]

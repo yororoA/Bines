@@ -1,0 +1,29 @@
+flowchart TB
+    subgraph VIS_THREAD["visual_listener 后台线程"]
+        VIS_MSG["SUB visual"] --> UPDATE_CACHE["latest_visual_info = data"]
+        UPDATE_CACHE --> VIS_MSG
+    end
+
+    subgraph MAIN_THREAD["classification_loop 主线程"]
+        POLL["poll 10ms"] --> TYPE{"哪个 socket 可读?"}
+
+        TYPE -->|ASR| ASR["解析 user_input<br/>source=ASR"]
+        TYPE -->|Manual| MAN["解析 user_input<br/>source=MANUAL"]
+        TYPE -->|QQ| QQ["解析 OneBot event"]
+
+        ASR --> FORWARD["process_and_forward"]
+        MAN --> FORWARD
+        FORWARD --> READ_CACHE["读取 faces / objects / gestures / caption"]
+        READ_CACHE --> CLEAR["清空 latest_visual_info"]
+        CLEAR --> CLASSIFIED["PUB classified"]
+
+        QQ --> IMAGE["提取/清理图片 CQ 码"]
+        IMAGE --> MENTION{"私聊或已 @Bot?"}
+        MENTION -->|是| PREFIX["添加群聊/私聊和发送者前缀"]
+        PREFIX --> QQCTX["附加 qq_context<br/>user/group/admin/images"]
+        QQCTX --> CLASSIFIED_QQ["PUB classified<br/>source=QQ"]
+        MENTION -->|否| LOG["构造 qq_log<br/>不读取也不清空视觉缓存"]
+        LOG --> QQLOG["PUB qq_log"]
+    end
+
+    UPDATE_CACHE -.-> READ_CACHE

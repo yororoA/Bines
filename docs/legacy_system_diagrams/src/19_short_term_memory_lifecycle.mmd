@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> ActiveShortTerm: 新本地对话
+    ActiveShortTerm --> ActiveShortTerm: 轮数小于 25
+    ActiveShortTerm --> PendingSummary: 达到窗口上限
+    PendingSummary --> Summarizing: SummaryWorker 异步处理
+    Summarizing --> BufferRAG: 摘要成功写入 summary_buffer
+    Summarizing --> ActiveShortTerm: 失败时恢复/保留可见原文
+    BufferRAG --> BufferRAG: 当日内继续参与检索
+    BufferRAG --> DiaryCandidate: 跨过 04:00 日期边界
+    DiaryCandidate --> DiaryRAG: 副 RP 模型生成日记成功
+    DiaryCandidate --> BufferRAG: 日记生成失败，保留待重试
+    DiaryRAG --> DecayCandidate: 低访问且超过 GC 条件
+    DecayCandidate --> [*]: GC 删除

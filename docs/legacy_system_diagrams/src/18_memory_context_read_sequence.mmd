@@ -1,0 +1,32 @@
+sequenceDiagram
+    autonumber
+    participant T as Thinking
+    participant L as LayeredMemorySystem
+    participant J as JSON Files
+    participant C as RAG Client
+    participant R as RAG Server
+    participant M as MainAgent
+
+    T->>L: get_full_context_messages(user_input, qq_context)
+    L->>J: 读取 permanent + dynamic
+    L->>J: 读取 short-term + pending summary messages
+    opt QQ 请求
+        L->>C: get_latest_qq_logs(group_id/user_id)
+        C->>R: REQ get_latest_qq_logs
+        R-->>C: REP recent raw QQ logs
+        C-->>L: logs
+        L->>J: 读取对应 QQ JSON Buffer
+        L->>L: 合并、按时间排序、去重、保留最近 20 条
+    end
+    L->>L: 必要时 Query Rewrite
+    L->>C: get_relevant_context_summary_buffer(k=5)
+    C->>R: REQ summary_buffer search
+    R-->>C: results
+    C-->>L: Buffer RAG results
+    L->>C: get_relevant_context_diary(k=3)
+    C->>R: REQ diary search
+    R-->>C: results
+    C-->>L: Diary RAG results
+    L->>L: 与短期记忆做语义去重
+    L-->>T: system + memory_recall + history messages
+    T->>M: 完整 messages[]

@@ -1,0 +1,10 @@
+flowchart LR
+    USER_STATE["presence_state.json<br/>本地用户是否在线"] --> BORED_POLICY["是否允许主动打扰"]
+    SERVICE_WS["status_ws.py<br/>到 Moments 的 WebSocket"] --> SERVICE_STATE["Bines 服务是否在线"]
+    PLAY_STATE["Display CONTROL_PUB<br/>cough start/end"] --> PLAYER_BUSY["Thinking is_player_busy"]
+    DIALOG_STATE["IS_PROCESSING_DIALOGUE<br/>processing_state"] --> PROCESS_BUSY["是否已有对话执行"]
+
+    BORED_POLICY --> ACTIVE{"允许主动请求?"}
+    PLAYER_BUSY --> ACTIVE
+    PROCESS_BUSY --> ACTIVE
+    SERVICE_STATE -.->|"仅外部状态展示"| ACTIVE

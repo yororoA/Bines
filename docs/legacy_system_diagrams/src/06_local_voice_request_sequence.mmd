@@ -1,0 +1,62 @@
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant H as Hearing
+    participant C as Classification
+    participant V as Visual Cache
+    participant T as Thinking
+    participant R as RAG Server
+    participant L as MainAgent
+    participant W as ToolAgent
+    participant S as Speaking
+    participant D as Display
+
+    U->>H: 麦克风语音
+    loop 每 100ms 音频块
+        H->>H: 能量检测、增益和 pre-roll
+    end
+    H->>H: 句尾判定、ASR、标点恢复
+    opt 已注册声纹
+        H->>H: 声纹相似度校验
+    end
+    H-)C: PUB asr<br/>{user_input,sender=ASR}
+    H->>H: IS_PAUSED = True
+    C->>V: 读取 latest_visual_info
+    C->>C: 拼接 img_descr 并清空缓存
+    C-)T: PUB classified<br/>{user_input,img_descr,source=ASR}
+
+    activate T
+    T-)H: PUB control cough=start
+    T->>T: sanitize + timestamp + source policy
+    T->>R: REQ 检索 summary_buffer / diary
+    R-->>T: REP memory context
+    T->>T: 组合人格、动态状态、短期记忆和屏幕上下文
+    T->>L: 流式 chat completion
+
+    loop 最多 5 个主模型 round
+        alt 模型返回 tool_calls
+            L-->>T: call_tool_agent / call_summary_agent / get_time
+            T->>W: 执行工具任务
+            W-->>T: tool result
+            T->>L: 追加 role=tool 后继续
+        else 模型返回回复文本
+            L-->>T: token stream
+            loop 遇到双空格分句
+                T-)D: PUB text<br/>{text,segment_index,cough}
+                T-)S: PUB think<br/>{reply_part,reply_lang,cough}
+                S->>S: 入 tts_queue
+                S->>S: HTTP 流式 TTS
+                loop 每个音频 chunk
+                    S-)D: PUB tts<br/>{voice,streaming=true}
+                end
+                S-)D: PUB tts<br/>{streaming_end=true}
+            end
+        end
+    end
+
+    T->>T: add_interaction 写短期记忆
+    T-)D: PUB text / think cough=end
+    T-)H: PUB control cough=end
+    deactivate T
+    D-)H: 首块音频时 start，播放完成时 end
+    H->>H: IS_PAUSED = False，恢复采集

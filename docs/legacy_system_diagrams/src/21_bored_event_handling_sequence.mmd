@@ -1,0 +1,25 @@
+sequenceDiagram
+    autonumber
+    participant B as Bored Detector
+    participant T as Thinking Poll Loop
+    participant F as Flush Signal File
+    participant RS as Realtime Screen
+    participant P as process_message
+    participant M as MainAgent
+
+    B-)T: PUB bored {timestamp,visual_stimulus?}
+    T->>T: 检查本地用户在线状态
+    alt 用户离线
+        T->>T: 丢弃事件
+    else 用户在线但正在处理
+        T->>T: 拒绝本次 bored，不进入 Pending
+    else 用户在线且空闲
+        T->>F: touch realtime_screen_flush.signal
+        RS->>F: 轮询 mtime
+        RS->>RS: 强制分析并更新 analysis.txt
+        T->>T: 等待约 1.5 秒
+        T->>T: build_bored_prompt()
+        T->>P: executor.submit(system event)
+        P->>P: 读取最新 realtime screen 分析
+        P->>M: 作为普通对话请求执行
+    end

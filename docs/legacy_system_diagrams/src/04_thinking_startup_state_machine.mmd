@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> Imported: 导入模块
+    Imported --> PortsBound: 创建 Agent、注册工具、bind 输出端口
+    PortsBound --> WaitingStart: bind START_THINKING_REP
+    WaitingStart --> WaitingStart: 尚未收到 Classification 请求
+    WaitingStart --> InitializingMemory: 收到 "start" 并回复 "ok"
+    InitializingMemory --> StartingWorkers: 构造 LayeredMemorySystem
+    StartingWorkers --> Listening: 启动维护线程和 ZMQ listener
+    Listening --> Processing: 收到 classified / bored / synthetic prompt
+    Processing --> Listening: 回复完成或异常收尾
+    Listening --> [*]: KeyboardInterrupt / 进程终止

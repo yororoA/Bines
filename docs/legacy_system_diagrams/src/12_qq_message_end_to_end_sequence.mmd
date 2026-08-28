@@ -1,0 +1,61 @@
+sequenceDiagram
+    autonumber
+    participant N as NapCat
+    participant Q as ChatBot
+    participant C as Classification
+    participant M as QQMergeCoordinator
+    participant T as Thinking
+    participant V as DashScope VLM
+    participant O as QQ Reply Client
+    participant B as QQBuffer
+    participant S as SummaryAgent
+    participant R as RAG Server
+
+    N->>Q: OneBot message event
+    Q->>Q: 忽略 bot 自身消息
+    Q->>Q: 检查 group @BOT_QQ_ID
+    Q->>Q: 标记 _is_admin，提取 _image_urls
+    Q-)C: PUB qq + 原始 event
+
+    alt 私聊或群内 @Bot
+        C->>C: 清理 CQ:image，构造来源前缀
+        C-)T: PUB classified<br/>{source=QQ,qq_context,user_input}
+        T->>B: 用户消息先写 QQ JSON Buffer
+        T->>M: enqueue by (group_id,user_id)
+        M->>M: 取消旧 Timer，启动 3 秒 Timer
+        opt 3 秒内继续收到同槽消息
+            T->>M: enqueue next message
+            M->>M: 文本和 image_urls 合并<br/>Timer 重新计时
+        end
+        M->>M: Timer 到期，拼接 merged_input
+        alt 当前已有对话执行
+            M->>T: 设置 INTERRUPT_REQUESTED<br/>保存 PENDING_INTERRUPT_INPUT
+        else 系统空闲
+            M->>T: executor.submit(process_message)
+        end
+
+        opt 包含图片 URL
+            T->>V: 下载图片并请求视觉描述
+            V-->>T: 每张图片 100 字内描述
+        end
+        T->>T: 注入 QQ 远程限制和管理员提示
+        T->>T: MainAgent / ToolAgent，enable_audio=false
+        T-)O: send_group_msg 或 send_private_msg
+        O->>N: OneBot API request
+        N-->>O: API response
+        T->>B: Bot 回复写回 QQ Buffer
+    else 群内未 @Bot
+        C->>C: 构造 qq_log payload
+        C-)T: PUB qq_log<br/>{content,sender,group_id,user_id}
+        T->>B: 仅记录，不触发回复
+    end
+
+    alt Buffer 达到 20 条或最早消息超过 10 分钟
+        B->>S: 按 group/private session 生成摘要
+        S-->>B: 会话摘要
+        B->>R: add_to_summary_buffer
+        loop 每条原始 QQ 消息
+            B->>R: add_qq_log
+        end
+        B->>B: 保留最近热数据或清空小 Buffer
+    end

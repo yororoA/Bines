@@ -1,0 +1,15 @@
+flowchart LR
+    RESPONSE["MainAgent 回复文本"] --> SOURCE{"source"}
+    SOURCE -->|"ASR / MANUAL / System Event"| LOCAL["enable_audio = true"]
+    SOURCE -->|"QQ"| REMOTE["enable_audio = false"]
+
+    LOCAL --> DISPLAY1["Display text"]
+    LOCAL --> TTS["Speaking TTS"]
+    LOCAL --> STM["主 ShortTermMemory"]
+
+    REMOTE --> DISPLAY2["Display text"]
+    REMOTE --> SPLIT["按双空格 / 句末切段"]
+    SPLIT --> QQAPI["NapCat send_group/private"]
+    QQAPI --> QQBUF["QQ Buffer"]
+    REMOTE -.->|"不执行"| TTS
+    REMOTE -.->|"不写入"| STM

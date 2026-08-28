@@ -1,0 +1,86 @@
+flowchart LR
+    subgraph EXTERNAL["外部边界"]
+        direction TB
+        MIC["麦克风"]
+        CAMERA["摄像头"]
+        NAPCAT["NapCat / OneBot WS"]
+        DEEPSEEK["DeepSeek API"]
+        DASHSCOPE["DashScope VLM"]
+        GPTSOVITS["GPT-SoVITS HTTP"]
+        MOMENTS["Moments API / Status WS"]
+        DESKTOP["Windows 桌面 / 应用 / 音乐"]
+    end
+
+    subgraph INPUT["输入与感知进程"]
+        direction TB
+        HEARING["Hearing<br/>ASR + 声纹"]
+        CHATBOT["ChatBot<br/>OneBot 事件适配"]
+        VISUAL["Visual<br/>摄像头帧 + 人脸 + VLM"]
+        MANUAL["Manual Input<br/>可选进程"]
+    end
+
+    subgraph BUS["汇聚与内部总线"]
+        direction TB
+        CLASSIFICATION["Classification<br/>输入汇聚 + 视觉缓存"]
+        ZMQ["ZeroMQ<br/>PUB/SUB + REQ/REP"]
+    end
+
+    subgraph CORE["决策与状态"]
+        direction TB
+        THINKING["Thinking<br/>handle_zmq.py"]
+        AGENTS["MainAgent / ToolAgent<br/>SummaryAgent"]
+        TOOLS["TOOLS_REGISTRY"]
+        RAG["RAG Server<br/>Embedding + ChromaDB"]
+        MEMORY["JSON Memory<br/>permanent / short / dynamic"]
+    end
+
+    subgraph OUTPUT["输出进程"]
+        direction TB
+        SPEAKING["Speaking<br/>TTS 队列"]
+        DISPLAY["Display<br/>PyQt6 + ffplay"]
+    end
+
+    subgraph ACTIVE["主动交互与管理"]
+        direction TB
+        BORED["Bored Detector"]
+        SCREEN["Realtime Screen<br/>截图 + VLM"]
+        MANAGER["Module Manager<br/>Flask + subprocess"]
+    end
+
+    MIC --> HEARING
+    CAMERA --> VISUAL
+    NAPCAT <--> CHATBOT
+    MANUAL --> ZMQ
+    HEARING --> ZMQ
+    CHATBOT --> ZMQ
+    VISUAL --> ZMQ
+    ZMQ --> CLASSIFICATION
+    CLASSIFICATION ==> THINKING
+
+    THINKING <--> AGENTS
+    AGENTS --> TOOLS
+    THINKING <-->|"RAG RPC"| RAG
+    THINKING <-->|"读写共享状态"| MEMORY
+    TOOLS --> DESKTOP
+    TOOLS --> NAPCAT
+    TOOLS --> VISUAL
+    AGENTS --> DEEPSEEK
+
+    THINKING ==>|"text"| DISPLAY
+    THINKING ==>|"think"| SPEAKING
+    SPEAKING --> GPTSOVITS
+    GPTSOVITS --> SPEAKING
+    SPEAKING ==>|"tts chunks"| DISPLAY
+    DISPLAY -->|"control"| HEARING
+    THINKING -->|"control"| HEARING
+
+    BORED --> THINKING
+    BORED --> VISUAL
+    SCREEN --> DASHSCOPE
+    SCREEN -.->|"analysis file"| THINKING
+    THINKING -.->|"context / flush files"| SCREEN
+    THINKING <--> MOMENTS
+    MANAGER -->|"start / stop / logs"| INPUT
+    MANAGER -->|"start / stop / logs"| CORE
+    MANAGER -->|"start / stop / logs"| OUTPUT
+    MANAGER -->|"syscmd"| THINKING

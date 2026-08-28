@@ -1,0 +1,18 @@
+flowchart TB
+    START["python start_modules.py"] --> ARGS{"启动参数"}
+
+    ARGS -->|"默认或 --web"| WEB["导入 Flask app"]
+    WEB --> WAIT_HTTP["后台线程启动 0.0.0.0:5000"]
+    WAIT_HTTP --> PROBE{"20 秒内 GET / 成功?"}
+    PROBE -->|是| OPEN["打开管理页"]
+    PROBE -->|否| MANUAL_OPEN["提示稍后手动访问"]
+    OPEN --> USER_ACTION["用户点击启动全部/单服务"]
+    MANUAL_OPEN --> USER_ACTION
+    USER_ACTION --> CLEAN_ONE["按服务或全量清理 bind 端口"]
+    CLEAN_ONE --> POPEN_WEB["subprocess.Popen<br/>捕获 stdout/stderr"]
+    POPEN_WEB --> SSE["日志队列 -> SSE -> 浏览器"]
+
+    ARGS -->|"--console"| CONSOLE["清理全部 ZMQ 端口"]
+    CONSOLE --> ORDER["按 process_registry 顺序启动"]
+    ORDER --> POPEN_CONSOLE["CREATE_NEW_CONSOLE"]
+    POPEN_CONSOLE --> SURVIVE["启动器退出后子进程继续存活"]

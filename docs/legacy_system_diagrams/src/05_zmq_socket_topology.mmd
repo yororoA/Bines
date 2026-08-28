@@ -1,0 +1,62 @@
+flowchart TB
+    subgraph INPUT_PUB["输入 PUB/SUB"]
+        H_PUB["Hearing<br/>BIND HEARING_ASR_PUB"]
+        M_PUB["Manual Input<br/>BIND MANUAL_TEXT_PUB"]
+        Q_PUB["ChatBot<br/>BIND QQ_PUB"]
+        V_PUB["Visual<br/>BIND VISUAL_PUB"]
+        C_SUB["Classification<br/>CONNECT 四个输入端口"]
+
+        H_PUB -->|"topic: asr"| C_SUB
+        M_PUB -->|"topic: text"| C_SUB
+        Q_PUB -->|"topic: qq"| C_SUB
+        V_PUB -->|"topic: visual"| C_SUB
+    end
+
+    subgraph CORE_PUB["汇聚与决策 PUB/SUB"]
+        C_PUB["Classification<br/>BIND CLASSIFICATION_PUB"]
+        T_SUB["Thinking<br/>CONNECT CLASSIFICATION_PUB"]
+        B_PUB["Bored Detector<br/>BIND BORED_PUB"]
+        SYS_PUB["Module Manager<br/>BIND fixed 5566"]
+
+        C_PUB -->|"classified / qq_log"| T_SUB
+        B_PUB -->|"bored"| T_SUB
+        SYS_PUB -->|"syscmd"| T_SUB
+    end
+
+    subgraph OUTPUT_PUB["输出 PUB/SUB"]
+        T_TEXT["Thinking<br/>BIND THINKING_TEXT_PUB"]
+        T_TTS["Thinking<br/>BIND THINKING_TTS_PUB"]
+        T_AUDIO["Thinking<br/>BIND AUDIO_PLAY_PUB"]
+        S_AUDIO["Speaking<br/>BIND TTS_AUDIO_PUB"]
+        D_SUB["Display<br/>CONNECT text / think / tts"]
+
+        T_TEXT -->|"text"| D_SUB
+        T_TTS -->|"think"| D_SUB
+        T_TTS -->|"think"| S_AUDIO
+        S_AUDIO -->|"tts"| D_SUB
+        T_AUDIO -->|"tts"| D_SUB
+    end
+
+    subgraph CONTROL_PUB["控制 PUB/SUB"]
+        D_CTRL["Display<br/>BIND CONTROL_PUB"]
+        T_CTRL["Thinking<br/>BIND CONTROL_PUB_THINKING"]
+        H_CTRL["Hearing<br/>CONNECT 两个控制端口"]
+        T_BUSY["Thinking<br/>CONNECT CONTROL_PUB"]
+
+        D_CTRL -->|"control: start/end"| H_CTRL
+        D_CTRL -->|"control: start/end"| T_BUSY
+        T_CTRL -->|"control: start/end"| H_CTRL
+    end
+
+    subgraph RPC["同步 REQ/REP"]
+        READY["Classification<br/>BIND MODULE_READY_REP"]
+        START_REP["Thinking<br/>BIND START_THINKING_REP"]
+        VIS_REP["Visual<br/>BIND VISUAL_REQREP"]
+        RAG_REP["RAG Server<br/>BIND RAG_SERVER_REQREP"]
+
+        MODULES["Display / Speaking / Visual<br/>RAG Server / Hearing"] -->|"REQ ready"| READY
+        READY -->|"REQ start"| START_REP
+        THINK_REQ["Thinking Tools"] -->|"REQ look"| VIS_REP
+        BORED_REQ["Bored Detector"] -->|"REQ look"| VIS_REP
+        MEM_REQ["Thinking Memory / QQ Buffer"] -->|"REQ method + params"| RAG_REP
+    end

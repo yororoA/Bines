@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> Listening
+    Listening --> Capturing: 能量超过阈值
+    Capturing --> Capturing: 持续累积音频
+    Capturing --> Recognizing: 达到句尾静默阈值
+    Recognizing --> Paused: 发布 asr 后主动暂停
+    Listening --> Paused: 收到 Thinking cough=start
+    Capturing --> Paused: 收到 Thinking cough=start
+    Paused --> Paused: Display cough=start / Thinking 处理中
+    Paused --> Listening: 收到 cough=end
+    Listening --> [*]: 进程退出

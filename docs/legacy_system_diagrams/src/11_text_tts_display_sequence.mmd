@@ -1,0 +1,42 @@
+sequenceDiagram
+    autonumber
+    participant T as Thinking.zmq_send
+    participant DQ as Display ZMQ Thread
+    participant UI as Display UI Thread
+    participant SQ as Speaking Queue
+    participant TW as TTS Worker
+    participant API as GPT-SoVITS /tts
+    participant AF as Audio Feeder
+    participant FF as ffplay
+    participant H as Hearing
+
+    T-)DQ: topic=text<br/>{text,lang,segment_index,cough}
+    DQ->>UI: add_text_segment_signal
+    opt cough == start
+        DQ->>UI: stop_audio_signal
+        UI->>AF: 清空上一轮流式队列
+    end
+    UI->>UI: 分段排队，等待对应音频后打字显示
+
+    T-)SQ: topic=think<br/>{reply_part,reply_lang,cough}
+    SQ->>SQ: tts_queue.put(text,lang,cough)
+    TW->>SQ: 串行取出一个文本片段
+    TW->>API: POST /tts streaming_mode=true
+
+    loop HTTP iter_content(8192)
+        API-->>TW: WAV bytes chunk
+        TW-)DQ: topic=tts<br/>{voice,streaming=true}
+        DQ->>AF: play_audio_chunk_signal
+        alt 当前无 ffplay
+            AF-)H: Display control cough=start
+            AF->>FF: 启动 ffplay -i pipe:0
+        end
+        AF->>FF: stdin.write(chunk)
+    end
+
+    API-->>TW: HTTP stream EOF
+    TW-)DQ: topic=tts<br/>{streaming_end=true,cough}
+    DQ->>AF: chunk empty, is_end=true
+    AF->>FF: close stdin + wait
+    AF-)H: Display control cough=end
+    UI->>UI: 完成当前文本段和角色状态

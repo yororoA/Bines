@@ -1,0 +1,11 @@
+flowchart LR
+    POLL["Thinking 空闲分支<br/>每约 3 秒检查"] --> READ["读取 analysis.txt"]
+    READ --> CHANGED{"内容相对上次推送有变化?"}
+    CHANGED -->|否| WAIT["等待下次"]
+    CHANGED -->|是| MODE{"GAME_MODE_ENABLED?"}
+    MODE -->|否| MARK["只更新 last_pushed_content"]
+    MODE -->|是| BUSY{"正在处理或正在播放?"}
+    BUSY -->|是| MARK
+    BUSY -->|否| SYNTH["构造 synthetic prompt<br/>请判断是否需要评论"]
+    SYNTH --> EXEC["executor.submit(process_message)"]
+    EXEC --> MAIN["MainAgent 可选择回复或沉默"]

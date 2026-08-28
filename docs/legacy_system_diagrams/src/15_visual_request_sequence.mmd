@@ -1,0 +1,32 @@
+sequenceDiagram
+    autonumber
+    participant CAM as Camera Main Loop
+    participant STATE as SharedState
+    participant CLIENT as Thinking Tool / Bored
+    participant REP as Visual recognition_loop
+    participant FACE as Face Model
+    participant VLM as DashScope VLM
+    participant C as Classification
+
+    loop 摄像头持续采集
+        CAM->>STATE: lock + latest_frame = frame.copy()
+    end
+
+    CLIENT->>REP: REQ {command=look,focus}
+    REP->>STATE: lock + copy latest_frame
+    alt 摄像头尚未就绪
+        REP-->>CLIENT: REP {status=error}
+    else 已有最新帧
+        REP->>REP: 可选 CLAHE 光照增强
+        REP->>FACE: face_identify(frame)
+        FACE-->>REP: faces + bounding boxes
+        REP->>REP: 绘制人脸框，JPEG quality=40
+        REP->>VLM: image_base64 + focus 原样作为 prompt
+        VLM-->>REP: scene_caption
+        REP->>REP: 与 previous_caption 做相似度判断
+        REP-->>CLIENT: REP faces/objects/gestures<br/>caption/image/status/is_repeated
+        opt 非重复结果
+            REP-)C: PUB visual<br/>同一份 vis_info
+            C->>C: latest_visual_info = vis_info
+        end
+    end

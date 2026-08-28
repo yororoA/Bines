@@ -1,0 +1,69 @@
+flowchart TB
+    subgraph CONTEXT["上下文构建"]
+        USER["当前 user_input<br/>时间戳 + source"]
+        PERM["PermanentMemory<br/>角色事实与规则"]
+        DYN["DynamicMemory<br/>关系 / 地点 / 物品 / 任务"]
+        STM["ShortTermMemory<br/>最近 25 轮"]
+        RAGCTX["RAG Recall<br/>Buffer Top5 + Diary Top3"]
+        QQCTX["QQ Recent History<br/>RAG + JSON Buffer"]
+        RT["Realtime Screen<br/>最新分析文件"]
+        VIS["Classification img_descr<br/>或按需 Visual Tool"]
+        POLICY["运行时策略<br/>QQ 白名单 / 管理员 / 双空格"]
+        PROMPT["messages[]"]
+
+        USER --> PROMPT
+        PERM --> PROMPT
+        DYN --> PROMPT
+        STM --> PROMPT
+        RAGCTX --> PROMPT
+        QQCTX --> PROMPT
+        RT --> PROMPT
+        VIS --> PROMPT
+        POLICY --> PROMPT
+    end
+
+    subgraph ROUTER["主模型路由层"]
+        MAIN["MainAgent<br/>DeepSeek streaming"]
+        DECISION{"本轮输出类型"}
+        TEXT["普通文本 token"]
+        ROUTER_CALL["原生 tool_calls"]
+        PROMPT --> MAIN --> DECISION
+        DECISION -->|content| TEXT
+        DECISION -->|tool_calls| ROUTER_CALL
+    end
+
+    subgraph ROUTER_TOOLS["主模型仅可见的工具"]
+        TIME["get_time"]
+        CALL_TOOL["call_tool_agent"]
+        CALL_SUMMARY["call_summary_agent"]
+        ROUTER_CALL --> TIME
+        ROUTER_CALL --> CALL_TOOL
+        ROUTER_CALL --> CALL_SUMMARY
+    end
+
+    subgraph TOOL_LAYER["ToolAgent 操作层"]
+        RELOAD["每次调用重读<br/>tool_agent_schema.json"]
+        SOURCE{"source == QQ?"}
+        FULL["启用的全量操作工具"]
+        QQALLOW["QQ 远程白名单"]
+        TOOLMODEL["ToolAgent<br/>最多 25 次工具迭代"]
+        REGISTRY["TOOLS_REGISTRY"]
+        REAL["屏幕 / 视觉 / 应用 / 键鼠<br/>浏览器 / 音乐 / QQ / Moments"]
+
+        CALL_TOOL --> RELOAD --> SOURCE
+        SOURCE -->|否| FULL --> TOOLMODEL
+        SOURCE -->|是| QQALLOW --> TOOLMODEL
+        TOOLMODEL --> REGISTRY --> REAL
+        REAL --> TOOLMODEL
+        TOOLMODEL -->|"final content + reasoning"| MAIN
+    end
+
+    subgraph SUMMARY_LAYER["状态更新层"]
+        SUMMARY["SummaryAgent"]
+        UPDATE["update_status"]
+        DYNAMIC_FILE["memory_dynamic.json"]
+        CALL_SUMMARY --> SUMMARY --> UPDATE --> DYNAMIC_FILE
+        SUMMARY -->|"tool result"| MAIN
+    end
+
+    TEXT --> STREAM["双空格分句<br/>Display + TTS / QQ"]

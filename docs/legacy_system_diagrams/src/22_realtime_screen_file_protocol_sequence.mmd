@@ -1,0 +1,42 @@
+sequenceDiagram
+    autonumber
+    participant UI as Module Manager
+    participant CFG as config.json
+    participant RS as Realtime Screen
+    participant CTX as context.json
+    participant SIG as flush.signal
+    participant VLM as DashScope VLM
+    participant OUT as analysis.txt
+    participant T as Thinking
+
+    UI->>CFG: 保存 enabled / interval / min_change_ratio
+    alt enabled=true 且进程未运行
+        UI->>RS: subprocess.Popen
+        RS->>RS: 写 PID 文件
+    else enabled=false
+        UI->>RS: SIGTERM
+    end
+
+    loop enabled 时按 interval_sec
+        RS->>CFG: 读取最新配置
+        RS->>CTX: 读取 user_input + assistant_output
+        RS->>SIG: 检查强制刷新 mtime
+        RS->>RS: mss 截图、缩放、pHash + 中心区变化率
+        alt 变化不足且无交互/强制刷新
+            RS->>RS: 跳过 VLM，保留已有 buffer
+        else 需要分析
+            RS->>VLM: 当前帧或三帧拼图 + 对话关注点
+            VLM-->>RS: 屏幕描述
+            RS->>RS: 追加带时间戳的 analysis_buffer
+        end
+
+        alt 用户输入 / 助手输出 / flush / 周期 / buffer 满
+            RS->>OUT: 覆盖写入汇总分析
+            RS->>RS: 清空 analysis_buffer
+        end
+    end
+
+    T->>CFG: 每次请求检查 enabled
+    T->>OUT: 读取最新分析
+    T->>T: 注入 system message
+    T->>CTX: 回复结束后写入本轮上下文

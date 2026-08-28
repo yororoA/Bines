@@ -1,0 +1,30 @@
+flowchart TD
+    TICK["每 10 秒 check_bored()"] --> ONLINE{"presence_state<br/>user_online?"}
+    ONLINE -->|否| STOP["本轮结束，不增长、不拉视觉"]
+    ONLINE -->|是| COOLDOWN{"已过 next_allowed_trigger_time?"}
+    COOLDOWN -->|否| STOP
+    COOLDOWN -->|是| RELOAD["按 mtime 刷新 short/dynamic/permanent"]
+    RELOAD --> HASMSG{"存在短期消息?"}
+    HASMSG -->|否| RESET_CLOCK["仅更新 last_check_time"]
+    HASMSG -->|是| NEWUSER{"最后一条是新用户消息?"}
+
+    NEWUSER -->|是| RESET["boredom = 0<br/>计算上次主动消息响应延迟"]
+    NEWUSER -->|否| GROW["boredom += delta_t * base_rate<br/>* relationship * sleep * hourly_weight"]
+    RESET --> BLOCK{"最近内容含结束语?"}
+    GROW --> BLOCK
+    BLOCK -->|是| SILENT["boredom = 0<br/>静默最多 4 小时"]
+    BLOCK -->|否| VISUAL_CHANCE{"boredom >= 20<br/>且命中 2% 视觉概率<br/>且距上次视觉 >= 180s?"}
+
+    VISUAL_CHANCE -->|是| LOOK["REQ Visual look"]
+    LOOK --> CHANGED{"物体或 caption<br/>相对上次有变化?"}
+    CHANGED -->|是| VIS_TRIGGER["boredom = 100<br/>记录 visual_stimulus"]
+    CHANGED -->|否| FULL{"boredom >= 100?"}
+    VISUAL_CHANCE -->|否| FULL
+    VIS_TRIGGER --> PUBLISH["PUB bored"]
+
+    FULL -->|否| STOP
+    FULL -->|是| JUDGE["DeepSeek bool 判断<br/>关系 / 时间 / 最近对话 / 心情"]
+    JUDGE -->|"False"| BACKOFF["boredom = 70<br/>冷却 5 分钟"]
+    JUDGE -->|"True"| PUBLISH
+    PUBLISH --> CD["按关系分 + 随机扰动<br/>计算 5 到 120 分钟冷却"]
+    CD --> THINK["Thinking bored subscriber"]

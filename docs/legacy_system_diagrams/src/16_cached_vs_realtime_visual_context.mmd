@@ -1,0 +1,18 @@
+flowchart TB
+    REQUEST["用户消息进入 Classification"] --> CACHE{"latest_visual_info 有内容?"}
+    CACHE -->|是| MERGE["拼接 faces / objects / gestures / caption"]
+    CACHE -->|否| EMPTY["img_descr 为空"]
+    MERGE --> SOURCE{"source == QQ?"}
+    SOURCE -->|否| CONSUME["清空视觉缓存<br/>一次性消费"]
+    SOURCE -->|是| KEEP["保留缓存<br/>QQ 不代表本机摄像头用户"]
+    CONSUME --> PROMPT1["作为 Cached Environment Analysis"]
+    KEEP --> PROMPT1
+    EMPTY --> PROMPT1
+
+    CURRENT["用户明确要求现在看"] --> TOOL["MainAgent -> call_tool_agent"]
+    TOOL --> LOOK["get_visual_info(focus)"]
+    LOOK --> REQ["VISUAL_REQREP 实时请求"]
+    REQ --> PROMPT2["把最新结果作为 tool message"]
+
+    PROMPT1 -.->|"可能过时"| MODEL["MainAgent"]
+    PROMPT2 ==>|"当前画面"| MODEL
