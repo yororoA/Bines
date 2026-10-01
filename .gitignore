@@ -55,10 +55,13 @@ ts_ai_sdk_gateway/.env.example
 *.env
 test/
 
+.workbuddy/
+
 memory_data/
 tests/
 # Local config backup may contain credentials
 config.py.bak
+thingking/models/
 
 # singing pipeline cache (default SINGING_WORK_DIR)
 singing/work/
