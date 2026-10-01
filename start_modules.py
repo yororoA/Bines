@@ -4,9 +4,8 @@ import os
 import sys
 import ctypes
 from ctypes import wintypes
-from config import ZMQ_PORTS
+from config import HTTP_HOST, HTTP_PORTS
 from process_registry import get_processes
-from port_cleanup import cleanup_ports
 from process_runtime import resolve_process_command
 
 # Define modules and their venv pythons
@@ -16,13 +15,13 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONSOLE_WIDTH = 60   # 窗口宽度（字符数），可以调整：60-120
 CONSOLE_HEIGHT = 25  # 窗口高度（行数），可以调整：20-50
 
-# 启动顺序：Classification 最先启动（先监听 MODULE_READY_REP）；
+# 启动顺序：ZMQ Bus 最先启动，随后 Classification 监听 MODULE_READY_REP；
 # 然后 Display/Speaking/Visual/RAG Server/Hearing 启动并就绪后向 Classification 上报；
 # Classification 收齐后通知 Thinking，Thinking 最后启动（上线通知、摘要/日记等）。
 # 控制台模式使用 display.py。
 PROCESSES = get_processes(display_script="display.py")
 
-processes = []
+processes = {}
 
 def set_console_size(pid, width=80, height=30):
     """
@@ -90,10 +89,17 @@ def set_console_size(pid, width=80, height=30):
         return False
 
 def start_process(config):
-    print(f"Starting {config['name']}...")
+    name = config['name']
+    existing = processes.get(name)
+    if existing is not None and existing.poll() is None:
+        print(f"{name} is already running (PID: {existing.pid})")
+        return existing
+
+    processes.pop(name, None)
+    print(f"Starting {name}...")
     try:
         if 'command' not in config and not os.path.exists(config['interpreter']):
-             print(f"Warning: Interpreter not found for {config['name']}: {config['interpreter']}")
+             print(f"Warning: Interpreter not found for {name}: {config['interpreter']}")
         cmd = resolve_process_command(config)
 
         # CREATE_NEW_CONSOLE = 16
@@ -102,15 +108,17 @@ def start_process(config):
             cwd=config['cwd'],
             creationflags=subprocess.CREATE_NEW_CONSOLE
         )
-        processes.append(p)
-        print(f"{config['name']} started (PID: {p.pid})")
+        processes[name] = p
+        print(f"{name} started (PID: {p.pid})")
         
         # 等待窗口创建，然后设置窗口大小
         time.sleep(0.3)  # 给窗口一点时间创建
         # 设置窗口大小（使用配置的值）
         set_console_size(p.pid, width=CONSOLE_WIDTH, height=CONSOLE_HEIGHT)
     except Exception as e:
-        print(f"Failed to start {config['name']}: {e}")
+        print(f"Failed to start {name}: {e}")
+        return None
+    return p
 
 if __name__ == "__main__":
     import argparse
@@ -137,11 +145,11 @@ if __name__ == "__main__":
             import webbrowser
             from server.module_manager import app
             
-            MANAGER_URL = "http://127.0.0.1:5000"
+            MANAGER_URL = f"http://{HTTP_HOST}:{HTTP_PORTS['MODULE_MANAGER']}"
             ready = threading.Event()
             
             def run_flask():
-                app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)
+                app.run(host=HTTP_HOST, port=HTTP_PORTS["MODULE_MANAGER"], debug=False, threaded=True, use_reloader=False)
             
             server_thread = threading.Thread(target=run_flask, daemon=False)
             server_thread.start()
@@ -160,13 +168,13 @@ if __name__ == "__main__":
             
             if ready.is_set():
                 print("✅ 模块管理服务器已就绪")
-                print("📱 访问 http://localhost:5000 查看管理界面")
+                print(f"📱 访问 {MANAGER_URL} 查看管理界面")
                 try:
                     webbrowser.open(MANAGER_URL)
                 except Exception:
                     pass
             else:
-                print("⚠️ 服务启动较慢，请稍后手动访问 http://localhost:5000")
+                print(f"⚠️ 服务启动较慢，请稍后手动访问 {MANAGER_URL}")
             print("=" * 60)
             
             server_thread.join()
@@ -180,10 +188,6 @@ if __name__ == "__main__":
         os.environ["NO_PROXY"] = "localhost,127.0.0.1"
         
         print("Starting ATRI System Modules via ZMQ...")
-        
-        # 【优化】清理所有ZMQ使用的端口，防止 Address in use 错误
-        # 端口列表来自全局配置 ZMQ_PORTS
-        cleanup_ports(list(ZMQ_PORTS.values()))
         
         for p_conf in PROCESSES:
             start_process(p_conf)

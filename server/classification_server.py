@@ -12,7 +12,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import ZMQ_HOST, ZMQ_PORTS
+from common.zmq_bus import create_publisher, create_subscriber
 from common.zmq_rpc import zmq_req_string
+from process_registry import THINKING_STARTUP_DEPENDENCIES
 
 # --- 关键修复 ---
 if sys.platform.startswith('win'):
@@ -27,37 +29,17 @@ sys.excepthook = exception_hook
 # ZMQ Context
 context = zmq.Context()
 
-# SUB: 接收 ASR
-sub_asr = context.socket(zmq.SUB)
-sub_asr.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['HEARING_ASR_PUB']}")
-sub_asr.setsockopt_string(zmq.SUBSCRIBE, "asr")
+# SUB: all input topics share the local bus
+sub_asr = create_subscriber(context, "asr", label="Classification ASR")
+sub_text = create_subscriber(context, "text", label="Classification manual text")
+sub_qq = create_subscriber(context, "qq", label="Classification QQ")
 
-# SUB: 接收 Manual Text Input
-sub_text = context.socket(zmq.SUB)
-sub_text.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['MANUAL_TEXT_PUB']}")
-sub_text.setsockopt_string(zmq.SUBSCRIBE, "") # Topic: "text" -> Receive all and filter later
-
-# SUB: 接收 Visual
-sub_vis = context.socket(zmq.SUB)
-sub_vis.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['VISUAL_PUB']}")
-sub_vis.setsockopt_string(zmq.SUBSCRIBE, "visual")
-
-# SUB: 接收 QQ 消息
-QQ_PUB_PORT = ZMQ_PORTS.get('QQ_PUB', 5588)
-sub_qq = context.socket(zmq.SUB)
-try:
-    sub_qq.connect(f"tcp://{ZMQ_HOST}:{QQ_PUB_PORT}")
-    sub_qq.setsockopt_string(zmq.SUBSCRIBE, "qq")
-except Exception as e:
-    print(f"Warning: Failed to connect to QQ PUB: {e}")
-
-# PUB: 发送处理后的结果给 Thinking
-pub_res = context.socket(zmq.PUB)
-pub_res.bind(f"tcp://*:{ZMQ_PORTS['CLASSIFICATION_PUB']}")
+# PUB: forward classified input to Thinking through the local bus
+pub_res = create_publisher(context, label="Classification")
 zmq_lock = threading.Lock()
 
 # 除 Thinking 外需上报就绪的模块（与 start_modules.py 中名称一致）
-EXPECTED_MODULES = {"Display", "Speaking", "Visual", "RAG Server", "Hearing"}
+EXPECTED_MODULES = set(THINKING_STARTUP_DEPENDENCIES)
 latest_visual_info = {"faces": [], "objects": [], "gestures": []}
 
 
@@ -114,6 +96,7 @@ def module_ready_collector():
 
 def visual_listener():
     global latest_visual_info
+    sub_vis = create_subscriber(context, "visual", label="Classification visual")
     print("Visual Listener started...", flush=True)
     while True:
         try:
@@ -160,7 +143,7 @@ def process_and_forward(user_input, source="ASR", extra_data=None):
     with zmq_lock:
         pub_res.send_multipart([b"classified", json.dumps(final_payload).encode('utf-8')])
 
-def classification_loop():
+def classification_loop(stop_event=None):
     print("Classification Module Loop started (Poller Mode)...", flush=True)
     
     poller = zmq.Poller()
@@ -168,7 +151,7 @@ def classification_loop():
     poller.register(sub_text, zmq.POLLIN)
     poller.register(sub_qq, zmq.POLLIN) # 注册 QQ socket
     
-    while True:
+    while stop_event is None or not stop_event.is_set():
         try:
             # 【修复】减少poll超时时间到10ms，提高响应速度
             socks = dict(poller.poll(10)) # 10ms timeout

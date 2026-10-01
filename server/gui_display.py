@@ -57,6 +57,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import ZMQ_HOST, ZMQ_PORTS
+from common.zmq_bus import create_publisher, create_subscriber
 
 # ============================
 # 路径配置
@@ -90,42 +91,25 @@ class ZmqManager(QThread):
         super().__init__()
         self.context = zmq.Context()
         self.running = True
-        
-        # PUB Socket (发送控制信号)
-        self.pub_socket = self.context.socket(zmq.PUB)
-        self.pub_socket.bind(f"tcp://*:{ZMQ_PORTS['CONTROL_PUB']}")
-        self.pub_lock = threading.Lock()
+        self.control_queue = queue.Queue()
+        self._context_terminated = False
 
     def send_control(self, status):
-        """发送控制信号 (start/end)"""
-        try:
-            data = {"cough": status}
-            with self.pub_lock:
-                self.pub_socket.send_multipart([b"control", json.dumps(data).encode('utf-8')])
-        except Exception as e:
-            print(f"⚠️ ZMQ Send Error: {e}")
+        """Queue a control signal for the ZMQ thread that owns the PUB socket."""
+        self.control_queue.put(status)
 
     def run(self):
-        # SUB Socket (接收数据)
-        sub_socket = self.context.socket(zmq.SUB)
-        sub_socket_audio_play = self.context.socket(zmq.SUB)  # sing 工具等本地音频
+        pub_socket = None
+        sub_socket = None
         try:
-            sub_socket.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['TTS_AUDIO_PUB']}")   # TTS音频输出
-            sub_socket.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['THINKING_TEXT_PUB']}")  # Thinking文本输出
-            sub_socket.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['THINKING_TTS_PUB']}")   # Thinking音频请求/翻译
-            sub_socket.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['HEARING_ASR_PUB']}")    # Hearing ASR输出
-            sub_socket.setsockopt_string(zmq.SUBSCRIBE, "tts")      # 音频（来自TTS）
-            sub_socket.setsockopt_string(zmq.SUBSCRIBE, "text")     # 文本（直接来自thinking）
-            sub_socket.setsockopt_string(zmq.SUBSCRIBE, "think")    # 翻译等
-            sub_socket.setsockopt_string(zmq.SUBSCRIBE, "asr")      # ASR输出
-
-            if "AUDIO_PLAY_PUB" in ZMQ_PORTS:
-                sub_socket_audio_play.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['AUDIO_PLAY_PUB']}")
-                sub_socket_audio_play.setsockopt_string(zmq.SUBSCRIBE, "tts")
+            # Both sockets are created and used only on this QThread.
+            pub_socket = create_publisher(self.context, label="Display control")
+            sub_socket = create_subscriber(
+                self.context, "tts", "text", "think", "asr", label="Display"
+            )
 
             poller = zmq.Poller()
             poller.register(sub_socket, zmq.POLLIN)
-            poller.register(sub_socket_audio_play, zmq.POLLIN)
             
             print("🚀 ZMQ Listening...", flush=True)
             try:
@@ -135,11 +119,24 @@ class ZmqManager(QThread):
                 print(f"[Display] 就绪上报失败: {e}", flush=True)
             
             while self.running:
+                while True:
+                    try:
+                        status = self.control_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        payload = {"cough": status}
+                        pub_socket.send_multipart(
+                            [b"control", json.dumps(payload).encode("utf-8")]
+                        )
+                    except Exception as e:
+                        print(f"⚠️ ZMQ Send Error: {e}")
+                    finally:
+                        self.control_queue.task_done()
+
                 # 使用 poll 设置超时，保证线程可以响应退出信号
                 socks = dict(poller.poll(100))
                 for sock, _ in list(socks.items()):
-                    if sock != sub_socket and sock != sub_socket_audio_play:
-                        continue
                     try:
                         topic, msg = sock.recv_multipart()
                         topic_str = topic.decode('utf-8')
@@ -147,16 +144,7 @@ class ZmqManager(QThread):
                     except Exception as e:
                         print(f"ZMQ Message Error: {e}")
                         continue
-                    # 来自 AUDIO_PLAY_PUB（sing 工具）的只有 tts，仅做播放
-                    if sock == sub_socket_audio_play:
-                        if topic_str == "tts" and data.get("voice"):
-                            try:
-                                audio_data = base64.b64decode(data["voice"])
-                                self.play_audio_signal.emit(audio_data)
-                            except Exception as e:
-                                print(f"Decode/play error (audio_play): {e}")
-                        continue
-                    # 主 SUB：TTS / 文本 / think / asr
+                    # 单一总线订阅接收 TTS、文本、think 与 ASR；sing 音频也走 tts topic。
                     if topic_str == "tts":
                         # 【重构】TTS只发送音频，不包含文本
                         # 文本已由thinking模块直接发送到display
@@ -226,18 +214,21 @@ class ZmqManager(QThread):
             print(f"ZMQ Connection Error: {e}")
         finally:
             print("⚠️ ZMQ Receiver thread exiting...")
-            sub_socket.close()
-            sub_socket_audio_play.close()
+            if sub_socket is not None:
+                sub_socket.close()
+            if pub_socket is not None:
+                pub_socket.close()
+            self.context.term()
+            self._context_terminated = True
 
     def close_all(self):
         """清理 ZMQ 资源"""
         self.running = False
-        try:
-            self.pub_socket.close()
+        if self.isRunning():
+            self.wait(3000)
+        if not self._context_terminated:
             self.context.term()
-            print("✅ ZMQ Context Destroyed")
-        except Exception as e:
-            print(f"Error destroying context: {e}")
+            self._context_terminated = True
 
 # ============================
 # 后台逻辑：音频播放线程

@@ -4,10 +4,18 @@ import traceback
 from pathlib import Path
 
 # --- 防闪退补丁 ---
-def exception_hook(type, value, tb):
-    print("!!! Uncaught Exception !!!")
-    traceback.print_exception(type, value, tb)
-    input("Press Enter to exit...")
+def exception_hook(exc_type, exc_value, exc_tb):
+    print("!!! Uncaught Exception !!!", file=sys.stderr, flush=True)
+    traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+    sys.stderr.flush()
+    # The Web manager starts children with stdin=DEVNULL. Only pause when an
+    # interactive console is actually available; otherwise preserve the error
+    # and let the process exit normally.
+    if sys.stdin is not None and sys.stdin.isatty():
+        try:
+            input("Press Enter to exit...")
+        except EOFError:
+            pass
 sys.excepthook = exception_hook
 # -----------------
 
@@ -25,28 +33,26 @@ import time
 import json
 import zmq
 from voiceprint import VoiceprintManager
-from config import ZMQ_HOST, ZMQ_PORTS
+from config import (
+    HEARING_ASR_DEVICE,
+    HEARING_ASR_MODEL,
+    HEARING_ASR_MODEL_REVISION,
+    HEARING_BEAM_SIZE,
+    HEARING_LM_MODEL,
+    HEARING_LM_MODEL_REVISION,
+    HEARING_LM_WEIGHT,
+    HEARING_PUNC_MODEL,
+    HEARING_PUNC_MODEL_REVISION,
+    HEARING_VAD_MODEL,
+)
+from common.zmq_bus import create_publisher, create_subscriber
 
 # --- ZMQ 配置 ---
 context = zmq.Context()
 
 # PUB: 发送 ASR 结果
 # topic: "asr"
-pub_socket = context.socket(zmq.PUB)
-# 【修复】设置LINGER为0，确保消息立即发送，不等待连接建立
-pub_socket.setsockopt(zmq.LINGER, 0)
-# 【修复】设置IMMEDIATE为1，确保消息立即发送，不等待连接建立
-pub_socket.setsockopt(zmq.IMMEDIATE, 1)
-pub_socket.bind(f"tcp://*:{ZMQ_PORTS['HEARING_ASR_PUB']}")
-
-# SUB: 接收控制信号 (来自 Display / Thinking)
-# topic: "control"
-sub_socket = context.socket(zmq.SUB)
-# Display 控制信号（播放音频时暂停 / 结束后恢复）
-sub_socket.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['CONTROL_PUB']}")
-# Thinking 专用控制信号端口（避免与 Display / 手动输入冲突）
-sub_socket.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['CONTROL_PUB_THINKING']}")
-sub_socket.setsockopt_string(zmq.SUBSCRIBE, "control")
+pub_socket = create_publisher(context, label="Hearing ASR")
 
 def send_payload(text):
     try:
@@ -77,6 +83,7 @@ IS_PAUSED_LOCK = threading.Lock()  # 【修复】添加锁保护IS_PAUSED变量
 def control_listener():
     global IS_PAUSED
     print("ZMQ Control Listener started...")
+    sub_socket = create_subscriber(context, "control", label="Hearing control")
     while True:
         try:
             topic, msg = sub_socket.recv_multipart()
@@ -122,7 +129,7 @@ except FileNotFoundError:
 # MODEL_NAME = 'iic/SenseVoiceSmall'
 # 方案C: Paraformer-Large-Contextual + LM (高精度 + 热词增强 + 语言模型纠错)
 # 注意：标准版 Paraformer 不支持热词，必须使用 Contextual 版本
-MODEL_NAME = 'iic/speech_paraformer-large-contextual_asr_nat-zh-cn-16k-common-vocab8404'
+MODEL_NAME = HEARING_ASR_MODEL
 
 print(f"正在加载 ASR 模型: {MODEL_NAME} ...")
 
@@ -130,7 +137,7 @@ if MODEL_NAME == 'paraformer-zh-streaming':
     # 流式模型初始化
     model = funasr.AutoModel(
         model=MODEL_NAME,
-        device="cuda",
+        device=HEARING_ASR_DEVICE,
         disable_update=True,
         verbose=False
     )
@@ -138,10 +145,10 @@ elif MODEL_NAME == 'iic/SenseVoiceSmall':
     # SenseVoiceSmall 初始化
     model = funasr.AutoModel(
         model=MODEL_NAME,
-        device="cuda",
+        device=HEARING_ASR_DEVICE,
         disable_update=True,
         verbose=False,
-        vad_model="fsmn-vad",
+        vad_model=HEARING_VAD_MODEL,
         vad_kwargs={"max_single_segment_time": 30000},
     )
 else:
@@ -149,14 +156,14 @@ else:
     print("正在加载语言模型 (LM) 用于纠错...")
     model = funasr.AutoModel(
         model=MODEL_NAME,
-        model_revision="v2.0.4",
+        model_revision=HEARING_ASR_MODEL_REVISION,
         # 外挂语言模型
-        lm_model="iic/speech_transformer_lm_zh-cn-common-vocab8404-pytorch",
-        lm_model_revision="v2.0.4",
-        lm_weight=0.15,  # 语言模型权重
-        beam_size=10,  # 束搜索宽度，越大越准但越慢
+        lm_model=HEARING_LM_MODEL,
+        lm_model_revision=HEARING_LM_MODEL_REVISION,
+        lm_weight=HEARING_LM_WEIGHT,
+        beam_size=HEARING_BEAM_SIZE,
         
-        device="cuda",
+        device=HEARING_ASR_DEVICE,
         disable_update=True,
         verbose=False,
     )
@@ -167,10 +174,13 @@ if MODEL_NAME == 'iic/SenseVoiceSmall':
 else:
     print("正在加载 PUNC 模型...")
     punc_model = funasr.AutoModel(
-        model="ct-punc",
-        model_revision="v2.0.4",
+        model=HEARING_PUNC_MODEL,
+        model_revision=HEARING_PUNC_MODEL_REVISION,
         disable_update=True,
-        verbose=False
+        verbose=False,
+        # The bundled Jieba user dictionary intermittently crashes while loading
+        # under this runtime; punctuation inference works without the extra dictionary.
+        jieba_usr_dict=None,
     )
 
 # 2. 音频配置

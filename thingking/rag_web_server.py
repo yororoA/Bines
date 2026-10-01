@@ -10,6 +10,11 @@ import time
 import datetime
 from flask import Flask, request, jsonify, send_from_directory, Response
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from config import HTTP_HOST, HTTP_PORTS
+
 # 与 rag_server_core 一致：一天以 04:00 为界
 DAY_START_HOUR = 4
 
@@ -1066,8 +1071,8 @@ if __name__ == '__main__':
     print("="*60)
     print("RAG 记忆图形化管理工具 - Web 服务器")
     print("="*60)
-    # 注意：模块管理控制台已占用 5000 端口，因此本工具使用 5001 端口以避免冲突
-    print("访问 http://localhost:5001 使用 RAG 记忆图形化界面")
+    rag_url = f"http://{HTTP_HOST}:{HTTP_PORTS['RAG_MEMORY']}"
+    print(f"访问 {rag_url} 使用 RAG 记忆图形化界面")
     print("="*60)
     
     # 确保静态文件目录存在
@@ -1075,4 +1080,4 @@ if __name__ == '__main__':
     if not os.path.exists(static_dir):
         os.makedirs(static_dir)
     
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host=HTTP_HOST, port=HTTP_PORTS["RAG_MEMORY"], debug=False, use_reloader=False)

@@ -15,6 +15,10 @@ def build_python_runtime_env(base_env: Dict[str, str] = None) -> Dict[str, str]:
     """构造统一的 Python 子进程环境（UTF-8 输出）。"""
     env = dict(base_env or os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
+    # Web 管理器用 PIPE 收集子进程日志；无缓冲输出可让启动异常立即显示。
+    env["PYTHONUNBUFFERED"] = "1"
+    # Include Python stack traces for native faults in child processes.
+    env["PYTHONFAULTHANDLER"] = "1"
     if sys.platform == "win32":
         env["PYTHONUTF8"] = "1"
     return env

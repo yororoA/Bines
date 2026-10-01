@@ -19,7 +19,7 @@ PROJECT_ROOT = ensure_project_root(__file__, 2)
 from config import ZMQ_HOST, ZMQ_PORTS
 
 # 为 RAG 服务预留的 REQ/REP 端口（在 config.py 中配置）
-RAG_SERVER_PORT = ZMQ_PORTS.get("RAG_SERVER_REQREP", 5560)
+RAG_SERVER_PORT = ZMQ_PORTS["RAG_SERVER_REQREP"]
 
 
 def _call_rag_server(method: str, params: Optional[Dict[str, Any]] = None, timeout_ms: int = 15000) -> Dict[str, Any]:

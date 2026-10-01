@@ -30,7 +30,7 @@ from config import ZMQ_HOST, ZMQ_PORTS  # type: ignore
 from rag_server_core import RAGMemory  # type: ignore
 
 
-RAG_SERVER_PORT = ZMQ_PORTS.get("RAG_SERVER_REQREP", 5560)
+RAG_SERVER_PORT = ZMQ_PORTS["RAG_SERVER_REQREP"]
 
 
 class RAGServer:

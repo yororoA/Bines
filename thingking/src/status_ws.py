@@ -40,8 +40,7 @@ def _status_ws_worker(base_url: str, secret_token: str):
         url = _bines_status_ws_url(base_url, secret_token)
         if not url:
             print("[Thinking] MOMENTS_API_BASE_URL 未配置，跳过状态 WebSocket", flush=True)
-            time.sleep(10)
-            continue
+            return
 
         try:
             print(f"[Thinking] 尝试建立状态 WebSocket: {url.split('?')[0]}", flush=True)

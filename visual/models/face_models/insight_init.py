@@ -1,4 +1,5 @@
 from insightface.app import FaceAnalysis
+from config import VISUAL_FACE_MODEL
 
 # 全局单例模型加载
 _app = None
@@ -23,19 +24,19 @@ def load_insightface_model():
             available_providers = ort.get_available_providers()
             if 'CUDAExecutionProvider' in available_providers:
                 # 使用 GPU 0，配置 ONNX Runtime 使用 device_id=0
-                app = FaceAnalysis(name='buffalo_l', providers=[('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider'])
+                app = FaceAnalysis(name=VISUAL_FACE_MODEL, providers=[('CUDAExecutionProvider', {'device_id': 0}), 'CPUExecutionProvider'])
                 # ctx_id=0 表示使用第一张 NVIDIA 显卡 (GPU 0)
                 app.prepare(ctx_id=0, det_size=(640, 640))
                 print("InsightFace 已配置使用 GPU 0")
             else:
                 # CUDA 不可用，使用 CPU
-                app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+                app = FaceAnalysis(name=VISUAL_FACE_MODEL, providers=['CPUExecutionProvider'])
                 app.prepare(ctx_id=-1, det_size=(640, 640))
                 print("InsightFace 已配置使用 CPU (CUDA 不可用)")
         except Exception as e:
             # 如果出错，回退到 CPU
             print(f"警告: GPU 初始化失败，回退到 CPU: {e}")
-            app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+            app = FaceAnalysis(name=VISUAL_FACE_MODEL, providers=['CPUExecutionProvider'])
             app.prepare(ctx_id=-1, det_size=(640, 640))
         _app = app
         print("InsightFace 模型加载完成。")

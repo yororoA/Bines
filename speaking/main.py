@@ -6,20 +6,15 @@ import time
 import queue
 from tts import tts_generate, tts_generate_streaming
 from config import ZMQ_HOST, ZMQ_PORTS
+from common.zmq_bus import create_publisher, create_subscriber
 
 # --- ZMQ 配置 ---
 context = zmq.Context()
 
-# PUB: 发送音频数据 (避免与Thinking的文本端口冲突)
-# topic: "tts"
-pub_socket = context.socket(zmq.PUB)
-pub_socket.bind(f"tcp://*:{ZMQ_PORTS['TTS_AUDIO_PUB']}")
-
 # SUB: 接收 Thinking 结果
 # topic: "think"
-sub_socket = context.socket(zmq.SUB)
-sub_socket.connect(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['THINKING_TTS_PUB']}")
-sub_socket.setsockopt_string(zmq.SUBSCRIBE, "think")
+sub_socket = create_subscriber(context, "think", label="Speaking input")
+_outbound_pub_queue = queue.Queue()
 
 def send_to_display_pub(text, audio_data, cough=None, is_streaming_chunk=False, is_streaming_end=False):
     """
@@ -49,17 +44,31 @@ def send_to_display_pub(text, audio_data, cough=None, is_streaming_chunk=False, 
         if is_streaming_end:
             data['streaming_end'] = True
             
-        # 发送: topic="tts", payload=json
-        pub_socket.send_multipart([b"tts", json.dumps(data).encode('utf-8')])
+        # 发布 socket 由专用线程持有，避免 TTS 与监听线程共享 ZeroMQ socket。
+        _outbound_pub_queue.put([b"tts", json.dumps(data).encode('utf-8')])
         
         log_text = text[:10] + "..." if text else "[Empty Text]"
         if is_streaming_chunk:
             print(f"📤 PUB tts chunk | AudioLen: {len(audio_b64)}", end='\r')
         else:
-            print(f"✅ PUB tts | Text: {log_text} | Cough: {cough} | AudioLen: {len(audio_b64)}")
+            print(f"📥 Queued tts | Text: {log_text} | Cough: {cough} | AudioLen: {len(audio_b64)}")
 
     except Exception as e:
         print(f"❌ Failed to PUB tts: {e}")
+
+
+def publisher_worker():
+    """Own the PUB socket and serialize all TTS/control output from local threads."""
+    pub_context = zmq.Context()
+    pub_socket = create_publisher(pub_context, label="Speaking audio")
+    while True:
+        frames = _outbound_pub_queue.get()
+        try:
+            pub_socket.send_multipart(frames)
+        except Exception as e:
+            print(f"❌ Failed to PUB tts: {e}")
+        finally:
+            _outbound_pub_queue.task_done()
 
 # TTS任务队列：每个文本片段都异步合成音频
 tts_queue = queue.Queue()
@@ -112,6 +121,10 @@ def tts_worker():
             print(f"TTS Worker Error: {e}")
             time.sleep(0.5)
 
+# 启动总线发布线程；PUB socket 仅在该线程中创建和使用。
+publisher_thread = threading.Thread(target=publisher_worker, daemon=True)
+publisher_thread.start()
+
 # 启动TTS工作线程
 tts_thread = threading.Thread(target=tts_worker, daemon=True)
 tts_thread.start()
@@ -134,6 +147,11 @@ def zmq_listener():
             reply_part = data.get('reply_part', "")
             reply_lang = data.get('reply_lang')
             cough = data.get('cough')
+
+            print(
+                f"[Speaking] 收到 Thinking 消息: chars={len(reply_part or '')}, cough={cough}",
+                flush=True,
+            )
             
             if (reply_part and reply_lang) or cough:
                 # 【修复】更新当前语言，加锁保护

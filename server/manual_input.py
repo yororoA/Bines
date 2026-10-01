@@ -10,6 +10,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import ZMQ_HOST, ZMQ_PORTS
+from common.zmq_bus import create_publisher
 
 # --- Windows Encoding Fix ---
 if sys.platform.startswith('win'):
@@ -19,16 +20,13 @@ if sys.platform.startswith('win'):
         pass
 # ----------------------------
 
-PORT = ZMQ_PORTS["MANUAL_TEXT_PUB"]
 TOPIC = "text"
 
 def main():
     context = zmq.Context()
-    socket = context.socket(zmq.PUB)
-    socket.bind(f"tcp://*:{PORT}")
-    # socket.bind(f"tcp://{ZMQ_HOST}:{PORT}")
+    socket = create_publisher(context, label="manual input")
     
-    print(f"Manual Input Module Started on Port {PORT}")
+    print("Manual Input Module connected to the local ZMQ bus")
     print("Waiting for subscribers to connect...")
     time.sleep(1) # Wait for connection
     

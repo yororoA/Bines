@@ -12,16 +12,16 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from chatBot.napcat_client import NapCatClient
-from chatBot.config import ONEBOT_WS_URL, ONEBOT_ACCESS_TOKEN, ZMQ_PUB_PORT, BOT_QQ_ID, ADMIN_QQ_LIST
+from chatBot.config import ONEBOT_WS_URL, ONEBOT_ACCESS_TOKEN, BOT_QQ_ID, ADMIN_QQ_LIST
+from common.zmq_bus import create_publisher
 
 def main():
     print(f"[ChatBot] Starting NapCatQQ Client...", flush=True)
     
     # 1. 初始化 ZMQ 发布者
     context = zmq.Context()
-    pub_socket = context.socket(zmq.PUB)
-    pub_socket.bind(f"tcp://*:{ZMQ_PUB_PORT}")
-    print(f"[ChatBot] ZMQ PUB bound to port {ZMQ_PUB_PORT}", flush=True)
+    pub_socket = create_publisher(context, label="ChatBot")
+    print("[ChatBot] ZMQ PUB connected to local bus", flush=True)
 
     # 2. 初始化 NapCat 客户端
     client = NapCatClient(ws_url=ONEBOT_WS_URL, token=ONEBOT_ACCESS_TOKEN)

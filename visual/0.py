@@ -6,7 +6,6 @@ import requests
 import base64
 import time
 import json
-import os
 from pathlib import Path
 
 # --- 防闪退补丁 ---
@@ -26,7 +25,14 @@ from models.face_models.face_recognise import face_identify
 from models.face_models.face_recognise import face_input
 from models.face_models.face_recognise import face_find
 from models.face_models.face_recognise import load_embeddings, save_embeddings
-from config import ZMQ_PORTS
+from config import (
+    DASHSCOPE_API_KEY,
+    DASHSCOPE_API_TIMEOUT,
+    DASHSCOPE_API_URL,
+    DASHSCOPE_VISION_MODEL,
+    ZMQ_PORTS,
+)
+from common.zmq_bus import create_publisher
 from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
 # from models.object_models.object_recognise_onnx import ObjectDetector
 # from models.gesture_models.gesture import HandInteractionSystem
@@ -109,14 +115,6 @@ def camera_model():
     import json
     import time
     import base64
-    context = zmq.Context()
-    # PUB: 发送视觉感知信息
-    vis_socket = context.socket(zmq.PUB)
-    vis_socket.bind(f"tcp://*:{ZMQ_PORTS['VISUAL_PUB']}")
-    
-    # REP: 响应 Thinking 的主动调用
-    rep_socket = context.socket(zmq.REP)
-    rep_socket.bind(f"tcp://*:{ZMQ_PORTS['VISUAL_REQREP']}")
 
     last_send_time = 0
 
@@ -128,7 +126,7 @@ def camera_model():
     if not cap.isOpened():
         print("Error: Could not open camera.")
         exit()
-        
+
     # --- 3. 多线程变量 ---
     # 用于在主线程(显示)和子线程(计算)之间共享数据
     class SharedState:
@@ -140,7 +138,9 @@ def camera_model():
             self.lock = threading.Lock()  # 线程锁
 
     state = SharedState()
-    
+    server_ready = threading.Event()
+    server_start_error = []
+
     # --- DashScope VLM 调用 ---
     def call_dashscope_vlm(image_b64, focus_question=None):
         # 根据是否有 focus_question 生成提示词
@@ -154,10 +154,10 @@ def camera_model():
         result = _call_dashscope_vlm(
             image_b64,
             prompt_text,
-            api_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-            api_key=os.environ.get("DASHSCOPE_API_KEY"),
-            model="qwen3-vl-flash",
-            timeout=10,
+            api_url=DASHSCOPE_API_URL,
+            api_key=DASHSCOPE_API_KEY,
+            model=DASHSCOPE_VISION_MODEL,
+            timeout=DASHSCOPE_API_TIMEOUT,
             proxies={"http": None, "https": None},
             missing_key_message="",
             empty_message="",
@@ -170,12 +170,32 @@ def camera_model():
 
     # --- 4. 定义后台识别/服务线程 ---
     def recognition_loop():
+        context = zmq.Context()
+        vis_socket = None
+        rep_socket = None
+        try:
+            # The recognition thread owns both ZMQ sockets for their full lifetime.
+            vis_socket = create_publisher(context, label="Visual")
+            rep_socket = context.socket(zmq.REP)
+            rep_socket.setsockopt(zmq.LINGER, 0)
+            rep_socket.setsockopt(zmq.RCVTIMEO, 250)
+            rep_socket.bind(f"tcp://*:{ZMQ_PORTS['VISUAL_REQREP']}")
+        except Exception as e:
+            server_start_error.append(e)
+            server_ready.set()
+            if rep_socket is not None:
+                rep_socket.close(linger=0)
+            if vis_socket is not None:
+                vis_socket.close(linger=0)
+            context.term()
+            return
+        server_ready.set()
         print("后台识别服务已启动 (等待指令模式)")
         nonlocal last_send_time
-        
+
         # 创建 CLAHE 对象 (用于光照增强)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        
+
         current_caption = ""
         previous_caption = ""  # 存储上一次的场景描述
         caption_similarity_threshold = 0.7  # 相似度阈值，超过此值认为内容重复
@@ -198,130 +218,145 @@ def camera_model():
             desc = call_dashscope_vlm(b64, focus_question)
             return desc if desc else ""
 
-        while state.running:
-            # === 改动点: 阻塞等待 ZMQ 请求 ===
-            try:
-                # 接收指令，支持 JSON 格式（包含 focus 参数）或字符串格式（兼容旧版本）
-                # REP socket 是阻塞式的，会一直等待直到收到消息
-                # 先接收原始消息
-                msg_bytes = rep_socket.recv()
-                
-                # 尝试解析为 JSON
+        try:
+            while state.running:
+                # === 改动点: 阻塞等待 ZMQ 请求 ===
                 try:
-                    request_data = json.loads(msg_bytes.decode('utf-8'))
-                    message = request_data.get("command", "look")
-                    focus_question = request_data.get("focus", None)
-                except (json.JSONDecodeError, TypeError, UnicodeDecodeError, AttributeError):
-                    # 如果不是 JSON，尝试作为字符串解析（兼容旧版本）
+                    # 接收指令，支持 JSON 格式（包含 focus 参数）或字符串格式（兼容旧版本）
+                    # REP socket 是阻塞式的，会一直等待直到收到消息
+                    # 先接收原始消息
+                    msg_bytes = rep_socket.recv()
+
+                    # 尝试解析为 JSON
                     try:
-                        message = msg_bytes.decode('utf-8')
-                        focus_question = None
-                    except:
-                        # 如果都失败了，使用默认值
-                        message = "look"
-                        focus_question = None
-                # print(f"收到视觉请求: {message}, focus: {focus_question}")
-            except zmq.ZMQError as e:
-                print(f"ZMQ接收错误: {e}")
-                time.sleep(0.1)
-                continue
+                        request_data = json.loads(msg_bytes.decode('utf-8'))
+                        message = request_data.get("command", "look")
+                        focus_question = request_data.get("focus", None)
+                    except (json.JSONDecodeError, TypeError, UnicodeDecodeError, AttributeError):
+                        # 如果不是 JSON，尝试作为字符串解析（兼容旧版本）
+                        try:
+                            message = msg_bytes.decode('utf-8')
+                            focus_question = None
+                        except:
+                            # 如果都失败了，使用默认值
+                            message = "look"
+                            focus_question = None
+                    # print(f"收到视觉请求: {message}, focus: {focus_question}")
+                except zmq.Again:
+                    continue
+                except zmq.ZMQError as e:
+                    print(f"ZMQ接收错误: {e}")
+                    time.sleep(0.1)
+                    continue
 
-            frame = None
-            # === 修复: 获取主循环维护的最新帧，而不是使用可能过时的缓存帧 ===
-            # 使用锁保护，确保线程安全
-            with state.lock:
-                if state.latest_frame is not None:
-                    frame = state.latest_frame.copy()  # 复制帧，避免主循环修改影响
-            
-            if frame is None:
-                rep_socket.send_json({"status": "error", "message": "Camera not ready"})
-                continue
+                frame = None
+                # === 修复: 获取主循环维护的最新帧，而不是使用可能过时的缓存帧 ===
+                # 使用锁保护，确保线程安全
+                with state.lock:
+                    if state.latest_frame is not None:
+                        frame = state.latest_frame.copy()  # 复制帧，避免主循环修改影响
 
-            # 开始处理
-            h, w, _ = frame.shape
-            
-            # === 优化1: 减少图像转换次数 ===
-            # 仅在需要时进行光照预处理
-            if h * w > 640 * 480:  # 只有当图像分辨率较大时才进行光照增强
-                # 光照预处理
-                lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-                l, a, b = cv2.split(lab)
-                l2 = clahe.apply(l)
-                lab = cv2.merge((l2, a, b))
-                frame_enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-            else:
-                # 小分辨率图像直接使用原图，减少处理时间
-                frame_enhanced = frame
-            
-            # === 1. 人脸识别 ===
-            face_results = face_identify(frame_enhanced)
-            
-            # === 2. 准备图像给 VLM ===
-            # 优化2: 仅在有人脸识别结果时才绘制人脸框，减少不必要的绘制
-            vlm_frame = frame.copy()
-            if face_results:
-                for (bbox, name) in face_results:
-                    startX, startY, endX, endY = bbox
-                    # 简化绘制，使用更高效的绘制函数
-                    cv2.rectangle(vlm_frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
-                    y = startY - 10 if startY - 10 > 10 else startY + 10
-                    # 优化3: 使用更高效的字体和绘制方式
-                    cv2.putText(vlm_frame, name, (startX, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                if frame is None:
+                    rep_socket.send_json({"status": "error", "message": "Camera not ready"})
+                    continue
 
-            # === 优化4: 调整JPEG编码质量，平衡质量和速度 ===
-            # 降低JPEG质量到40，提高编码速度
-            encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
-            _, buffer = cv2.imencode('.jpg', vlm_frame, encode_params)
-            img_b64 = base64.b64encode(buffer).decode('utf-8')
+                # 开始处理
+                h, w, _ = frame.shape
 
-            # === 3. VLM 调用 (同步) ===
-            # 因为是应答模式，必须等结果
-            # 传递 focus_question 参数（如果存在）
-            current_caption = update_caption(img_b64, focus_question)
+                # === 优化1: 减少图像转换次数 ===
+                # 仅在需要时进行光照预处理
+                if h * w > 640 * 480:  # 只有当图像分辨率较大时才进行光照增强
+                    # 光照预处理
+                    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+                    l, a, b = cv2.split(lab)
+                    l2 = clahe.apply(l)
+                    lab = cv2.merge((l2, a, b))
+                    frame_enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+                else:
+                    # 小分辨率图像直接使用原图，减少处理时间
+                    frame_enhanced = frame
 
-            # 检查内容是否与之前重复
-            is_repeated = False
-            if previous_caption and current_caption:
-                similarity = calculate_similarity(current_caption, previous_caption)
-                if similarity > caption_similarity_threshold:
-                    is_repeated = True
-                    print(f"⚠️ 检测到重复内容，相似度: {similarity:.2f}，跳过发送重复描述")
+                # === 1. 人脸识别 ===
+                face_results = face_identify(frame_enhanced)
 
-            # 构造结果
-            vis_info = {
-                "faces": [f[1] for f in face_results],
-                "objects": [],
-                "gestures": [],
-                "scene_caption": current_caption if not is_repeated else "",
-                "scene_image": img_b64 if not is_repeated else "",
-                "status": "success",
-                "is_repeated": is_repeated
-            }
+                # === 2. 准备图像给 VLM ===
+                # 优化2: 仅在有人脸识别结果时才绘制人脸框，减少不必要的绘制
+                vlm_frame = frame.copy()
+                if face_results:
+                    for (bbox, name) in face_results:
+                        startX, startY, endX, endY = bbox
+                        # 简化绘制，使用更高效的绘制函数
+                        cv2.rectangle(vlm_frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+                        y = startY - 10 if startY - 10 > 10 else startY + 10
+                        # 优化3: 使用更高效的字体和绘制方式
+                        cv2.putText(vlm_frame, name, (startX, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            # === 4. 发送回复 (REP) ===
-            rep_socket.send_json(vis_info)
+                # === 优化4: 调整JPEG编码质量，平衡质量和速度 ===
+                # 降低JPEG质量到40，提高编码速度
+                encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
+                _, buffer = cv2.imencode('.jpg', vlm_frame, encode_params)
+                img_b64 = base64.b64encode(buffer).decode('utf-8')
 
-            # === 5. 同时广播给 Server (PUB) 以便系统其它部分感知 ===
-            try:
-                # 只广播非重复内容
-                if not is_repeated:
-                    vis_socket.send_multipart([b"visual", json.dumps(vis_info).encode('utf-8')])
-            except:
-                pass
+                # === 3. VLM 调用 (同步) ===
+                # 因为是应答模式，必须等结果
+                # 传递 focus_question 参数（如果存在）
+                current_caption = update_caption(img_b64, focus_question)
 
-            # 更新 UI 显示状态
-            with state.lock:
-                 state.results = (face_results, [], [], [], current_caption)
+                # 检查内容是否与之前重复
+                is_repeated = False
+                if previous_caption and current_caption:
+                    similarity = calculate_similarity(current_caption, previous_caption)
+                    if similarity > caption_similarity_threshold:
+                        is_repeated = True
+                        print(f"⚠️ 检测到重复内容，相似度: {similarity:.2f}，跳过发送重复描述")
 
-            # 更新之前的描述
-            if current_caption:
-                previous_caption = current_caption
+                # 构造结果
+                vis_info = {
+                    "faces": [f[1] for f in face_results],
+                    "objects": [],
+                    "gestures": [],
+                    "scene_caption": current_caption if not is_repeated else "",
+                    "scene_image": img_b64 if not is_repeated else "",
+                    "status": "success",
+                    "is_repeated": is_repeated
+                }
 
+                # === 4. 发送回复 (REP) ===
+                rep_socket.send_json(vis_info)
+
+                # === 5. 同时广播给 Server (PUB) 以便系统其它部分感知 ===
+                try:
+                    # 只广播非重复内容
+                    if not is_repeated:
+                        vis_socket.send_multipart([b"visual", json.dumps(vis_info).encode('utf-8')])
+                except:
+                    pass
+
+                # 更新 UI 显示状态
+                with state.lock:
+                     state.results = (face_results, [], [], [], current_caption)
+
+                # 更新之前的描述
+                if current_caption:
+                    previous_caption = current_caption
+
+
+        finally:
+            if rep_socket is not None:
+                rep_socket.close(linger=0)
+            if vis_socket is not None:
+                vis_socket.close(linger=0)
+            context.term()
 
     # 启动线程
     thread = threading.Thread(target=recognition_loop)
     thread.daemon = True  # 设置为守护线程，主程序退出它也退出
     thread.start()
+    if not server_ready.wait(timeout=10):
+        state.running = False
+        raise RuntimeError("Visual RPC 服务线程未能就绪")
+    if server_start_error:
+        raise RuntimeError(f"Visual RPC 服务启动失败: {server_start_error[0]}")
 
     try:
         from common.module_ready import notify_module_ready
@@ -350,13 +385,13 @@ def camera_model():
                 except:
                     # Linux/Mac fallback or default
                     font = ImageFont.load_default()
-            
-            draw.text(pos, text, font=font, fill=color[::-1]) # RGB -> BGR for PIL fill? No, PIL uses RGB. 
-            # cv2 color is BGR (0, 255, 0) -> Green. 
+
+            draw.text(pos, text, font=font, fill=color[::-1]) # RGB -> BGR for PIL fill? No, PIL uses RGB.
+            # cv2 color is BGR (0, 255, 0) -> Green.
             # PIL fill=(0, 255, 0) -> Green.
             # But we are passing tuple. Let's assume input color is BGR (since it's cv2 context).
-            # So we need to flip it to RGB for PIL. 
-            
+            # So we need to flip it to RGB for PIL.
+
             img_result = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
             return img_result
         except Exception as e:
@@ -366,32 +401,26 @@ def camera_model():
     def cleanup():
         """清理所有资源"""
         print("🔄 正在清理视觉模块资源...")
-        
-        # 1. 释放ZMQ资源
-        try:
-            rep_socket.close()
-            vis_socket.close()
-            context.term()
-            print("✅ ZMQ资源已释放")
-        except Exception as e:
-            print(f"❌ 释放ZMQ资源失败: {e}")
-        
+
+        state.running = False
+        thread.join(timeout=3)
+
         # 2. 释放摄像头资源
         try:
             cap.release()
             print("✅ 摄像头资源已释放")
         except Exception as e:
             print(f"❌ 释放摄像头资源失败: {e}")
-        
+
         # 3. 关闭所有OpenCV窗口
         try:
             cv2.destroyAllWindows()
             print("✅ OpenCV窗口已关闭")
         except Exception as e:
             print(f"❌ 关闭OpenCV窗口失败: {e}")
-        
+
         print("✅ 视觉模块资源清理完成")
-    
+
     # --- 5. 主循环  ---
     try:
         while True:
@@ -436,7 +465,7 @@ def camera_model():
                 startX, startY, endX, endY = bbox
                 color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
                 y = startY - 10 if startY - 10 > 10 else startY + 10
-                
+
                 cv2.rectangle(frame, (startX, startY), (endX, endY), color, 2)
                 # 使用中文绘制名字
                 frame = cv2_draw_text(frame, name, (startX, y - 20), color, size=20)
@@ -503,7 +532,7 @@ def camera_model():
 
             # 4. 【优化】不再创建窗口显示图像，减少资源占用
             # cv2.imshow('Camera', frame)  # 已禁用窗口显示
-            
+
             # 检查退出信号（通过其他方式，如文件标志或信号）
             # 由于不再使用 cv2.waitKey，需要通过其他方式检查退出
             # 保持循环运行，直到收到退出信号
