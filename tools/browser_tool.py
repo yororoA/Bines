@@ -24,16 +24,6 @@ def _get_chrome_user_data_dir():
         return str(_PROJECT_ROOT / "static" / "Bines Data Automation")
 
 
-def _kill_chrome_processes():
-    """仅在启动失败时可选调用：强制关闭所有 Chrome 进程（会关闭您正在使用的 Chrome）。"""
-    try:
-        if os.name == "nt":
-            os.system("taskkill /f /im chrome.exe >nul 2>&1")
-        time.sleep(1)
-    except Exception:
-        pass
-
-
 def _get_search_result_via_screen():
     """通过屏幕分析（截图 + 视觉 API）快速获取当前屏幕上的搜索结果内容。"""
     try:

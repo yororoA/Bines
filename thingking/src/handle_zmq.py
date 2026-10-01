@@ -10,14 +10,15 @@ import time
 import sys
 import traceback
 import threading
+import queue
 import logging
 import importlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from layered_memory import LayeredMemorySystem
 from thinking_model_helper import ThinkingModelHelper
-from tool_call_utils import execute_tool_calls, has_async_tools, should_use_thinking_model
-from agents import MainAgent, ToolAgent, SummaryAgent, DynamicMemoryToolAgent
+from agents import MainAgent, SummaryAgent, DynamicMemoryMaintainer
+from skill_runner import SkillRunner, QQ_ALLOWED_ACTIONS
 from status_ws import ensure_status_stream_started
 from realtime_screen_bridge import (
     build_realtime_screen_paths,
@@ -33,8 +34,8 @@ from listener_helpers import (
     build_bored_prompt,
 )
 from path_setup import ensure_project_root
-from runtime_wiring import register_tool_dependencies, bind_pub_socket_with_retry
-from tool_schema_sync import sync_agent_schema_with_registry
+from runtime_wiring import register_runtime_dependencies
+from common.zmq_bus import create_publisher, create_subscriber
 from qq_merge_coordinator import QQMergeCoordinator
 from message_flow_utils import (
     compute_enable_audio,
@@ -46,16 +47,6 @@ from rag_client import RAGServerClient
 from thinking_stream_runner import run_main_agent_rounds
 from qq_reply_flow import handle_qq_reply_if_needed
 from interrupt_flow import submit_pending_interrupt
-from tool_schema_collections import (
-    TOOLS_SCHEMA,
-    _QQ_ALLOWED_TOOLS,
-    ROUTER_TOOLS_SCHEMA,
-    ALL_TOOLS_SCHEMA_FOR_AGENT,
-)
-from tool_mounting import (
-    initialize_agent_tool_mounts,
-    configure_tool_agent_schema_for_source,
-)
 
 
 logger = logging.getLogger("bines.thinking.handle_zmq")
@@ -90,12 +81,9 @@ from config import (
     ROOT_DIR,
     ZMQ_HOST,
     ZMQ_PORTS,
+    HTTP_HOST,
+    HTTP_PORTS,
     PRESENCE_STATE_PATH,
-    DEEPSEEK_API_URL,
-    DEEPSEEK_API_KEY,
-    DEEPSEEK_MODEL,
-    DEEPSEEK_API_TIMEOUT,
-    require_env,
     MOMENTS_API_BASE_URL,
     TOGGLE_STATUS_TOKEN,
 )
@@ -108,13 +96,12 @@ if sys.platform.startswith('win'):
     except (AttributeError, OSError):
         pass
 # -------------------------------------------------------------------
-from tools import call_tool, TOOLS_REGISTRY
+from tools import TOOLS_REGISTRY
 from tools.dependencies import deps
 # 导入从 handle_zmq.py 迁移的工具函数（现在在 tools 包中）
 from tools.game_mode_tool import enable_game_mode, disable_game_mode
 from tools.memory_tool import update_status
 from tools.visual_tool import get_visual_info
-from tools.thinking_tool import call_thinking_model
 from tools.screen_tool import get_screen_info_wrapper
 
 
@@ -215,38 +202,15 @@ qq_merge_coordinator = QQMergeCoordinator(
 # 初始化思考模式大模型助手
 thinking_model_helper = ThinkingModelHelper()
 
-# 初始化三代理架构（工具 schema 稍后设置）
-main_agent = MainAgent()
-tool_agent = ToolAgent()
-summary_agent = SummaryAgent()
-
-# [工具迁移] call_thinking_model 已迁移到 tools/thinking_tool.py
-# 工具函数定义已移除，现在从 tools 包导入
-
 from qq_buffer_manager import QQBufferManager
 
 # --- 配置 ---
 # 主机与端口统一来自全局 config
 HOST = ZMQ_HOST
 
-# ZMQ 端口配置（命名保持与原注释一致）
-ZMQ_PUB_PORT = ZMQ_PORTS["THINKING_TTS_PUB"]       # Output to TTS (音频请求)
-ZMQ_PUB_TEXT_PORT = ZMQ_PORTS["THINKING_TEXT_PUB"] # Output to Display (文本)
-ZMQ_SUB_PORT = ZMQ_PORTS["CLASSIFICATION_PUB"]     # Input from Classification
-ZMQ_SUB_TOPIC = "classified"
+# 业务消息统一通过本地总线，用 topic 区分。
 ZMQ_PUB_TOPIC = "think"
 ZMQ_PUB_TEXT_TOPIC = "text"  # 文本直接发送到display
-
-# DeepSeek 配置（API Key 仅从环境变量读取）
-API_KEY = require_env("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY)
-API_URL = DEEPSEEK_API_URL
-
-# 用注册表补齐遗漏工具，避免 schema 与 registry 双改不一致
-ALL_TOOLS_SCHEMA_FOR_AGENT = sync_agent_schema_with_registry(
-    ALL_TOOLS_SCHEMA_FOR_AGENT,
-    TOOLS_REGISTRY,
-    excluded_names={"update_status", "call_summary_agent"},
-)
 
 # 分层记忆系统：收到 Classification「所有模块就绪」后再初始化，并执行上线摘要/日记等
 memory_system = None
@@ -254,81 +218,61 @@ memory_system = None
 # 初始化 ZMQ 上下文
 context = zmq.Context()
 
-# [依赖注入] 注册工具依赖，避免循环导入（memory_system 在正式启动时注册）
-register_tool_dependencies(
+# PUB socket 由 Thinking 的监听线程持有；工作线程通过队列递交消息。
+_ZMQ_OUTBOUND_QUEUE = queue.Queue()
+_ZMQ_OUTBOUND_SEND_LOCK = threading.Lock()
+
+
+class _QueuedPublisher:
+    """为工具提供 PUB 兼容接口，同时避免在线程间共享 ZeroMQ socket。"""
+    def __init__(self, channel):
+        self.channel = channel
+
+    def send_multipart(self, frames, flags=0, **_kwargs):
+        if flags & zmq.DONTWAIT:
+            raise zmq.Again("queued publisher does not support DONTWAIT")
+        _ZMQ_OUTBOUND_QUEUE.put([(self.channel, list(frames))])
+
+    def send(self, frame, flags=0, **kwargs):
+        self.send_multipart([frame], flags=flags, **kwargs)
+
+# 本地技能文档和 Python 动作注册表是模型执行操作的唯一入口。
+SKILL_ACTIONS_PATH = PROJECT_ROOT / "server" / "skill_actions.json"
+skill_runner = SkillRunner(
+    registry=TOOLS_REGISTRY,
+    skills_dir=ROOT_DIR / "skills",
+    enabled_actions_path=SKILL_ACTIONS_PATH,
+    qq_allowed_actions=QQ_ALLOWED_ACTIONS,
+)
+main_agent = MainAgent()
+summary_agent = SummaryAgent(skill_runner)
+main_agent.set_skill_instructions(skill_runner.instructions_for_source())
+register_runtime_dependencies(
     deps,
     context,
     thinking_model_helper,
-    get_tools_schema=lambda: TOOLS_SCHEMA,
-    get_tools_registry=lambda: TOOLS_REGISTRY,
+    skill_runner,
 )
 
-# 工具模型可调用工具：单一 schema 文件 server/tool_agent_schema.json，每项含 name/description/enabled；不依赖 Thinking 启动即可在模块管理页显示与修改
-TOOL_AGENT_SCHEMA_PATH = PROJECT_ROOT / "server" / "tool_agent_schema.json"
 # 实时屏幕分析：配置与结果文件由 realtime_screen_analysis_standalone.py 与模块管理页维护
 REALTIME_SCREEN_PATHS = build_realtime_screen_paths(PROJECT_ROOT)
 
-
-initialize_agent_tool_mounts(
-    main_agent=main_agent,
-    tool_agent=tool_agent,
-    router_tools_schema=ROUTER_TOOLS_SCHEMA,
-    tool_agent_schema_path=TOOL_AGENT_SCHEMA_PATH,
-    all_tools_schema_for_agent=ALL_TOOLS_SCHEMA_FOR_AGENT,
-)
-
-# PUB: 发送思考结果到TTS（音频请求）
-max_bind_retries = 3
-bind_retry_delay = 1.0
-pub_socket = bind_pub_socket_with_retry(
-    context,
-    ZMQ_PUB_PORT,
-    "THINKING_TTS_PUB",
-    max_retries=max_bind_retries,
-    retry_delay=bind_retry_delay,
-)
-
-# PUB: 发送文本到Display（直接发送文本，不经过TTS）
-pub_text_socket = bind_pub_socket_with_retry(
-    context,
-    ZMQ_PUB_TEXT_PORT,
-    "THINKING_TEXT_PUB",
-    max_retries=max_bind_retries,
-    retry_delay=bind_retry_delay,
-)
-
-# PUB: 播放本地音频（sing 工具）发往 Display
-ZMQ_AUDIO_PLAY_PUB_PORT = ZMQ_PORTS.get("AUDIO_PLAY_PUB", 5563)
-audio_play_pub_socket = bind_pub_socket_with_retry(
-    context,
-    ZMQ_AUDIO_PLAY_PUB_PORT,
-    "AUDIO_PLAY_PUB",
-    max_retries=max_bind_retries,
-    retry_delay=bind_retry_delay,
-)
+# 所有 PUB 接入同一总线；topic 用于区分文本、TTS、控制和本地音频。
+pub_socket = create_publisher(context, label="Thinking TTS")
+pub_text_socket = create_publisher(context, label="Thinking text")
+audio_play_pub_socket = create_publisher(context, label="Thinking local audio")
+control_pub_socket = create_publisher(context, label="Thinking control")
 try:
     from tools.dependencies import deps
-    deps.register_audio_play_pub_socket(audio_play_pub_socket)
+    deps.register_audio_play_pub_socket(_QueuedPublisher("audio"))
 except Exception as e:
     print(f"[Thinking] 注册 audio_play_pub_socket 失败: {e}", flush=True)
 
-# SUB: 接收分类器结果
-sub_socket = context.socket(zmq.SUB)
-sub_socket.connect(f"tcp://{HOST}:{ZMQ_SUB_PORT}")
-sub_socket.setsockopt_string(zmq.SUBSCRIBE, ZMQ_SUB_TOPIC)
-# [新增] 订阅 QQ 后台日志话题
-sub_socket.setsockopt_string(zmq.SUBSCRIBE, "qq_log")
-
-# [新增] 连接模块管理器的控制端口 (5566)，用于接收系统命令 (如游戏模式开关)
-MODULE_MANAGER_PUB_PORT = 5566
-sub_socket.connect(f"tcp://{HOST}:{MODULE_MANAGER_PUB_PORT}")
-sub_socket.setsockopt_string(zmq.SUBSCRIBE, "syscmd")
+# 分类结果、QQ 日志和模块管理命令统一从总线接收。
+sub_socket = create_subscriber(context, "classified", "qq_log", "syscmd", label="Thinking main")
 
 # SUB: 接收bored检测器的消息
-BORED_SUB_PORT = ZMQ_PORTS["BORED_PUB"]
-bored_sub_socket = context.socket(zmq.SUB)
-bored_sub_socket.connect(f"tcp://{HOST}:{BORED_SUB_PORT}")
-bored_sub_socket.setsockopt_string(zmq.SUBSCRIBE, "bored")
+bored_sub_socket = create_subscriber(context, "bored", label="Thinking bored")
 
 
 def _is_only_action_or_empty(text):
@@ -341,54 +285,82 @@ def _is_only_action_or_empty(text):
 
 def zmq_send(data, lang="zh", translation=None, cough=None, origin=None, enable_audio=True):
     """
-    向 ZMQ 发送数据
-    【重构】文本直接发送到Display，音频请求发送到TTS
+    将 ZMQ 输出排入队列，由创建 PUB socket 的监听主线程实际发送。
+    PyZMQ socket 不能在线程间共享；process_message 通常运行在线程池中。
     """
     try:
-        # 1. 文本直接发送到Display（端口5553，topic="text"）
-        if data:  # 如果有文本内容
-            text_payload = {
-                "text": data,
-                "lang": lang,
-                "sender": "THINK",
-                "segment_index": getattr(zmq_send, '_segment_index', 0)  # 分段索引
-            }
-            if translation:
-                text_payload["translation"] = translation
-            if cough:
-                text_payload["cough"] = cough
-            if origin:
-                text_payload["origin"] = origin
+        with _ZMQ_OUTBOUND_SEND_LOCK:
+            pending = []
+            # 1. 文本通过本地总线发送给 Display，使用 topic "text"。
+            if data:  # 如果有文本内容
+                text_payload = {
+                    "text": data,
+                    "lang": lang,
+                    "sender": "THINK",
+                    "segment_index": getattr(zmq_send, '_segment_index', 0)  # 分段索引
+                }
+                if translation:
+                    text_payload["translation"] = translation
+                if cough:
+                    text_payload["cough"] = cough
+                if origin:
+                    text_payload["origin"] = origin
+
+                pending.append(("text", [ZMQ_PUB_TEXT_TOPIC.encode('utf-8'), json.dumps(text_payload).encode('utf-8')]))
+                zmq_send._segment_index = text_payload["segment_index"] + 1
             
-            # 发送文本到Display
-            pub_text_socket.send_multipart([ZMQ_PUB_TEXT_TOPIC.encode('utf-8'), json.dumps(text_payload).encode('utf-8')])
-            
-            # 更新分段索引
-            if not hasattr(zmq_send, '_segment_index'):
-                zmq_send._segment_index = 0
-            zmq_send._segment_index += 1
-        
-        # 2. 音频请求发送到TTS（端口5552，topic="think"）
-        # 只发送音频合成请求，不包含文本（文本已直接发送到Display）
-        if enable_audio:
-            tts_payload = {
-                "reply_part": data,  # TTS需要文本进行合成
-                "reply_lang": lang,
-                "sender": "THINK"
-            }
-            if cough:
-                tts_payload["cough"] = cough
-            if origin:
-                tts_payload["origin"] = origin
-            
-            # 发送音频请求到TTS
-            pub_socket.send_multipart([ZMQ_PUB_TOPIC.encode('utf-8'), json.dumps(tts_payload).encode('utf-8')])
+            # 2. 音频合成请求通过本地总线发送给 Speaking，使用 topic "think"。
+            # 只发送音频合成请求，不包含文本（文本已直接发送到Display）
+            if enable_audio:
+                tts_payload = {
+                    "reply_part": data,  # TTS需要文本进行合成
+                    "reply_lang": lang,
+                    "sender": "THINK"
+                }
+                if cough:
+                    tts_payload["cough"] = cough
+                if origin:
+                    tts_payload["origin"] = origin
+
+                pending.append(("tts", [ZMQ_PUB_TOPIC.encode('utf-8'), json.dumps(tts_payload).encode('utf-8')]))
+
+            if pending:
+                _ZMQ_OUTBOUND_QUEUE.put(pending)
         
         return True
     except Exception as e:
         print(f"[Thinking] ZMQ发送异常: {str(e)}", flush=True)
         traceback.print_exc()
     return False
+
+
+def _flush_zmq_outbound_queue():
+    """Send queued PUB messages on the listener thread that owns the sockets."""
+    while True:
+        try:
+            pending = _ZMQ_OUTBOUND_QUEUE.get_nowait()
+        except queue.Empty:
+            return
+
+        for channel, frames in pending:
+            try:
+                socket = {
+                    "text": pub_text_socket,
+                    "tts": pub_socket,
+                    "audio": audio_play_pub_socket,
+                    "control": control_pub_socket,
+                }[channel]
+                socket.send_multipart(frames)
+                if channel == "tts":
+                    payload = json.loads(frames[1].decode("utf-8"))
+                    logger.info(
+                        "[Thinking] TTS PUB 已发送: chars=%d, cough=%s",
+                        len(payload.get("reply_part") or ""),
+                        payload.get("cough"),
+                    )
+            except Exception as e:
+                logger.exception("[Thinking] ZMQ %s 发布失败: %s", channel, e)
+        _ZMQ_OUTBOUND_QUEUE.task_done()
 
 
 def _parse_segmented_reply(raw_text: str):
@@ -435,56 +407,6 @@ def _clean_json_str(s: str) -> str:
     return s
 
 
-def _execute_router_tool_calls_and_append(messages: list, tool_calls_list: list, base_messages: list, interrupt_callback=None, source: str = None) -> None:
-    """
-    执行主模型（路由层）返回的 tool_calls：仅 get_time / call_tool_agent / call_summary_agent。
-    向 messages 追加每条 role=tool 消息（调用方需已追加含 tool_calls 的 assistant 消息）。
-    source: 消息来源（"QQ" 时仅允许 QQ 相关工具）
-    """
-    for tc in tool_calls_list:
-        call_id = tc.get("id") or ""
-        func_name = (tc.get("function") or {}).get("name", "")
-        args_str = (tc.get("function") or {}).get("arguments", "") or "{}"
-        try:
-            args = json.loads(args_str)
-        except json.JSONDecodeError:
-            args = {}
-        if not func_name:
-            messages.append({"role": "tool", "tool_call_id": call_id, "content": "Error: 缺少工具名"})
-            continue
-        if func_name == "get_time":
-            result = call_tool("get_time", **args)
-        elif func_name == "call_tool_agent":
-            task_desc = args.get("task_description", "")
-            context = args.get("context", "")
-            try:
-                # 运行中动态生效：每次调用前按当前配置重新挂载工具列表
-                active_schema, full_count, is_qq_mode = configure_tool_agent_schema_for_source(
-                    tool_agent=tool_agent,
-                    tool_agent_schema_path=TOOL_AGENT_SCHEMA_PATH,
-                    all_tools_schema_for_agent=ALL_TOOLS_SCHEMA_FOR_AGENT,
-                    source=source,
-                    qq_allowed_tools=_QQ_ALLOWED_TOOLS,
-                )
-                if is_qq_mode:
-                    print(f"[Thinking] QQ 来源，工具已过滤为 QQ 白名单 ({len(active_schema)}/{full_count} 个工具)", flush=True)
-                # 【修改】传入中断检查回调，允许用户打断工具执行
-                result = tool_agent.handle_task(task_desc, context, base_messages, interrupt_check=interrupt_callback)
-            except Exception as e:
-                result = f"工具代理执行出错：{e}"
-        elif func_name == "call_summary_agent":
-            state_desc = args.get("state_update_description", "")
-            context = args.get("context", "")
-            try:
-                result = summary_agent.update_state(state_desc, context, base_messages)
-            except Exception as e:
-                result = f"摘要代理执行出错：{e}"
-        else:
-            result = f"Error: 未知工具 '{func_name}'（路由层仅支持 get_time / call_tool_agent / call_summary_agent）"
-        messages.append({"role": "tool", "tool_call_id": call_id, "content": str(result)})
-        print(f"[Thinking] 路由工具执行: {func_name}", flush=True)
-
-
 # 重置分段索引的函数（在新对话开始时调用）
 def reset_segment_index():
     """重置文本分段索引"""
@@ -494,35 +416,14 @@ def reset_segment_index():
         zmq_send._segment_index = 0
 
 
-# 创建控制信号发送 socket（用于向 hearing 发送 cough 信号）
-# 使用专用端口，避免与 guidisplay（CONTROL_PUB）和手动输入端口冲突
-CONTROL_PORT_THINKING = ZMQ_PORTS.get("CONTROL_PUB_THINKING", 5561)
-control_pub_socket = None
-def get_control_socket():
-    """获取或创建控制信号发送 socket（Thinking 专用控制端口）"""
-    global control_pub_socket
-    if control_pub_socket is None:
-        try:
-            control_pub_socket = context.socket(zmq.PUB)
-            control_pub_socket.setsockopt(zmq.LINGER, 0)
-            control_pub_socket.setsockopt(zmq.IMMEDIATE, 1)
-            control_pub_socket.bind(f"tcp://*:{CONTROL_PORT_THINKING}")
-            print(f"[Thinking] 控制信号 socket 已绑定到端口 {CONTROL_PORT_THINKING}", flush=True)
-        except Exception as e:
-            print(f"[Thinking] 创建/绑定控制 socket 失败: {e}", flush=True)
-            control_pub_socket = None
-    return control_pub_socket
-
 def send_control_signal(cough_status):
     """发送控制信号到 hearing 模块"""
-    socket = get_control_socket()
-    if socket:
-        try:
-            control_data = {"cough": cough_status}
-            socket.send_multipart([b"control", json.dumps(control_data).encode('utf-8')], flags=zmq.DONTWAIT)
-            print(f"[Thinking] 已发送控制信号 (cough={cough_status})", flush=True)
-        except Exception as e:
-            print(f"[Thinking] 发送控制信号失败: {e}", flush=True)
+    try:
+        control_data = {"cough": cough_status}
+        _ZMQ_OUTBOUND_QUEUE.put([("control", [b"control", json.dumps(control_data).encode("utf-8")])])
+        print(f"[Thinking] 已排队控制信号 (cough={cough_status})", flush=True)
+    except Exception as e:
+        print(f"[Thinking] 控制信号入队失败: {e}", flush=True)
 
 def _analyze_qq_images(image_urls, timeout=25):
     """
@@ -547,14 +448,13 @@ def _analyze_qq_images(image_urls, timeout=25):
             DASHSCOPE_API_KEY,
             DASHSCOPE_VISION_MODEL,
             DASHSCOPE_API_TIMEOUT,
-            require_env,
         )
+        from vlm_client import call_dashscope_vlm
     except ImportError as e:
         print(f"[QQ Image] Import error: {e}", flush=True)
         return ""
     
-    api_key = require_env("DASHSCOPE_API_KEY", DASHSCOPE_API_KEY)
-    if not api_key:
+    if not DASHSCOPE_API_KEY:
         print("[QQ Image] No DASHSCOPE_API_KEY configured, skipping image analysis", flush=True)
         return ""
     
@@ -595,52 +495,27 @@ def _analyze_qq_images(image_urls, timeout=25):
                 print(f"[QQ Image] Download failed: {dl_err}, using URL directly", flush=True)
                 image_content = url
             
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "model": DASHSCOPE_VISION_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "请详细描述这张图片的内容。如果包含文字请提取出来。如果是表情包/梗图请描述其含义。简洁回复，不超过100字。"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_content
-                                }
-                            }
-                        ]
-                    }
-                ],
-                "max_tokens": 200
-            }
-            
-            resp = _requests.post(
-                DASHSCOPE_API_URL, 
-                headers=headers, 
-                json=payload, 
-                timeout=timeout,
-                proxies={"http": None, "https": None}
+            desc = call_dashscope_vlm(
+                image_content,
+                "请详细描述这张图片的内容。如果包含文字请提取出来。如果是表情包/梗图请描述其含义。简洁回复，不超过100字。",
+                api_url=DASHSCOPE_API_URL,
+                api_key=DASHSCOPE_API_KEY,
+                model=DASHSCOPE_VISION_MODEL,
+                timeout=timeout or DASHSCOPE_API_TIMEOUT,
+                proxies={"http": None, "https": None},
+                max_tokens=200,
+                request_failed_prefix="[QQ VLM 请求失败",
+                error_message_prefix="[QQ VLM 异常]",
             )
-            
-            if resp.status_code == 200:
-                result = resp.json()
-                desc = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+            if desc.startswith("[QQ VLM"):
+                print(f"[QQ Image] VLM failed for image {i+1}: {desc[:180]}", flush=True)
+                descriptions.append(f"[图片{i+1}: 识别失败]")
+            else:
                 if desc:
-                    descriptions.append(f"[图片{i+1}内容: {desc.strip()}]")
+                    descriptions.append(f"[图片{i+1}内容: {desc}]")
                     print(f"[QQ Image] Image {i+1} analyzed: {desc[:50]}...", flush=True)
                 else:
                     descriptions.append(f"[图片{i+1}: 无法识别内容]")
-            else:
-                print(f"[QQ Image] VLM returned status {resp.status_code}", flush=True)
-                descriptions.append(f"[图片{i+1}: 识别失败]")
                 
         except Exception as e:
             print(f"[QQ Image] Analysis error for image {i+1}: {e}", flush=True)
@@ -679,7 +554,7 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
     # QQ消息不发送TTS语音，同时支持 "QQ" 和 "qq"；ASR/MANUAL 强制开启
     enable_audio = compute_enable_audio(source)
 
-    # 定义中断检查函数，供 ToolAgent 和 MainAgent 在长时间运行时回调
+    # 定义中断检查函数，供主模型流和本地技能执行时回调
     def _interrupt_check():
         with INTERRUPT_LOCK:
             return INTERRUPT_REQUESTED
@@ -701,7 +576,7 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         # 每轮对话开始时重置分段索引，保证每轮回复都能正常发送 TTS/display
         reset_segment_index()
         
-        # 更新全局视觉信息供工具调用
+        # 更新全局视觉信息供对话上下文使用
         global CURRENT_VISUAL_INFO
         CURRENT_VISUAL_INFO = img_descr if img_descr else "当前眼前一片漆黑，什么也看不见。"
 
@@ -771,13 +646,12 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             if qq_ctx and qq_ctx.get("is_admin"):
                  context_messages.append({"role": "system", "content": "【系统提示】此消息来自管理员，请高度重视并优先响应。"})
             
-            # QQ 工具约束：禁止使用与 QQ 无关的工具
+            # QQ 技能约束：通过 SkillRunner 白名单限制为远程消息允许的动作。
             context_messages.append({"role": "system", "content": (
                 "【QQ消息工具约束】当前消息来自QQ远程用户，你无法通过屏幕或摄像头看到对方。\n"
-                "- 禁止调用 get_screen_info、get_visual_info 等视觉/屏幕工具（对方是远程QQ用户，看屏幕毫无意义）\n"
-                "- 禁止调用 automate_action、automate_sequence、enable_game_mode 等本地操作工具\n"
-                "- 允许使用的工具仅限：QQ消息工具（send_qq_private_msg、send_qq_group_msg、get_qq_friend_list、get_qq_group_list、broadcast_to_all_friends、broadcast_to_all_groups、at_each_group_member）、browser_search（搜索信息）、get_time（获取时间）、动态工具（get_moments、add_moment、comment_moment）\n"
-                "- 如果QQ用户的请求不需要以上工具即可回答（如闲聊、问答），请直接回复，不要调用 call_tool_agent"
+                "- 当前轮只允许使用技能清单中标记的 QQ 消息、网页搜索、时间与动态动作。\n"
+                "- 禁止调用视觉、屏幕和本地桌面操作动作。\n"
+                "- 如果请求不需要技能即可回答，请直接回复。"
             )})
             
             # QQ回复格式要求
@@ -790,7 +664,7 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         rt_text = read_realtime_screen_analysis_if_enabled(REALTIME_SCREEN_PATHS)
         if rt_text:
             # 【修改】强化 Prompt，明确告知模型已获得最新画面，无需再次调用工具
-            context_messages.append({"role": "system", "content": f"【实时屏幕分析（已是最新画面）】\n{rt_text}\n(系统提示：上述内容即为当前用户屏幕的实时画面分析结果。你已拥有最新的视觉信息，**严禁**重复调用 get_screen_info / get_visual_info / call_tool_agent(visual_tool) 等工具来获取屏幕内容，直接使用上述信息回答即可。)"})
+            context_messages.append({"role": "system", "content": f"【实时屏幕分析（已是最新画面）】\n{rt_text}\n(系统提示：上述内容就是本轮最新屏幕结果。不要重复调用屏幕或视觉技能，直接使用这些信息回答。)"})
             is_realtime_screen_active = True
         
         # 消息体构建
@@ -806,30 +680,23 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         messages = context_messages.copy()
         messages.append({"role": "user", "content": current_content})
 
-        # === 原生 Tool Calling：主模型挂载 call_tool_agent / call_summary_agent / get_time，根据 tool_calls 执行并循环 ===
+        # 每条消息按来源刷新可用技能（QQ 来源仅暴露白名单动作）。
+        main_agent.set_skill_instructions(skill_runner.instructions_for_source(source))
+
         def _interrupt_check():
             with INTERRUPT_LOCK:
                 return INTERRUPT_REQUESTED
 
-        def _execute_router_tools_adapter(msgs, tool_calls, interrupt_cb, src):
-            _execute_router_tool_calls_and_append(
-                msgs,
-                tool_calls,
-                msgs,
-                interrupt_callback=interrupt_cb,
-                source=src,
-            )
-
         stream_result = run_main_agent_rounds(
             messages=messages,
             main_agent=main_agent,
-            execute_router_tool_calls=_execute_router_tools_adapter,
+            skill_runner=skill_runner,
             zmq_send=zmq_send,
             is_only_action_or_empty=_is_only_action_or_empty,
             enable_audio=enable_audio,
             source=source,
             interrupt_requested=_interrupt_check,
-            max_tool_rounds=5,
+            max_skill_rounds=12,
         )
         full_raw_response = stream_result.get("full_raw_response", "")
         exited_due_to_interrupt = stream_result.get("exited_due_to_interrupt", False)
@@ -979,7 +846,7 @@ def get_qq_buffer_manager():
     global _qq_buffer_manager_instance
     if _qq_buffer_manager_instance is None:
         # Lazy initialization
-        rag_port = ZMQ_PORTS.get('RAG_SERVER_REQREP', 5560)
+        rag_port = ZMQ_PORTS['RAG_SERVER_REQREP']
         # RAGClient needs global 'context' from handle_zmq.py
         rag_client = RAGServerClient(context, HOST, rag_port)
         # summary_agent is a global variable from handle_zmq.py
@@ -989,8 +856,7 @@ def get_qq_buffer_manager():
 def start_zmq_listener():
     global INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT, _EXECUTOR_FOR_INTERRUPT
     global GAME_MODE_ENABLED, GAME_MODE_INTERVAL
-    logger.info(f"[Thinking] Listening on ZMQ SUB: {ZMQ_SUB_PORT}")
-    logger.info(f"[Thinking] Publishing to ZMQ PUB: {ZMQ_PUB_PORT}")
+    logger.info("[Thinking] Listening and publishing through the local ZMQ bus")
 
     # 启动屏幕监控线程
     if SCREEN_MONITOR_ENABLED:
@@ -1027,11 +893,8 @@ def start_zmq_listener():
     processing_lock = PROCESSING_LOCK
     processing_state = PROCESSING_STATE
 
-    # Control SUB: Receive play status from Display
-    ZMQ_CONTROL_PUB = ZMQ_PORTS.get("CONTROL_PUB", 5565)
-    control_sub_socket = context.socket(zmq.SUB)
-    control_sub_socket.connect(f"tcp://{HOST}:{ZMQ_CONTROL_PUB}")
-    control_sub_socket.setsockopt_string(zmq.SUBSCRIBE, "control")
+    # Control SUB: Receive play status from Display via the shared bus.
+    control_sub_socket = create_subscriber(context, "control", label="Thinking control")
 
     # Poller for idle detection and bored messages
     poller = zmq.Poller()
@@ -1055,6 +918,7 @@ def start_zmq_listener():
     while True:
         try:
             # 平衡响应速度与 CPU 占用
+            _flush_zmq_outbound_queue()
             events = dict(poller.poll(100))
 
             # 处理 control 消息（播放状态）
@@ -1341,7 +1205,7 @@ if __name__ == "__main__":
         print("[Thinking] ========================================", flush=True)
         
         # 等待 Classification 通知「所有模块已就绪」后再正式启动（上线通知、摘要/日记、监听）
-        start_port = ZMQ_PORTS.get("START_THINKING_REP")
+        start_port = ZMQ_PORTS["START_THINKING_REP"]
         if start_port:
             start_rep = context.socket(zmq.REP)
             start_rep.setsockopt(zmq.LINGER, 2000)
@@ -1355,7 +1219,8 @@ if __name__ == "__main__":
                 ensure_status_stream_started(MOMENTS_API_BASE_URL, TOGGLE_STATUS_TOKEN)
                 # 实时屏幕分析：在其他模块启动完成后根据保存的配置决定是否启动
                 try:
-                    r = requests.get("http://127.0.0.1:5000/api/realtime_screen_ensure_from_config", timeout=3)
+                    manager_url = f"http://{HTTP_HOST}:{HTTP_PORTS['MODULE_MANAGER']}"
+                    r = requests.get(f"{manager_url}/api/realtime_screen_ensure_from_config", timeout=3)
                     if r.ok:
                         j = r.json()
                         if j.get("started"):
@@ -1383,14 +1248,13 @@ if __name__ == "__main__":
         memory_system = LayeredMemorySystem()
         deps.register_memory_system(memory_system)
         memory_system.start_maintenance_services()  # RAG GC + 日记归纳后台线程
-        # 副工具模型（reasoner）：仅挂载动态记忆工具，摘要写入 buffer RAG 后由其更新 memory_dynamic
-        dynamic_memory_agent = DynamicMemoryToolAgent()
-        memory_system.set_dynamic_memory_agent(dynamic_memory_agent)
+        # 摘要写入 Buffer RAG 后，通过同一模型配置的本地记忆技能更新状态。
+        memory_maintainer = DynamicMemoryMaintainer(skill_runner)
+        memory_system.set_dynamic_memory_updater(memory_maintainer)
         
         print("[Thinking] ✓ Memory system initialized (上线摘要/日记已执行)", flush=True)
         print("[Thinking] ✓ Tools registered successfully (from tools package)", flush=True)
-        print(f"[Thinking] ✓ SUB socket ready: tcp://{HOST}:{ZMQ_SUB_PORT}", flush=True)
-        print(f"[Thinking] ✓ PUB socket ready: tcp://*:{ZMQ_PUB_PORT}", flush=True)
+        print("[Thinking] ✓ PUB/SUB sockets connected to local bus", flush=True)
         print("[Thinking] Starting ZMQ listener...", flush=True)
         print("[Thinking] ========================================", flush=True)
         start_zmq_listener()

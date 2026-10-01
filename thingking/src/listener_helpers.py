@@ -39,14 +39,14 @@ def build_bored_prompt(event_data: Dict[str, Any]) -> Tuple[str, str]:
             f"(You were zoning out, then you noticed: {visual_reason}. "
             "You want to say something about this new discovery. Initiate a short, natural conversation about what you just saw—"
             "e.g. comment on what they're holding, wearing, or the scene change. "
-            "Do not repeat the description verbatim; react in character. You may use QQ tools if relevant.)"
+            "Do not repeat the description verbatim; react in character. Use an enabled local skill only if the user requested an action.)"
         )
     else:
         log_line = "[Thinking] Received bored message, triggering active dialogue..."
         prompt = (
             "[System Event: Bored] "
             "(You feel bored and want to initiate a conversation. "
-            "You can act curious, check camera/screen, check or post dynamics (get_moments/add_moment/comment_moment via call_tool_agent), "
-            "send QQ message (via send_qq_group_msg/send_qq_private_msg in call_tool_agent), or start a casual conversation.)"
+            "You can act curious, use an enabled local skill when relevant, send QQ messages only when requested, "
+            "or start a casual conversation.)"
         )
     return log_line, prompt

@@ -23,7 +23,7 @@ def update_status(current_location=None,
                   expected_state: dict | None = None):
     """
     更新动态状态记忆：地点、好感度、物品、任务、用户状态、NPC状态、记忆亮点等。
-    该函数会被思考模型或主模型通过工具调用触发。
+    该函数由本地 SkillRunner 按文本协议分发调用。
     
     [并发安全说明]
     - 仅在两处短暂持锁：① 复制出当前 state ② 写回并 save()，中间在锁外计算，避免主线程读动态记忆（to_prompt_str）时长时间阻塞

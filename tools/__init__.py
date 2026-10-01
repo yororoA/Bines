@@ -30,7 +30,6 @@ from .pointer_tool import (
 from .game_mode_tool import enable_game_mode, disable_game_mode
 from .memory_tool import update_status
 from .visual_tool import get_visual_info
-from .thinking_tool import call_thinking_model
 from .sing_tool import sing
 # QQ 工具
 from .qq_tool import send_qq_private_msg, send_qq_group_msg, get_qq_group_list, get_qq_friend_list, broadcast_to_all_friends, broadcast_to_all_groups, at_each_group_member
@@ -56,11 +55,6 @@ try:
     FAST_SCREEN_AVAILABLE = True
 except ImportError:
     FAST_SCREEN_AVAILABLE = False
-
-
-def task_complete(result: str = "") -> str:
-    """工具模型显式结束任务时调用，提交最终结果。由 ThinkingModelHelper 识别后用于强制收敛。"""
-    return "任务已确认完成。" + (f" 结果：{result[:200]}" if result else "")
 
 
 # 工具注册表
@@ -100,8 +94,6 @@ TOOLS_REGISTRY = {
     "disable_game_mode": disable_game_mode,
     "update_status": update_status,
     "get_visual_info": get_visual_info,
-    "call_thinking_model": call_thinking_model,
-    "task_complete": task_complete,
     "sing": sing,
     "send_qq_private_msg": send_qq_private_msg,
     "send_qq_group_msg": send_qq_group_msg,

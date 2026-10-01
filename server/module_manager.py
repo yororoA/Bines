@@ -19,11 +19,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from config import ZMQ_PORTS, PRESENCE_STATE_PATH
+from config import HTTP_HOST, HTTP_PORTS, PRESENCE_STATE_PATH
+from common.zmq_bus import create_publisher
 from process_registry import get_processes
-from port_cleanup import cleanup_ports
 from process_runtime import resolve_process_command, build_python_runtime_env
-from zmq_topology import SERVICE_BIND_PORTS
 from realtime_screen_config import (
     DEFAULT_REALTIME_SCREEN_CONFIG,
     load_realtime_screen_config,
@@ -36,18 +35,31 @@ app = Flask(__name__, template_folder=os.path.join(ROOT_DIR, "server", "template
 CORS(app)
 
 
-MODULE_MANAGER_PUB_PORT = 5566
-
 # 缓存游戏模式状态（因为我们无法从Thinking进程查询状态，所以只能在管理器本地缓存一份）
 GAME_MODE_STATE = {"enabled": False, "interval": 0.1}
 
-context = zmq.Context()
-pub_socket = context.socket(zmq.PUB)
-try:
-    pub_socket.bind(f"tcp://*:{MODULE_MANAGER_PUB_PORT}")
-except zmq.ZMQError:
-    # Maybe another instance is running
-    pass
+_syscmd_queue = queue.Queue()
+
+
+def _publish_syscmd_loop():
+    """Own the bus PUB socket on one thread; Flask request threads only enqueue."""
+    context = zmq.Context()
+    socket = create_publisher(context, label="Module Manager")
+    while True:
+        payload = _syscmd_queue.get()
+        try:
+            socket.send_multipart([b"syscmd", json.dumps(payload).encode("utf-8")])
+        except Exception as exc:
+            app.logger.exception("Unable to publish system command: %s", exc)
+        finally:
+            _syscmd_queue.task_done()
+
+
+def publish_syscmd(payload):
+    _syscmd_queue.put(payload)
+
+
+threading.Thread(target=_publish_syscmd_loop, name="ZMQSyscmdPublisher", daemon=True).start()
 
 @app.route("/api/game_mode", methods=["GET", "POST"])
 def game_mode_api():
@@ -69,14 +81,12 @@ def game_mode_api():
             "interval": interval
         }
         
-        pub_socket.send_multipart([b"syscmd", json.dumps(payload).encode("utf-8")])
+        publish_syscmd(payload)
         return jsonify({"success": True, "enabled": enabled, "interval": interval})
     
     return jsonify({"status": "unknown"})
 
 PROCESSES = get_processes(display_script="gui_display.py")
-
-SERVICE_PORTS = SERVICE_BIND_PORTS
 
 # 全局状态：存储所有进程和日志
 processes = {}  # {name: {"process": subprocess.Popen, "log_queue": queue.Queue, "logs": list}}
@@ -113,36 +123,22 @@ def log_output(process_name, pipe, log_queue, stream_type="STDOUT"):
     finally:
         log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {stream_type} 输出流已关闭")
 
-def start_process(config, cleanup_ports_first=False, ports_to_cleanup=None):
+def start_process(config):
     """启动进程（后台运行，不显示窗口）"""
     name = config['name']
     
     with process_lock:
-        # 先检查并停止已运行的服务实例（如果存在）
-        if name in processes and processes[name].get('process'):
-            proc = processes[name]['process']
-            if proc.poll() is None:
-                # 服务正在运行，先停止它
-                print(f"  ⚠️  {name} 正在运行，先停止它...")
-                try:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
-                    print(f"  ✓ 已停止旧的 {name} 进程")
-                except Exception as e:
-                    print(f"  ⚠️  停止旧进程失败: {e}")
-                # 清理进程记录
-                processes.pop(name, None)
-                # 等待一下让端口释放
-                time.sleep(1.0)
-        
-        # 如果需要，先清理端口（清理可能被其他进程占用的端口）
-        if cleanup_ports_first and ports_to_cleanup:
-            # 只清理指定的端口（该服务使用的端口）
-            cleanup_ports(ports_to_cleanup)
+        existing = processes.get(name, {}).get('process')
+        if existing and existing.poll() is None:
+            return {
+                "success": True,
+                "message": f"{name} 已在运行 (PID: {existing.pid})",
+                "pid": existing.pid,
+                "already_running": True,
+            }
+        # A dead child may remain in the registry until the next status check.
+        # Drop that stale record before starting its replacement.
+        processes.pop(name, None)
         
         try:
             if 'command' not in config and not os.path.exists(config['interpreter']):
@@ -289,16 +285,12 @@ def get_services():
 
 @app.route('/api/services/<path:name>/start', methods=['POST'])
 def start_service(name):
-    """启动单个服务（只清理该服务使用的端口）"""
+    """启动注册表中的服务；已运行的服务保持原样。"""
     config = next((p for p in PROCESSES if p['name'] == name), None)
     if not config:
         return jsonify({"success": False, "message": f"未找到服务: {name}"}), 404
     
-    # 获取该服务使用的端口列表
-    service_ports = SERVICE_PORTS.get(name, [])
-    
-    # 只清理该服务使用的端口
-    result = start_process(config, cleanup_ports_first=bool(service_ports), ports_to_cleanup=service_ports)
+    result = start_process(config)
     return jsonify(result)
 
 @app.route('/api/services/<path:name>/stop', methods=['POST'])
@@ -402,7 +394,7 @@ def api_presence():
                 "system_command": "update_presence",
                 "user_online": bool(online)
             }
-            pub_socket.send_multipart([b"syscmd", json.dumps(cmd_payload).encode("utf-8")])
+            publish_syscmd(cmd_payload)
             
             return jsonify({"success": True, "user_online": bool(online)})
         return jsonify({"success": False, "message": "写入失败"}), 500
@@ -411,14 +403,10 @@ def api_presence():
 
 @app.route('/api/services/start-all', methods=['POST'])
 def start_all_services():
-    """启动所有服务（清理所有需要的端口）"""
+    """按注册顺序启动所有服务，不会终止占用端口的外部进程。"""
     results = []
-    # 先清理所有端口（启动所有服务时需要清理所有端口）
-    cleanup_ports(list(ZMQ_PORTS.values()))
-    
     for config in PROCESSES:
-        # 启动服务时不清理端口（因为已经在上面统一清理了）
-        result = start_process(config, cleanup_ports_first=False)
+        result = start_process(config)
         results.append({"name": config['name'], **result})
         time.sleep(1)  # 延迟启动
     
@@ -437,46 +425,46 @@ def stop_all_services():
     
     return jsonify({"results": results})
 
-# ---------- 工具模型可调用工具配置（单一 schema 文件：tools[].name/description/enabled）----------
-TOOL_AGENT_SCHEMA_PATH = os.path.join(ROOT_DIR, "server", "tool_agent_schema.json")
+# ---------- 本地技能动作启用配置 ----------
+SKILL_ACTIONS_PATH = os.path.join(ROOT_DIR, "server", "skill_actions.json")
 
 
-@app.route('/api/tool_agent_tools', methods=['GET'])
-def get_tool_agent_tools():
-    """从 server/tool_agent_schema.json 读取工具列表（每项含 name/description/enabled），不依赖 Thinking 启动。"""
-    all_tools = []
-    if os.path.exists(TOOL_AGENT_SCHEMA_PATH):
+@app.route('/api/skill_actions', methods=['GET'])
+def get_skill_actions():
+    """读取本地 SkillRunner 的动作开关与说明。"""
+    all_actions = []
+    if os.path.exists(SKILL_ACTIONS_PATH):
         try:
-            with open(TOOL_AGENT_SCHEMA_PATH, 'r', encoding='utf-8') as f:
+            with open(SKILL_ACTIONS_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            all_tools = data.get("tools") or []
-            all_tools = sorted(all_tools, key=lambda t: (t.get("name") or ""))
+            all_actions = data.get("actions") or []
+            all_actions = sorted(all_actions, key=lambda t: (t.get("name") or ""))
         except Exception as e:
-            return jsonify({"success": False, "message": str(e), "all_tools": []}), 500
-    return jsonify({"all_tools": all_tools})
+            return jsonify({"success": False, "message": str(e), "actions": []}), 500
+    return jsonify({"actions": all_actions})
 
 
-@app.route('/api/tool_agent_tools', methods=['POST'])
-def save_tool_agent_tools():
-    """根据请求体 enabled 名单更新 schema 中每项工具的 enabled，写回 server/tool_agent_schema.json。"""
+@app.route('/api/skill_actions', methods=['POST'])
+def save_skill_actions():
+    """按请求体中的 enabled 名单更新本地 Skill 动作配置。"""
     try:
         body = request.get_json() or {}
         enabled = body.get("enabled")
         if not isinstance(enabled, list):
             return jsonify({"success": False, "message": "请提供 enabled 数组"}), 400
         enabled_set = set(str(x) for x in enabled)
-        if not os.path.exists(TOOL_AGENT_SCHEMA_PATH):
-            return jsonify({"success": False, "message": "schema 文件不存在"}), 400
-        with open(TOOL_AGENT_SCHEMA_PATH, 'r', encoding='utf-8') as f:
+        if not os.path.exists(SKILL_ACTIONS_PATH):
+            return jsonify({"success": False, "message": "技能动作配置文件不存在"}), 400
+        with open(SKILL_ACTIONS_PATH, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        tools = data.get("tools") or []
-        for t in tools:
-            t["enabled"] = t.get("name") in enabled_set
-        data["tools"] = sorted(tools, key=lambda t: (t.get("name") or ""))
-        os.makedirs(os.path.dirname(TOOL_AGENT_SCHEMA_PATH), exist_ok=True)
-        with open(TOOL_AGENT_SCHEMA_PATH, 'w', encoding='utf-8') as f:
+        actions = data.get("actions") or []
+        for action in actions:
+            action["enabled"] = action.get("name") in enabled_set
+        data["actions"] = sorted(actions, key=lambda action: (action.get("name") or ""))
+        os.makedirs(os.path.dirname(SKILL_ACTIONS_PATH), exist_ok=True)
+        with open(SKILL_ACTIONS_PATH, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        return jsonify({"success": True, "message": "已保存，下次工具模型被调用时生效"})
+        return jsonify({"success": True, "message": "已保存，下一轮模型请求时生效"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -499,10 +487,33 @@ def _realtime_screen_is_running():
             pid = int(f.read().strip())
     except (ValueError, OSError):
         return False
+    return _realtime_screen_process_matches(pid)
+
+
+def _realtime_screen_process_matches(pid):
+    """确认 PID 仍属于本项目脚本，避免 PID 文件过期后误杀复用该 PID 的进程。"""
+    expected_script = os.path.normcase(os.path.abspath(REALTIME_SCREEN_SCRIPT))
     try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
+        if sys.platform.startswith("win"):
+            result = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}'; if ($p) {{ $p.CommandLine }}",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=4,
+                check=False,
+            )
+            command_line = result.stdout
+        else:
+            with open(f"/proc/{int(pid)}/cmdline", "rb") as process_cmdline:
+                command_line = process_cmdline.read().replace(b"\0", b" ").decode("utf-8", errors="replace")
+        normalized_command = os.path.normcase(command_line).replace("/", "\\")
+        return expected_script.replace("/", "\\") in normalized_command
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
 
@@ -517,6 +528,12 @@ def _realtime_screen_stop():
         try:
             os.remove(REALTIME_SCREEN_PID_PATH)
         except Exception:
+            pass
+        return True
+    if not _realtime_screen_process_matches(pid):
+        try:
+            os.remove(REALTIME_SCREEN_PID_PATH)
+        except OSError:
             pass
         return True
     try:
@@ -538,23 +555,23 @@ def _realtime_screen_stop():
     return True
 
 
-def _update_tool_enabled_in_schema(tool_name, enabled):
-    """助手函数：更新 tool_agent_schema.json 中指定工具的 enabled 状态"""
+def _update_skill_action_enabled(tool_name, enabled):
+    """更新本地 Skill 动作开关。"""
     try:
-        if not os.path.exists(TOOL_AGENT_SCHEMA_PATH):
+        if not os.path.exists(SKILL_ACTIONS_PATH):
             return
-        with open(TOOL_AGENT_SCHEMA_PATH, 'r', encoding='utf-8') as f:
+        with open(SKILL_ACTIONS_PATH, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        tools = data.get("tools") or []
+        actions = data.get("actions") or []
         changed = False
-        for t in tools:
-            if t.get("name") == tool_name:
-                if t.get("enabled") != enabled:
-                    t["enabled"] = enabled
+        for action in actions:
+            if action.get("name") == tool_name:
+                if action.get("enabled") != enabled:
+                    action["enabled"] = enabled
                     changed = True
                 break
         if changed:
-            with open(TOOL_AGENT_SCHEMA_PATH, 'w', encoding='utf-8') as f:
+            with open(SKILL_ACTIONS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
@@ -600,7 +617,7 @@ def _realtime_screen_ensure_from_config():
     # 【新增】无论是否启动，都同步工具 schema 状态
     # 实时分析启用 -> 禁用 get_screen_info; 实时分析禁用 -> 启用 get_screen_info
     realtime_enabled = data.get("enabled", False)
-    _update_tool_enabled_in_schema("get_screen_info", not realtime_enabled)
+    _update_skill_action_enabled("get_screen_info", not realtime_enabled)
 
     if not realtime_enabled:
         return False, "配置中未启用，不启动"
@@ -654,7 +671,7 @@ def save_realtime_screen_config():
         enabled = config.get("enabled", False)
 
         # 【新增】状态切换时同步工具 schema
-        _update_tool_enabled_in_schema("get_screen_info", not bool(enabled))
+        _update_skill_action_enabled("get_screen_info", not bool(enabled))
 
         if enabled:
             ok, msg = _realtime_screen_start()
@@ -675,9 +692,10 @@ if __name__ == '__main__':
     print("=" * 60)
     print("模块管理服务器启动中...")
     print("=" * 60)
-    print("访问 http://localhost:5000 查看管理界面")
+    manager_url = f"http://{HTTP_HOST}:{HTTP_PORTS['MODULE_MANAGER']}"
+    print(f"访问 {manager_url} 查看管理界面")
     print("=" * 60)
     print()
     
     # 使用 use_reloader=False 和 use_debugger=False 来减少输出信息
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)
+    app.run(host=HTTP_HOST, port=HTTP_PORTS["MODULE_MANAGER"], debug=False, threaded=True, use_reloader=False)

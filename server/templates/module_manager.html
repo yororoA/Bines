@@ -431,8 +431,8 @@
                     <!-- 服务列表将通过 JavaScript 动态生成 -->
                 </ul>
                 <ul class="service-list" style="border-top: 1px solid #e0e0e0; margin-top: 8px;">
-                    <li class="service-item" id="sidebarToolAgent" onclick="selectToolAgentConfig()">
-                        <span class="service-name">工具模型</span>
+                    <li class="service-item" id="sidebarSkills" onclick="selectSkillsConfig()">
+                        <span class="service-name">本地技能</span>
                         <span class="service-status stopped"></span>
                     </li>
                     <li class="service-item" id="sidebarRealtimeScreen" onclick="selectRealtimeScreenConfig()">
@@ -456,15 +456,15 @@
                         <p>点击左侧服务名称可以查看该服务的实时日志输出</p>
                     </div>
                 </div>
-                <div id="toolsConfigPanel" class="tools-section" style="display: none;">
-                    <h2>工具模型可调用工具</h2>
-                    <p class="hint">勾选允许工具模型（ToolAgent）调用的工具，未勾选的工具将不会出现在工具模型的 schema 中。保存后<strong>下次工具模型被调用时</strong>立即生效，无需重启 Thinking。</p>
+                <div id="skillActionsPanel" class="tools-section" style="display: none;">
+                    <h2>本地技能可用动作</h2>
+                    <p class="hint">勾选主模型可通过本地 SkillRunner 执行的 Python 动作；未勾选的动作会被 SkillRunner 拒绝。保存后下一轮模型请求立即生效。</p>
                     <div class="tools-actions">
-                        <button type="button" class="btn btn-primary btn-small" onclick="toggleAllTools(true)">全选</button>
-                        <button type="button" class="btn btn-small btn-secondary" onclick="toggleAllTools(false)">取消全选</button>
-                        <button type="button" class="btn btn-primary btn-small" onclick="saveToolAgentTools()">保存</button>
+                        <button type="button" class="btn btn-primary btn-small" onclick="toggleAllSkillActions(true)">全选</button>
+                        <button type="button" class="btn btn-small btn-secondary" onclick="toggleAllSkillActions(false)">取消全选</button>
+                        <button type="button" class="btn btn-primary btn-small" onclick="saveSkillActions()">保存</button>
                     </div>
-                    <div id="toolsConfigList"></div>
+                    <div id="skillActionsConfigList"></div>
                 </div>
                 <div id="realtimeScreenPanel" class="tools-section" style="display: none;">
                     <h2>实时屏幕分析</h2>
@@ -498,8 +498,8 @@
         let logUpdateInterval = null;
         let statusUpdateInterval = null;
         let logEventSource = null;  // Server-Sent Events 连接
-        let viewMode = 'service';   // 'service' | 'tools'
-        let toolAgentData = { all_tools: [], enabled: [] };
+        let viewMode = 'service';   // 'service' | 'skills'
+        let skillActionsData = { actions: [], enabled: [] };
         let realtimeScreenData = { enabled: false, interval_sec: 10 };
 
         // 初始化
@@ -630,10 +630,10 @@
             document.getElementById('currentServiceName').textContent = serviceName;
             document.getElementById('contentActions').style.display = 'flex';
             document.getElementById('logContainer').style.display = 'block';
-            document.getElementById('toolsConfigPanel').style.display = 'none';
+            document.getElementById('skillActionsPanel').style.display = 'none';
             document.getElementById('realtimeScreenPanel').style.display = 'none';
             document.querySelectorAll('.service-item').forEach(el => {
-                if (el.id === 'sidebarToolAgent' || el.id === 'sidebarRealtimeScreen') el.classList.remove('active');
+                if (el.id === 'sidebarSkills' || el.id === 'sidebarRealtimeScreen') el.classList.remove('active');
             });
             
             // 更新列表中的活动项
@@ -663,9 +663,9 @@
             });
         }
 
-        // 选择「工具模型」配置页
-        function selectToolAgentConfig() {
-            viewMode = 'tools';
+        // 选择「本地技能」配置页
+        function selectSkillsConfig() {
+            viewMode = 'skills';
             currentService = null;
             if (logEventSource) {
                 logEventSource.close();
@@ -675,16 +675,16 @@
                 clearInterval(logUpdateInterval);
                 logUpdateInterval = null;
             }
-            document.getElementById('currentServiceName').textContent = '工具模型可调用工具';
+            document.getElementById('currentServiceName').textContent = '本地技能可用动作';
             document.getElementById('contentActions').style.display = 'none';
             document.getElementById('logContainer').style.display = 'none';
-            document.getElementById('toolsConfigPanel').style.display = 'block';
+            document.getElementById('skillActionsPanel').style.display = 'block';
             document.getElementById('realtimeScreenPanel').style.display = 'none';
             document.querySelectorAll('.service-item').forEach(el => {
-                if (el.id !== 'sidebarToolAgent') el.classList.remove('active');
+                if (el.id !== 'sidebarSkills') el.classList.remove('active');
             });
-            document.getElementById('sidebarToolAgent').classList.add('active');
-            loadToolAgentTools();
+            document.getElementById('sidebarSkills').classList.add('active');
+            loadSkillActions();
         }
 
         function selectRealtimeScreenConfig() {
@@ -695,7 +695,7 @@
             document.getElementById('currentServiceName').textContent = '实时屏幕分析';
             document.getElementById('contentActions').style.display = 'none';
             document.getElementById('logContainer').style.display = 'none';
-            document.getElementById('toolsConfigPanel').style.display = 'none';
+            document.getElementById('skillActionsPanel').style.display = 'none';
             document.getElementById('realtimeScreenPanel').style.display = 'block';
             document.querySelectorAll('.service-item').forEach(el => {
                 if (el.id !== 'sidebarRealtimeScreen') el.classList.remove('active');
@@ -750,37 +750,37 @@
             }
         }
 
-        async function loadToolAgentTools() {
+        async function loadSkillActions() {
             try {
-                const res = await fetch('/api/tool_agent_tools');
+                const res = await fetch('/api/skill_actions');
                 const data = await res.json();
-                const all_tools = data.all_tools || [];
-                toolAgentData = {
-                    all_tools,
-                    enabled: all_tools.filter(t => t.enabled !== false).map(t => t.name).filter(Boolean)
+                const actions = data.actions || [];
+                skillActionsData = {
+                    actions,
+                    enabled: actions.filter(t => t.enabled !== false).map(t => t.name).filter(Boolean)
                 };
-                renderToolAgentTools();
+                renderSkillActions();
             } catch (e) {
-                console.error('加载工具配置失败:', e);
-                document.getElementById('toolsConfigList').innerHTML = '<div class="empty-state"><p>加载失败，请重试</p></div>';
+                console.error('加载技能动作配置失败:', e);
+                document.getElementById('skillActionsConfigList').innerHTML = '<div class="empty-state"><p>加载失败，请重试</p></div>';
             }
         }
 
-        function renderToolAgentTools() {
-            const list = document.getElementById('toolsConfigList');
-            const enabledSet = new Set(toolAgentData.enabled);
-            if (toolAgentData.all_tools.length === 0) {
-                list.innerHTML = '<div class="empty-state"><p>暂无工具列表（请确认 server/tool_agent_schema.json 存在且含 tools 数组）</p></div>';
+        function renderSkillActions() {
+            const list = document.getElementById('skillActionsConfigList');
+            const enabledSet = new Set(skillActionsData.enabled);
+            if (skillActionsData.actions.length === 0) {
+                list.innerHTML = '<div class="empty-state"><p>暂无可用动作（请确认 server/skill_actions.json 存在且含 actions 数组）</p></div>';
                 return;
             }
-            const sorted = [...toolAgentData.all_tools].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+            const sorted = [...skillActionsData.actions].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
             list.innerHTML = sorted.map(t => {
                 const name = t.name || '';
                 const desc = t.description || '';
                 const checked = t.enabled !== false && enabledSet.has(name);
                 const safeId = 'tool_' + name.replace(/[^a-zA-Z0-9_-]/g, '_');
                 return `<div class="tool-item ${checked ? '' : 'disabled'}">
-                    <input type="checkbox" id="${safeId}" data-name="${escapeHtml(name)}" ${checked ? 'checked' : ''} onchange="toggleToolItem(this)">
+                    <input type="checkbox" id="${safeId}" data-name="${escapeHtml(name)}" ${checked ? 'checked' : ''} onchange="toggleSkillActionItem(this)">
                     <div>
                         <span class="name">${escapeHtml(name)}</span>
                         <div class="desc">${escapeHtml(desc)}</div>
@@ -789,33 +789,33 @@
             }).join('');
         }
 
-        function toggleToolItem(checkboxEl) {
+        function toggleSkillActionItem(checkboxEl) {
             const name = checkboxEl.dataset.name;
             const item = checkboxEl.closest('.tool-item');
             if (checkboxEl.checked) {
-                if (!toolAgentData.enabled.includes(name)) toolAgentData.enabled.push(name);
+                if (!skillActionsData.enabled.includes(name)) skillActionsData.enabled.push(name);
                 item.classList.remove('disabled');
             } else {
-                toolAgentData.enabled = toolAgentData.enabled.filter(x => x !== name);
+                skillActionsData.enabled = skillActionsData.enabled.filter(x => x !== name);
                 item.classList.add('disabled');
             }
         }
 
-        function toggleAllTools(checked) {
-            toolAgentData.enabled = checked ? toolAgentData.all_tools.map(t => t.name).filter(Boolean) : [];
-            document.querySelectorAll('#toolsConfigList input[type="checkbox"][data-name]').forEach(cb => {
+        function toggleAllSkillActions(checked) {
+            skillActionsData.enabled = checked ? skillActionsData.actions.map(t => t.name).filter(Boolean) : [];
+            document.querySelectorAll('#skillActionsConfigList input[type="checkbox"][data-name]').forEach(cb => {
                 cb.checked = checked;
                 const item = cb.closest('.tool-item');
                 if (item) item.classList.toggle('disabled', !checked);
             });
         }
 
-        async function saveToolAgentTools() {
+        async function saveSkillActions() {
             try {
-                const res = await fetch('/api/tool_agent_tools', {
+                const res = await fetch('/api/skill_actions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ enabled: toolAgentData.enabled })
+                    body: JSON.stringify({ enabled: skillActionsData.enabled })
                 });
                 const data = await res.json();
                 showNotification(data.message || (data.success ? '保存成功' : '保存失败'), data.success ? 'success' : 'error');

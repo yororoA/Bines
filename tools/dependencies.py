@@ -11,13 +11,11 @@ class ToolDependencies:
         self.memory_system = None
         self.zmq_context = None
         self.thinking_model_helper = None
+        self.skill_runner = None
         self.game_mode_enabled = False
         self.game_mode_interval = 0.1
         # 播放本地音频（sing 工具）时使用的 PUB socket，由 handle_zmq 绑定并注册
         self.audio_play_pub_socket = None
-        # 用于获取工具定义和注册表的回调函数（避免循环导入）
-        self.get_tools_schema = None
-        self.get_tools_registry = None
 
     def _set_once(self, attr_name, value, label):
         current = getattr(self, attr_name)
@@ -44,31 +42,15 @@ class ToolDependencies:
     def register_thinking_model_helper(self, helper):
         """注册思考模型助手"""
         self._set_once("thinking_model_helper", helper, "thinking_model_helper")
+
+    def register_skill_runner(self, runner):
+        """注册本地 SKILL.md 与 Python 动作运行器。"""
+        self._set_once("skill_runner", runner, "skill_runner")
     
     def set_game_mode(self, enabled, interval=0.1):
         """设置游戏模式状态"""
         self.game_mode_enabled = enabled
         self.game_mode_interval = interval
     
-    def register_tools_accessors(self, get_tools_schema, get_tools_registry):
-        """
-        注册工具定义和注册表的访问器（回调函数）
-        
-        用于 thinking_tool.py 中获取工具定义，避免循环导入
-        
-        Args:
-            get_tools_schema: 返回 TOOLS_SCHEMA 的函数
-            get_tools_registry: 返回 TOOLS_REGISTRY 的函数
-        """
-        if self.get_tools_schema is None:
-            self.get_tools_schema = get_tools_schema
-        elif self.get_tools_schema is not get_tools_schema:
-            raise RuntimeError("get_tools_schema 已注册，禁止重复覆盖")
-
-        if self.get_tools_registry is None:
-            self.get_tools_registry = get_tools_registry
-        elif self.get_tools_registry is not get_tools_registry:
-            raise RuntimeError("get_tools_registry 已注册，禁止重复覆盖")
-
 # 全局依赖实例
 deps = ToolDependencies()
