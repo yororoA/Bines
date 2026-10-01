@@ -11,7 +11,6 @@ import sys
 import json
 import time
 import zmq
-import requests
 import datetime
 import re
 import random
@@ -25,12 +24,10 @@ from config import (
     ZMQ_HOST,
     ZMQ_PORTS,
     PRESENCE_STATE_PATH,
-    DEEPSEEK_API_URL,
-    DEEPSEEK_BORED_API_KEY,
-    DEEPSEEK_API_KEY,
     DEEPSEEK_MODEL,
-    DEEPSEEK_API_TIMEOUT,
 )
+from common.deepseek_client import get_deepseek_client
+from common.zmq_bus import create_publisher
 
 # 导入短期记忆系统、动态状态和永久记忆
 from layered_memory import ShortTermMemory, DynamicMemory, PermanentMemory
@@ -135,30 +132,17 @@ last_visual_caption = ""
 last_visual_stimulus_reason = None    # 若因视觉刺激触发，填入原因供主进程生成 prompt
 
 # DeepSeek 配置（优先 Bored 专用 Key，未设置时回退到主 Key，便于启用无聊检测）
-API_KEY = (DEEPSEEK_BORED_API_KEY or DEEPSEEK_API_KEY) or ""
-if not API_KEY:
-    raise RuntimeError(
-        "Bored Detector 需要 API Key：请设置 DEEPSEEK_BORED_API_KEY 或 DEEPSEEK_API_KEY"
-    )
-API_URL = DEEPSEEK_API_URL
 MODEL = DEEPSEEK_MODEL
-TIMEOUT = DEEPSEEK_API_TIMEOUT
 
 # ZMQ 配置
 HOST = ZMQ_HOST
-BORED_PUB_PORT = ZMQ_PORTS["BORED_PUB"]
-VISUAL_REQREP_PORT = ZMQ_PORTS.get("VISUAL_REQREP", 5557)
+VISUAL_REQREP_PORT = ZMQ_PORTS["VISUAL_REQREP"]
 BORED_TOPIC = "bored"
 
 # 初始化 ZMQ
 context = zmq.Context()
-pub_socket = context.socket(zmq.PUB)
-try:
-    pub_socket.bind(f"tcp://*:{BORED_PUB_PORT}")
-    print(f"[Bored Detector] ZMQ PUB socket bound to port {BORED_PUB_PORT}", flush=True)
-except Exception as e:
-    print(f"[Bored Detector] Failed to bind ZMQ socket: {e}", flush=True)
-    sys.exit(1)
+pub_socket = create_publisher(context, label="Bored Detector")
+print("[Bored Detector] ZMQ PUB connected to local bus", flush=True)
 
 
 def _fetch_visual_snapshot():
@@ -456,25 +440,16 @@ def check_bored():
 【心情】：{mood_description} 等级：{collapsed_level}
 是否应该主动发起对话？(True/False)"""
 
-        payload = {
-            "model": MODEL,
-            "messages": [
+        response = get_deepseek_client().chat.completions.create(
+            model=MODEL,
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "temperature": 0.1,
-            "max_tokens": 10,
-            "stream": False
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {API_KEY}"
-        }
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=TIMEOUT)
-        response.raise_for_status()
-        result = response.json()
-        answer = result["choices"][0]["message"]["content"].strip().lower()
+            temperature=0.1,
+            max_tokens=10,
+        )
+        answer = (response.choices[0].message.content or "").strip().lower()
         is_bored = "true" in answer
 
         if is_bored:
@@ -498,7 +473,7 @@ def main():
     """主循环：每 10 秒更新无聊值，达 100 且过冷却后经 LLM 确认触发。"""
     global next_allowed_trigger_time, last_check_time
     print("[Bored Detector] Process Started (无聊值 0-100 + mtime 缓存 + 生物钟).", flush=True)
-    print(f"[Bored Detector] API Key: {API_KEY[:10]}...", flush=True)
+    print(f"[Bored Detector] DeepSeek model: {MODEL}", flush=True)
     next_allowed_trigger_time = time.time() + 60
     last_check_time = time.time()
 

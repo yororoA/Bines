@@ -1,6 +1,6 @@
 """
 动态（Moments）后端 API 客户端。
-与 Express 提供的 /api/moments 接口字段与路径一致，供 Thinking / 工具模型调用。
+与 Express 提供的 /api/moments 接口字段与路径一致，供本地 Skills 调用。
 uid 与 token 从环境变量 MOMENTS_UID、MOMENTS_TOKEN 读取，请求头必带。
 调用动态相关工具时写入 moments_tools.log，记录工具名、参数及结果摘要。
 """
@@ -129,7 +129,7 @@ def _request_with_retry(
             _log_moments_call(f"{tool_name}#error{attempt}", log_params, f"Error: {e}")
             if attempt < max_retries:
                 continue
-            # 最终失败仍抛出，让调用方（主模型/工具模型）感知错误
+            # 最终失败仍抛出，让 SkillRunner 返回明确错误
             raise
 
     # 理论上不会到这里
@@ -590,20 +590,19 @@ def analyze_moment_images(moment_id: str, max_images: int = 3, timeout: int = 25
     try:
         import requests as _requests
         import base64 as _b64
+        from vlm_client import call_dashscope_vlm
         from config import (
             DASHSCOPE_API_URL,
             DASHSCOPE_API_KEY,
             DASHSCOPE_VISION_MODEL,
             DASHSCOPE_API_TIMEOUT,
-            require_env,
         )
     except Exception as e:
         msg = f"import_error: {e}"
         _log_moments_call("analyze_moment_images", {"moment_id": moment_id}, msg)
         return {"message": msg, "data": ""}
 
-    api_key = require_env("DASHSCOPE_API_KEY", DASHSCOPE_API_KEY)
-    if not api_key:
+    if not DASHSCOPE_API_KEY:
         msg = "no_dascope_api_key"
         _log_moments_call("analyze_moment_images", {"moment_id": moment_id}, msg)
         return {"message": msg, "data": ""}
@@ -647,67 +646,30 @@ def analyze_moment_images(moment_id: str, max_images: int = 3, timeout: int = 25
             _log_moments_call("analyze_moment_images_download", {"url": url}, f"Error: {dl_err}")
             image_content = url
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "model": DASHSCOPE_VISION_MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "请详细描述这张图片的内容。如果包含文字请提取出来。如果是表情包/梗图请描述其含义。简洁回复，不超过100字。",
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_content,
-                            },
-                        },
-                    ],
-                }
-            ],
-            "max_tokens": 200,
-        }
-
-        last_err: Optional[Exception] = None
-        for attempt in range(1, 4):
-            try:
-                resp = _requests.post(
-                    DASHSCOPE_API_URL,
-                    headers=headers,
-                    json=payload,
-                    timeout=timeout or DASHSCOPE_API_TIMEOUT,
-                    proxies={"http": None, "https": None},
-                )
-                if resp.status_code == 200:
-                    result = resp.json()
-                    desc = (
-                        result.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-                    if desc:
-                        descriptions.append(f"[图片{idx}内容: {desc.strip()}]")
-                    else:
-                        descriptions.append(f"[图片{idx}: 无法识别内容]")
-                    break
-                else:
-                    last_err = RuntimeError(f"VLM status {resp.status_code}")
-            except Exception as e:
-                last_err = e
-
-        if last_err is not None and (len(descriptions) < idx):
+        desc = call_dashscope_vlm(
+            image_content,
+            "请详细描述这张图片的内容。如果包含文字请提取出来。如果是表情包/梗图请描述其含义。简洁回复，不超过100字。",
+            api_url=DASHSCOPE_API_URL,
+            api_key=DASHSCOPE_API_KEY,
+            model=DASHSCOPE_VISION_MODEL,
+            timeout=timeout or DASHSCOPE_API_TIMEOUT,
+            proxies={"http": None, "https": None},
+            max_tokens=200,
+            retries=3,
+            request_failed_prefix="[Moments VLM 请求失败",
+            error_message_prefix="[Moments VLM 异常]",
+        )
+        if desc.startswith("[Moments VLM"):
             _log_moments_call(
                 "analyze_moment_images_vlm",
                 {"url": url, "attempts": 3},
-                f"Error: {last_err}",
+                f"Error: {desc}",
             )
             descriptions.append(f"[图片{idx}: 分析出错]")
+        elif desc:
+            descriptions.append(f"[图片{idx}内容: {desc}]")
+        else:
+            descriptions.append(f"[图片{idx}: 无法识别内容]")
 
     joined = "\n".join(descriptions)
     return {"message": "ok", "data": joined}

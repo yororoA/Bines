@@ -1,3 +1,4 @@
+import time
 from typing import Iterable, Optional, Sequence, Union
 
 import requests
@@ -17,6 +18,8 @@ def call_dashscope_vlm(
     request_failed_prefix: str = "[VLM 请求失败",
     empty_message: str = "",
     error_message_prefix: str = "[VLM 异常]",
+    max_tokens: Optional[int] = None,
+    retries: int = 1,
 ) -> str:
     """统一 DashScope VLM 请求封装，支持单图/多图。"""
     if not api_key:
@@ -30,7 +33,7 @@ def call_dashscope_vlm(
     for img in images:
         if not img:
             continue
-        if isinstance(img, str) and img.startswith("data:"):
+        if isinstance(img, str) and img.startswith(("data:", "http://", "https://")):
             normalized.append(img)
         else:
             normalized.append(f"data:image/jpeg;base64,{img}")
@@ -46,24 +49,35 @@ def call_dashscope_vlm(
         "model": model,
         "messages": [{"role": "user", "content": content}],
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    try:
-        resp = requests.post(
-            api_url,
-            headers=headers,
-            json=payload,
-            timeout=timeout,
-            proxies=proxies,
-        )
-        if resp.status_code != 200:
-            text = (resp.text or "")[:300]
-            return f"{request_failed_prefix} {resp.status_code}] {text}"
-        out = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
-        out = out.strip() if isinstance(out, str) else ""
-        return out or empty_message
-    except Exception as e:
-        return f"{error_message_prefix} {e}" if error_message_prefix else ""
+    attempts = max(1, int(retries))
+    last_error = ""
+    for attempt in range(attempts):
+        try:
+            resp = requests.post(
+                api_url,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+                proxies=proxies,
+            )
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code}: {(resp.text or '')[:300]}"
+            else:
+                out = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+                out = out.strip() if isinstance(out, str) else ""
+                return out or empty_message
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        if attempt + 1 < attempts:
+            time.sleep(min(0.25 * (attempt + 1), 1.0))
+
+    if request_failed_prefix:
+        return f"{request_failed_prefix} {last_error}]"
+    return f"{error_message_prefix} {last_error}" if error_message_prefix else ""

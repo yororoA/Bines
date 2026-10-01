@@ -3,7 +3,7 @@
 独立视频分析脚本：使用与屏幕分析相同的 DashScope VLM（如 qwen3-vl-flash），
 按 5 秒一段对视频进行切分并分析，输出人物表情/动作/环境/交互的连贯叙述。
 
-不依赖项目内任何模块，单独运行即可。需设置环境变量 DASHSCOPE_API_KEY。
+只依赖根目录的 config.py，可单独运行。DashScope 凭据从环境变量读取。
 
 用法:
   python video_analysis_standalone.py --video path/to/video.mp4
@@ -27,16 +27,13 @@ except ImportError:
     print("请安装 requests: pip install requests", file=sys.stderr)
     sys.exit(1)
 
-from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
-
-# 与项目屏幕分析一致的 DashScope 配置（仅从环境变量读取，不引用 config）
-DASHSCOPE_API_URL = os.environ.get(
-    "DASHSCOPE_API_URL",
-    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+from config import (
+    DASHSCOPE_API_KEY,
+    DASHSCOPE_API_TIMEOUT,
+    DASHSCOPE_API_URL,
+    DASHSCOPE_VISION_MODEL,
 )
-DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY")
-DASHSCOPE_VISION_MODEL = os.environ.get("DASHSCOPE_VISION_MODEL", "qwen3-vl-flash")
-DASHSCOPE_API_TIMEOUT = int(os.environ.get("DASHSCOPE_API_TIMEOUT", "60"))
+from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
 
 # 输出图片最大边，控制 API 体积
 MAX_IMAGE_SIZE = 1280

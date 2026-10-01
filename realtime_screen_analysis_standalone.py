@@ -3,7 +3,7 @@
 实时流屏幕分析脚本：按固定间隔截屏，使用与 video_analysis_standalone 相同的 DashScope VLM
 分析当前屏幕内容，将结果写入 server/realtime_screen_analysis.txt，供主模型作为系统消息注入。
 
-不依赖项目内其他模块，单独运行。需设置环境变量 DASHSCOPE_API_KEY。
+只依赖根目录的 config.py，不需要启动其他服务。DashScope 凭据从环境变量读取。
 启用/关闭由 server/realtime_screen_config.json 的 enabled 控制。
 
 用法:
@@ -27,6 +27,12 @@ except ImportError:
     print("请安装 requests: pip install requests", file=sys.stderr)
     sys.exit(1)
 
+from config import (
+    DASHSCOPE_API_KEY,
+    DASHSCOPE_API_TIMEOUT,
+    DASHSCOPE_API_URL,
+    DASHSCOPE_VISION_MODEL,
+)
 from realtime_screen_config import load_realtime_screen_config
 from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
 
@@ -76,15 +82,6 @@ try:
     sys.stderr = _Tee(sys.__stderr__, _log_file)
 except Exception:
     pass
-
-# 与 video_analysis_standalone 一致的 DashScope 配置
-DASHSCOPE_API_URL = os.environ.get(
-    "DASHSCOPE_API_URL",
-    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-)
-DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY")
-DASHSCOPE_VISION_MODEL = os.environ.get("DASHSCOPE_VISION_MODEL", "qwen3-vl-flash")
-DASHSCOPE_API_TIMEOUT = int(os.environ.get("DASHSCOPE_API_TIMEOUT", "60"))
 
 # 截图长宽各压缩一半再上传，降低 API 体积
 SCALE_HALF = 0.5

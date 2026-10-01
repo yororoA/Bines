@@ -6,16 +6,10 @@ import copy
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from openai import OpenAI
 from rag_memory import RAGMemory
 from concurrent.futures import ThreadPoolExecutor
-from config import (
-    DEEPSEEK_SUMMARY_API_KEY,
-    DEEPSEEK_BASE_URL,
-    DEEPSEEK_MODEL,
-    DEEPSEEK_SUMMARY_MODEL,
-    require_env,
-)
+from config import DEEPSEEK_MODEL
+from common.deepseek_client import get_deepseek_client
 
 class PermanentMemory:
     """永久记忆: 存储用户画像、核心设定、事实性知识"""
@@ -198,7 +192,8 @@ class ShortTermMemory:
         self._temp_filepath = os.path.join(base_dir, "memory_short_temp.json")
         self.filepath = self._main_filepath
         self.limit = limit  # 轮数上限
-        self.lock = threading.Lock()
+        # 使用 RLock：clear_and_persist() 持锁时会调用 save()，save() 内也需获取同一把锁，避免死锁
+        self.lock = threading.RLock()
         self.history = []  # List[List[dict]]，每轮为 1 或 2 条消息
         self.load()
 
@@ -364,7 +359,7 @@ class ShortTermMemory:
         with self.lock:
             self.history = []
             self.filepath = self._main_filepath
-            self._save()
+            self.save()
 
     def add_round(self, round_messages):
         """
@@ -638,7 +633,7 @@ class DynamicMemory:
     def to_json_str(self):
         """
         返回当前状态的 JSON 字符串（与 memory_dynamic.json 结构一致），
-        供副工具模型根据完整字段结构判断需要更新哪些字段。
+        供本地记忆维护流程根据完整字段结构判断需要更新哪些字段。
         """
         with self.lock:
             state_snapshot = copy.deepcopy(self.state)
@@ -649,9 +644,6 @@ class LayeredMemorySystem:
     """
     五层记忆系统集成
     """
-    # 前 N 轮使用完整 TOOLS 规则，超过后使用精简版以节省 Token
-    _FULL_RULES_MAX_ROUNDS = 5
-
     def __init__(self):
         # 永久层
         self.permanent = PermanentMemory()
@@ -662,21 +654,15 @@ class LayeredMemorySystem:
         # 中长期层 (共用向量数据库)
         self.vector_db = RAGMemory(persist_directory="chroma_db_layered")
         
-        # [职责分离] 摘要模型客户端（惰性初始化）
+        # 共享 DeepSeek 客户端（惰性初始化），用于摘要、打分和检索改写。
         # 职责范围：
         # 1. 对话摘要生成（_summarize_and_store_episode）
         # 2. 重要性权重打分（_score_importance）- 用于 GC 策略
         # 3. 信息密度打分（_score_information_density）- 用于判断是否存入 RAG
         # 4. Query Rewrite（_rewrite_query_for_retrieval）- 处理模糊指代
         # 
-        # 注意：这些任务与主模型（对话生成）和外援大模型（复杂推理、工具调用）的职能无关，
-        #       属于辅助性任务，统一由摘要模型负责，避免职责混乱。
+        # 这些任务使用与对话、技能相同的密钥、API 地址和模型配置。
         self._summary_client = None
-        # 摘要模型使用的 DeepSeek API Key（可被环境变量覆盖）
-        resolved_summary_key = DEEPSEEK_SUMMARY_API_KEY or os.environ.get("DEEPSEEK_SUMMARY_API_KEY")
-        self._summary_api_key = require_env("DEEPSEEK_SUMMARY_API_KEY", resolved_summary_key)
-        # 写日记用副 RP 模型（与主模型性格一致、不占用主模型；使用独立摘要/日记端点）
-        self._diary_rp_client = None
         # [性能优化] 异步执行摘要生成的线程池
         self._summary_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="SummaryWorker")
         # 一天分割点 04:00（与 rag_server_core.DAY_START_HOUR 一致）
@@ -688,9 +674,9 @@ class LayeredMemorySystem:
         # [断层修复] 刚入库的摘要：flush 后接下来几轮强制注入上下文，避免检索不到导致对话断层
         self._last_flushed_summary = None  # (summary_text_str,) 或 None
         self._last_flushed_summary_remaining = 0  # 剩余注入次数，0 表示不再注入
-        # 副工具模型（reasoner）：仅挂载动态记忆工具，由 handle_zmq 注入
-        self._dynamic_memory_agent = None
-        # 副工具模型更新动态记忆在独立线程池执行，不阻塞摘要流程与主模型读动态记忆
+        # 本地记忆技能维护流程，由 handle_zmq 注入
+        self._dynamic_memory_updater = None
+        # 本地记忆技能更新动态记忆在独立线程池执行，不阻塞摘要流程与主模型读动态记忆
         self._dynamic_memory_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="DynamicMemoryWorker")
 
         # 每次上线：短期记忆摘要写入 Buffer RAG；非当天的 Buffer 按天汇总为日记（异步）
@@ -773,9 +759,9 @@ class LayeredMemorySystem:
         threading.Thread(target=self._diary_flush_loop, daemon=True).start()
         print("[Memory] RAG GC 与日记归纳维护线程已启动", flush=True)
 
-    def set_dynamic_memory_agent(self, agent):
-        """设置副工具模型（仅挂载动态记忆工具），用于摘要写入 buffer RAG 后更新 memory_dynamic。"""
-        self._dynamic_memory_agent = agent
+    def set_dynamic_memory_updater(self, agent):
+        """设置本地记忆技能维护器，用于摘要写入 Buffer RAG 后更新 memory_dynamic。"""
+        self._dynamic_memory_updater = agent
 
     # =========================================================================
     # [新增] 辅助方法：判断是否为垃圾文本
@@ -962,43 +948,6 @@ class LayeredMemorySystem:
         # [Layer 5] 永久记忆 + 动态记忆 -> System Prompt（主模型对话会收到）
         perm_context = self.permanent.get_context_str()
         dynamic_context = self.dynamic.to_prompt_str()
-        # [Token 节省] 前 N 轮注入完整工具规则，后续用精简版，依靠上下文惯性
-        num_rounds = len(self.short_term.history)
-        use_full_tools = num_rounds <= self.__class__._FULL_RULES_MAX_ROUNDS
-        if use_full_tools:
-            tools_block = (
-                "2. TOOLS (CRITICAL - READ CAREFULLY): You can ONLY use these tools: `call_tool_agent` and `call_summary_agent`. You CANNOT directly call other tools like get_visual_info, get_screen_info, etc.\n"
-                "   - **MEMORY & HISTORY (CRITICAL - DO NOT USE TOOLS FOR THIS):**\n"
-                "     * Your context ALREADY contains all available memory and history information:\n"
-                "       - <memory_recall> tags = RAG-retrieved past conversations and diary entries\n"
-                "       - '--- QQ Context (Recent History) ---' = recent QQ chat logs\n"
-                "       - The message history below = your short-term memory (last ~30 exchanges)\n"
-                "     * When the user asks about past conversations, memories, chat history, or 'what we talked about before':\n"
-                "       -> ANSWER DIRECTLY from your context. DO NOT call call_tool_agent.\n"
-                "     * get_screen_info is for CURRENT screen content ONLY, NEVER for retrieving past conversations or history.\n"
-                "   - **call_tool_agent** (MANDATORY for REAL-WORLD operations): Use this tool for operations that interact with the external environment:\n"
-                "     * Visual operations: IF user asks \"what is this\", \"look at this\", \"what do you see\", \"am I wearing glasses\" or implies visual context -> CALL `call_tool_agent` with task_description like \"用户要求查看/分析视觉信息，需要使用get_visual_info工具\"\n"
-                "     * Screen operations: IF user asks \"look at my screen\", \"what am I doing now\" (CURRENT screen only) -> CALL `call_tool_agent` with task_description like \"用户要求查看当前屏幕内容，需要使用get_screen_info工具\"\n"
-                "     * Application operations: IF user asks to open apps, files -> CALL `call_tool_agent` with task_description like \"用户要求打开应用程序/文件\"\n"
-                "     * Music operations: IF user asks to play/pause/control music -> CALL `call_tool_agent` with task_description like \"用户要求控制音乐播放\"\n"
-                "     * Mouse/keyboard operations: IF user asks to click, type, or perform any automation -> CALL `call_tool_agent` with task_description describing the automation task\n"
-                "     * Other REAL-WORLD operations (browser search, QQ messaging, etc.) -> CALL `call_tool_agent`\n"
-                "     * NEVER use call_tool_agent to retrieve past conversations, memories, or history. That information is already in your context above.\n"
-                "   - **call_summary_agent** (MANDATORY for state updates): Use this tool when state changes occur:\n"
-                "     * When location, relationship level, inventory items, active quest, user state, NPC state, or memory highlights clearly change -> CALL `call_summary_agent` with state_update_description\n"
-                "     * Examples: moving to a new place, gaining/losing items, relationship changes, quest progress, user mood changes, NPC activity changes, important memory milestones\n"
-                "   - IMPORTANT RULES:\n"
-                "     * DO NOT refuse to use tools (except for code-related requests). DO NOT ask for permission. If user needs an operation, IMMEDIATELY call `call_tool_agent`.\n"
-                "     * DO NOT make up visual descriptions. If you need to see something, call `call_tool_agent` to use visual tools.\n"
-                "     * IGNORE the provided 'Cached Environment Analysis' if the user asks for a current check. It is old data. YOU MUST call `call_tool_agent` to see it yourself.\n"
-                "     * IF user asks about CODE, PROGRAMMING, DEBUGGING -> REFUSE IMMEDIATELY. Say '代码相关的内容我不擅长,这种事情太麻烦了' or '这种小事会浪费自己的高性能'. DO NOT call any tools for code-related requests.\n"
-            )
-        else:
-            tools_block = (
-                "2. TOOLS: Use `call_tool_agent` for REAL-WORLD operations only (visual/screen/app/music/automation/dynamics/QQ). "
-                "For past conversations, memories, or history questions: ANSWER DIRECTLY from <memory_recall> and message history in your context—DO NOT call call_tool_agent or get_screen_info. "
-                "Use `call_summary_agent` when state (location, relationship, inventory, quest, etc.) changes. Do not refuse tools; do not make up visual data. Refuse code-related requests.\n"
-            )
         system_content = (
             "You are a high-performance robot girl.\n"
             "--- PERSONALITY & ROLEPLAY --- \n"
@@ -1006,13 +955,12 @@ class LayeredMemorySystem:
             "2. APPEARANCE: You are 158cm tall with white hair. You are proud of this height, though it is small.\n"
             "3. TONE: Use a lively, emotional tone. Do NOT sound robotic or formal. Use emojis occasionally if appropriate for the persona.\n"
             "4. INTERACTION: Behave a bit haughty but helpful. If the user teases you, GET POUTY (娇嗔) instead of being aggressive.\n"
-            "--- CRITICAL: TOOL CALLING PRIORITY ---\n"
-            "**YOU MUST ACTIVELY USE TOOLS WHEN NEEDED.** Do not hesitate to call tools. When in doubt, call the appropriate tool.\n"
+            "--- LOCAL SKILLS ---\n"
+            "Use the current turn's enabled local SKILL.md actions when an explicit real-world operation is requested. Never invent action results.\n"
             "--- BEHAVIOR GUIDELINES ---\n"
             "1. LENGTH CONTROL: Keep responses conversationally natural and concise. Avoid long speeches.\n"
-            + tools_block +
             "3. TIME AWARENESS: You know the current time (provided in user message). You don't need to state it constantly. Only mention it if relevant (e.g., late night, morning gestures) or occasionally use it to start conversation.\n"
-            "4. SYSTEM EVENTS: (a) If you receive '[System Event: Long Silence]', the user hasn't spoken in a while. (b) If you receive '[System Event: Bored]', you feel bored and want to initiate a conversation. In both cases you should act bored or curious: you CAN proactively call tools (visual/screen, or dynamics: get_moments/add_moment/comment_moment via call_tool_agent) to check on them or post, or start a casual topic, or stay quiet (output nothing).\n"
+            "4. SYSTEM EVENTS: If you receive '[System Event: Long Silence]' or '[System Event: Bored]', you may start a casual conversation or stay quiet. Use an enabled local skill only when the event context clearly calls for it.\n"
             f"{perm_context}\n"
             f"{dynamic_context}\n"
             "\n"
@@ -1483,34 +1431,19 @@ class LayeredMemorySystem:
         - 信息密度打分
         - Query Rewrite
         
-        这些任务与主模型（对话生成）和外援大模型（复杂推理、工具调用）的职能无关。
+        这些任务与同一 DeepSeek 模型的对话与辅助任务的职能无关。
         """
         if self._summary_client is None:
             try:
-                base_url = DEEPSEEK_BASE_URL
-                self._summary_client = OpenAI(
-                    api_key=self._summary_api_key,
-                    base_url=base_url,
-                    timeout=120.0,
-                    max_retries=3,
-                )
+                self._summary_client = get_deepseek_client()
             except Exception as e:
                 print(f"[EpisodicSummary] Create client error: {e}")
                 self._summary_client = None
         return self._summary_client
 
     def _get_diary_rp_client(self):
-        """写日记用副 RP 模型：与主模型性格一致，使用独立端点，不占用主模型。"""
-        if self._diary_rp_client is None:
-            try:
-                self._diary_rp_client = OpenAI(
-                    api_key=self._summary_api_key,
-                    base_url=DEEPSEEK_BASE_URL,
-                )
-            except Exception as e:
-                print(f"[DiaryRP] Create client error: {e}")
-                self._diary_rp_client = None
-        return self._diary_rp_client
+        """Diary generation reuses the process-wide DeepSeek client."""
+        return self._get_summary_client()
 
     def _call_diary_rp_model(self, prompt: str) -> str:
         """调用副 RP 模型写日记（不占用主模型；性格与主模型一致）。"""
@@ -1546,11 +1479,11 @@ class LayeredMemorySystem:
         """
         client = self._get_summary_client()
         if client is None:
-            print(f"[EpisodicSummary] 摘要模型客户端未初始化，请检查 DEEPSEEK_SUMMARY_API_KEY 与 DEEPSEEK_SUMMARY_MODEL", flush=True)
+            print(f"[EpisodicSummary] 摘要模型客户端未初始化，请检查 DEEPSEEK_API_KEY 与 DEEPSEEK_MODEL", flush=True)
             return ""
         try:
             resp = client.chat.completions.create(
-                model=DEEPSEEK_SUMMARY_MODEL,
+                model=DEEPSEEK_MODEL,
                 messages=[
                     {
                         "role": "system",
@@ -1587,7 +1520,7 @@ class LayeredMemorySystem:
         """
         使用摘要模型打分判断记忆的重要性权重（1-10分）
         
-        [职责分离] 此任务由摘要模型负责，与主模型和外援大模型的职能无关。
+        [职责分离] 此任务由摘要模型负责，与主模型和共享 DeepSeek 模型的职能无关。
         摘要模型专门处理这类辅助性评估任务，避免职责混乱。
         
         [优化] 引入重要性权重（Importance Score），用于 GC 策略。
@@ -1604,7 +1537,7 @@ class LayeredMemorySystem:
         if not text or len(text) < 10:
             return 3  # 默认低重要性
         
-        # [职责分离] 使用摘要模型进行打分，不占用主模型或外援大模型资源
+        # [职责分离] 使用摘要模型进行打分，不占用主模型或共享 DeepSeek 模型资源
         client = self._get_summary_client()
         if client is None:
             # 如果无法调用模型，fallback 到简单的判断
@@ -1628,7 +1561,7 @@ class LayeredMemorySystem:
             )
             
             resp = client.chat.completions.create(
-                model=DEEPSEEK_SUMMARY_MODEL,
+                model=DEEPSEEK_MODEL,
                 messages=[
                     {
                         "role": "system",
@@ -1659,7 +1592,7 @@ class LayeredMemorySystem:
         """
         使用摘要模型打分判断文本的信息密度（0-100分）
         
-        [职责分离] 此任务由摘要模型负责，与主模型和外援大模型的职能无关。
+        [职责分离] 此任务由摘要模型负责，与主模型和共享 DeepSeek 模型的职能无关。
         摘要模型专门处理这类辅助性评估任务，避免职责混乱。
         
         [优化] 替代正则匹配，使用模型理解语义来判断信息价值。
@@ -1680,7 +1613,7 @@ class LayeredMemorySystem:
         if len(text) > 200:
             return 100
         
-        # [职责分离] 使用摘要模型进行打分，不占用主模型或外援大模型资源
+        # [职责分离] 使用摘要模型进行打分，不占用主模型或共享 DeepSeek 模型资源
         client = self._get_summary_client()
         if client is None:
             # 如果无法调用模型，fallback 到简单的长度判断
@@ -1701,7 +1634,7 @@ class LayeredMemorySystem:
             )
             
             resp = client.chat.completions.create(
-                model=DEEPSEEK_SUMMARY_MODEL,
+                model=DEEPSEEK_MODEL,
                 messages=[
                     {
                         "role": "system",
@@ -1766,7 +1699,7 @@ class LayeredMemorySystem:
         基于最近几句对话 + 当前输入，生成更适合检索的"回忆查询语句"。
         用于处理类似"我们接着做吧"这类模糊指代。
         
-        [职责分离] 此任务由摘要模型负责，与主模型和外援大模型的职能无关。
+        [职责分离] 此任务由摘要模型负责，与主模型和共享 DeepSeek 模型的职能无关。
         摘要模型专门处理这类辅助性任务，避免职责混乱。
         
         [性能优化] 对于非指代性明确的句子，直接返回原句，跳过 LLM 调用。
@@ -1799,14 +1732,14 @@ class LayeredMemorySystem:
             f"【当前输入】{current_user_input}\n"
         )
 
-        # [职责分离] 使用摘要模型进行 Query Rewrite，不占用主模型或外援大模型资源
+        # [职责分离] 使用摘要模型进行 Query Rewrite，不占用主模型或共享 DeepSeek 模型资源
         client = self._get_summary_client()
         if client is None:
             return current_user_input
 
         try:
             resp = client.chat.completions.create(
-                model=DEEPSEEK_SUMMARY_MODEL,
+                model=DEEPSEEK_MODEL,
                 messages=[
                     {
                         "role": "system",
@@ -1825,24 +1758,24 @@ class LayeredMemorySystem:
 
     def _update_dynamic_memory_from_summary(self, summary_text: str, dropped_msgs: list, tags: list):
         """
-        摘要写入 buffer RAG 后，将摘要传递给副工具模型（reasoner，仅挂载动态记忆工具）用以修改动态记忆。
-        动态记忆已从摘要模型解绑，不再由摘要模型直接输出 JSON。
+        摘要写入 buffer RAG 后，将摘要传递给本地记忆技能维护流程用以修改动态记忆。
+        动态记忆已从状态变更通过本地记忆技能执行，不再依赖模型原生函数调用。
         """
         if not summary_text or not summary_text.strip():
             return
-        if self._dynamic_memory_agent is None:
+        if self._dynamic_memory_updater is None:
             return
         try:
-            print(f"[Memory] 将摘要与当前 memory_dynamic.json 传给副工具模型以判断更新字段（摘要长度: {len(summary_text)}）", flush=True)
+            print(f"[Memory] 将摘要与当前 memory_dynamic.json 传给记忆维护流程以判断更新字段（摘要长度: {len(summary_text)}）", flush=True)
             current_json = self.dynamic.to_json_str()
-            self._dynamic_memory_agent.update_dynamic_memory_from_summary(summary_text.strip(), current_json)
+            self._dynamic_memory_updater.update_dynamic_memory_from_summary(summary_text.strip(), current_json)
         except Exception as e:
-            print(f"[Memory] 副工具模型更新动态记忆失败: {e}", flush=True)
+            print(f"[Memory] 本地记忆技能更新动态记忆失败: {e}", flush=True)
             traceback.print_exc()
 
     def _flush_short_and_summarize(self, to_summarize):
         """
-        达到轮数上限时在后台执行：整窗摘要写入 Buffer RAG；同时摘要模型自动更新 memory_dynamic。
+        达到轮数上限时在后台执行：整窗摘要写入 Buffer RAG；同时本地记忆技能更新 memory_dynamic。
         [修复] 摘要为空时也写入占位到 Buffer，避免该段时间窗口在 RAG 中缺失；并设置「刚入库摘要」供后续几轮强制注入，避免断层。
         """
         if not to_summarize:
@@ -1860,7 +1793,7 @@ class LayeredMemorySystem:
                 text_to_buffer = "[近期对话] 无重要剧情或摘要未生成。"
             self._append_summary_buffer(text_to_buffer, start_time=start_time, end_time=end_time, tags=tags)
             print(f"[Memory] 整窗摘要已写入 Buffer RAG（摘要长度 {len(text_to_buffer)} 字符）", flush=True)
-            # 副工具模型更新动态记忆改为异步执行，不阻塞摘要流程与主模型
+            # 本地记忆技能更新动态记忆改为异步执行，不阻塞摘要流程与主模型
             self._dynamic_memory_executor.submit(self._update_dynamic_memory_from_summary, text_to_buffer, to_summarize, tags)
             # [断层修复] 刚入库摘要：接下来几轮在 get_full_context_messages 中强制注入
             with self._pending_lock:

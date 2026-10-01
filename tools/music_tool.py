@@ -37,13 +37,8 @@ except ImportError:
 # 导入大模型API配置
 try:
     import requests
-    from config import (
-        DEEPSEEK_API_URL,
-        DEEPSEEK_THINKING_API_KEY,
-        DEEPSEEK_MODEL,
-        DEEPSEEK_API_TIMEOUT,
-        require_env,
-    )
+    from config import DEEPSEEK_MODEL
+    from common.deepseek_client import get_deepseek_client
     LLM_API_AVAILABLE = True
 except ImportError as e:
     LLM_API_AVAILABLE = False
@@ -1449,11 +1444,6 @@ def _find_most_similar_playlist_name(target_name, playlist_names):
         return None
     
     try:
-        api_key = require_env("DEEPSEEK_THINKING_API_KEY", DEEPSEEK_THINKING_API_KEY)
-        api_url = DEEPSEEK_API_URL
-        model = DEEPSEEK_MODEL
-        timeout = DEEPSEEK_API_TIMEOUT
-        
         # 构建提示词
         playlist_list_str = "\n".join([f"{i+1}. {name}" for i, name in enumerate(playlist_names)])
         
@@ -1474,36 +1464,21 @@ def _find_most_similar_playlist_name(target_name, playlist_names):
 如果目标名称是"完全不相关的名称"，列表中没有任何相似的，则返回"None"。
 """
         
-        payload = {
-            "model": model,
-            "messages": [
+        response = get_deepseek_client().chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
                 {
                     "role": "user",
                     "content": prompt
                 }
             ],
-            "temperature": 0.3,  # 较低的温度以获得更确定的结果
-            "max_tokens": 100,
-            "stream": False
-        }
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'Authorization': f'Bearer {api_key}'
-        }
-        
-        response = requests.post(
-            api_url,
-            headers=headers,
-            json=payload,
-            timeout=timeout
+            temperature=0.3,  # 较低的温度以获得更确定的结果
+            max_tokens=100,
+            stream=False,
         )
-        response.raise_for_status()
-        result = response.json()
         
         # 提取返回的内容
-        content = result["choices"][0]["message"]["content"].strip()
+        content = (response.choices[0].message.content or "").strip()
         
         # 处理返回结果
         if content.lower() == "none" or content.lower() == "null":
