@@ -90,6 +90,15 @@ DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "disabled")
 TTS_HTTP_BASE_URL = os.environ.get("BINES_TTS_URL", "http://127.0.0.1:9880")
 # Optional local GPT-SoVITS install; when set, the module manager starts its api_v2.py.
 GPT_SOVITS_DIR = os.environ.get("GPT_SOVITS_DIR", "")
+
+# Singing: separate vocals -> so-vits-svc -> remix, cached per song (see singing/README.md).
+SOVITS_SVC_DIR = os.environ.get("SOVITS_SVC_DIR", "")
+SINGING_PYTHON = os.environ.get("SINGING_PYTHON", "")
+SINGING_WORK_DIR = Path(os.environ.get("SINGING_WORK_DIR", str(ROOT_DIR / "singing" / "work")))
+SINGING_LIBRARY_DIR = Path(os.environ.get("SINGING_LIBRARY_DIR", str(ROOT_DIR / "static" / "music" / "library")))
+SINGING_SVC_MODEL = os.environ.get("SINGING_SVC_MODEL", "logs/44k/G_36000.pth")
+SINGING_SVC_DIFFUSION_MODEL = os.environ.get("SINGING_SVC_DIFFUSION_MODEL", "logs/44k/diffusion/model_100000.pt")
+SINGING_SPEAKER = os.environ.get("SINGING_SPEAKER", "ATRI")
 NAPCAT_WS_URL = os.environ.get("BINES_NAPCAT_WS_URL", "ws://127.0.0.1:6101")
 NAPCAT_ACCESS_TOKEN = os.environ.get("BINES_NAPCAT_ACCESS_TOKEN", "")
 MOMENTS_UID = os.environ.get("MOMENTS_UID", "")

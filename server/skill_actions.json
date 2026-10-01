@@ -217,7 +217,12 @@
     },
     {
       "name": "sing",
-      "description": "播放 static/music/cover 目录下的本地音频（如翻唱、BGM）。",
+      "description": "用自己的声音唱一首歌：现成翻唱直接播放，歌库原曲首次演唱会在后台准备几分钟后自动开唱。",
+      "enabled": true
+    },
+    {
+      "name": "list_songs",
+      "description": "列出可以唱的歌（ready 可立即唱，needs_preparation 首次需准备几分钟，preparing 正在准备）。",
       "enabled": true
     },
     {

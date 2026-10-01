@@ -59,3 +59,6 @@ memory_data/
 tests/
 # Local config backup may contain credentials
 config.py.bak
+
+# singing pipeline cache (default SINGING_WORK_DIR)
+singing/work/

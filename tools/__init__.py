@@ -30,7 +30,7 @@ from .pointer_tool import (
 from .game_mode_tool import enable_game_mode, disable_game_mode
 from .memory_tool import update_status
 from .visual_tool import get_visual_info
-from .sing_tool import sing
+from .sing_tool import list_songs, sing
 # QQ 工具
 from .qq_tool import send_qq_private_msg, send_qq_group_msg, get_qq_group_list, get_qq_friend_list, broadcast_to_all_friends, broadcast_to_all_groups, at_each_group_member
 
@@ -95,6 +95,7 @@ TOOLS_REGISTRY = {
     "update_status": update_status,
     "get_visual_info": get_visual_info,
     "sing": sing,
+    "list_songs": list_songs,
     "send_qq_private_msg": send_qq_private_msg,
     "send_qq_group_msg": send_qq_group_msg,
     "get_qq_group_list": get_qq_group_list,

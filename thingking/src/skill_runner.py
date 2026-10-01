@@ -17,7 +17,7 @@ QQ_ALLOWED_ACTIONS = {
     "broadcast_to_all_friends", "broadcast_to_all_groups",
     "at_each_group_member", "browser_search",
     "get_moments", "add_moment", "comment_moment", "get_comments",
-    "like_moment", "like_comment", "analyze_moment_images", "sing",
+    "like_moment", "like_comment", "analyze_moment_images", "sing", "list_songs",
 }
 
 
