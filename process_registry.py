@@ -2,7 +2,7 @@ import os
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
-from config import GPT_SOVITS_DIR, ROOT_DIR, TTS_HTTP_BASE_URL
+from config import GPT_SOVITS_DIR, HTTP_PORTS, ROOT_DIR, TTS_HTTP_BASE_URL, ZMQ_PORTS
 
 THINKING_STARTUP_DEPENDENCIES = frozenset({
     "Display",
@@ -28,6 +28,7 @@ def _gpt_sovits_process() -> Optional[Dict[str, object]]:
         "script": script,
         "interpreter": interpreter,
         "cwd": install_dir,
+        "ports": [url.port or 9880],
         "command": [
             interpreter, script,
             "-a", url.hostname or "127.0.0.1",
@@ -47,12 +48,14 @@ def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]
             "script": os.path.join(root, "common", "zmq_bus_server.py"),
             "interpreter": os.path.join(root, "server", "server_venv", "Scripts", "python.exe"),
             "cwd": root,
+            "ports": [ZMQ_PORTS["BUS_PUBLISH"], ZMQ_PORTS["BUS_SUBSCRIBE"]],
         },
         {
             "name": "Classification",
             "script": os.path.join(root, "server", "classification_server.py"),
             "interpreter": os.path.join(root, "server", "server_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "server"),
+            "ports": [ZMQ_PORTS["MODULE_READY_REP"]],
         },
         {
             "name": "Display",
@@ -71,18 +74,21 @@ def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]
             "script": os.path.join(root, "visual", "0.py"),
             "interpreter": os.path.join(root, "visual", "envs", "runtime_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "visual"),
+            "ports": [ZMQ_PORTS["VISUAL_REQREP"]],
         },
         {
             "name": "RAG Server",
             "script": os.path.join(root, "thingking", "rag_server.py"),
             "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "thingking"),
+            "ports": [ZMQ_PORTS["RAG_SERVER_REQREP"]],
         },
         {
             "name": "RAG Web",
             "script": os.path.join(root, "thingking", "rag_web_server.py"),
             "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "thingking"),
+            "ports": [HTTP_PORTS["RAG_MEMORY"]],
         },
         {
             "name": "Hearing",
@@ -101,6 +107,7 @@ def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]
             "script": os.path.join(root, "thingking", "src", "handle_zmq.py"),
             "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "thingking", "src"),
+            "ports": [ZMQ_PORTS["START_THINKING_REP"]],
         },
         {
             "name": "ChatBot",

@@ -6,7 +6,7 @@ import ctypes
 from ctypes import wintypes
 from config import HTTP_HOST, HTTP_PORTS
 from process_registry import get_processes
-from process_runtime import resolve_process_command
+from process_runtime import find_port_listeners, resolve_process_command
 
 # Define modules and their venv pythons
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -138,6 +138,14 @@ if __name__ == "__main__":
         print("=" * 60)
         print("启动 Web 管理界面模式...")
         print("=" * 60)
+
+        # Windows 上 Flask 不独占端口，第二个管理器会和旧的同时监听，请求随机落到其中一个。
+        manager_port = HTTP_PORTS["MODULE_MANAGER"]
+        owner = find_port_listeners([manager_port]).get(manager_port)
+        if owner:
+            print(f"❌ 端口 {manager_port} 已被 PID {owner} 占用，可能已有一个管理器在运行。")
+            print(f"   请直接访问 http://{HTTP_HOST}:{manager_port}，或先结束该进程再启动。")
+            sys.exit(1)
         
         try:
             import threading

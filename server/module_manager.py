@@ -22,7 +22,7 @@ if str(ROOT_DIR) not in sys.path:
 from config import HTTP_HOST, HTTP_PORTS, PRESENCE_STATE_PATH
 from common.zmq_bus import create_publisher
 from process_registry import get_processes
-from process_runtime import resolve_process_command, build_python_runtime_env
+from process_runtime import ProcessTree, build_python_runtime_env, find_port_listeners, resolve_process_command
 from realtime_screen_config import (
     DEFAULT_REALTIME_SCREEN_CONFIG,
     load_realtime_screen_config,
@@ -138,11 +138,21 @@ def start_process(config):
             }
         # A dead child may remain in the registry until the next status check.
         # Drop that stale record before starting its replacement.
-        processes.pop(name, None)
+        stale = processes.pop(name, None)
+        if stale:
+            stale['process'].close()
         
         try:
             if 'command' not in config and not os.path.exists(config['interpreter']):
                 return {"success": False, "message": f"解释器不存在: {config['interpreter']}"}
+            busy = find_port_listeners(config.get('ports', []))
+            if busy:
+                detail = "、".join(f"{port}（PID {pid}）" for port, pid in sorted(busy.items()))
+                return {
+                    "success": False,
+                    "message": f"{name} 未启动：端口 {detail} 已被占用，可能是上次未退出的残留进程，请先结束它",
+                    "busy_ports": busy,
+                }
             cmd = resolve_process_command(config)
             
             # 准备环境变量，确保使用 UTF-8 编码
@@ -151,7 +161,7 @@ def start_process(config):
             # 使用 PIPE 捕获输出，不创建新窗口
             # 注意：在 Windows 上，需要设置 universal_newlines=True 和适当的编码
             # 使用行缓冲模式确保实时输出
-            p = subprocess.Popen(
+            p = ProcessTree(
                 cmd,
                 cwd=config['cwd'],
                 stdout=subprocess.PIPE,
@@ -170,8 +180,8 @@ def start_process(config):
             logs = []
             
             # 启动两个后台线程分别读取 stdout 和 stderr
-            stdout_thread = threading.Thread(target=log_output, args=(name, p.stdout, log_queue, "STDOUT"), daemon=True)
-            stderr_thread = threading.Thread(target=log_output, args=(name, p.stderr, log_queue, "STDERR"), daemon=True)
+            stdout_thread = threading.Thread(target=log_output, args=(name, p.process.stdout, log_queue, "STDOUT"), daemon=True)
+            stderr_thread = threading.Thread(target=log_output, args=(name, p.process.stderr, log_queue, "STDERR"), daemon=True)
             stdout_thread.start()
             stderr_thread.start()
             
@@ -197,19 +207,22 @@ def stop_process(name):
         proc = proc_info.get('process')
         
         if not proc or proc.poll() is not None:
+            # 启动器退出后，它派生的解释器仍可能存活；一并清理整棵进程树。
+            if proc:
+                proc.kill()
+                proc.close()
             processes.pop(name, None)
             return {"success": False, "message": f"{name} 未运行"}
         
         try:
-            # 终止进程
             proc.terminate()
-            # 等待最多5秒
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                # 强制终止
                 proc.kill()
                 proc.wait()
+            proc.kill()
+            proc.close()
             
             processes.pop(name, None)
             return {"success": True, "message": f"{name} 已停止"}
