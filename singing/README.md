@@ -37,7 +37,7 @@ D:\bines-singing\venv\Scripts\python.exe -m pip install --force-reinstall --no-d
 cd singing; D:\bines-singing\venv\Scripts\python.exe fetch_models.py --model-dir D:\bines-singing\models
 ```
 
-工作目录结构：`models/` 分离模型，`covers/<key>/` 每首歌的缓存（`final.mp3`、可重新混音用的 `instrumental/backing/lead_dry/converted.wav`、`meta.json`、`pipeline.log`），`tmp/` 临时文件。
+工作目录结构：`models/` 分离模型，`covers/<key>/` 每首歌的缓存（`final.mp3`、可重新混音用的 `instrumental/backing/lead_dry/converted.flac`（约 45 MB/首）、`meta.json`、`pipeline.log`），`tmp/` 临时文件。
 
 命令行单独跑一首：
 
