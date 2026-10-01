@@ -57,3 +57,5 @@ test/
 
 memory_data/
 tests/
+# Local config backup may contain credentials
+config.py.bak
