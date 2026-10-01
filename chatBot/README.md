@@ -1,37 +1,7 @@
-# Bines ChatBot 模块
+# ChatBot 服务
 
-该模块封装了 NapCatQQ (OneBot V11) 的 API 调用，用于 Bines 系统与 QQ 进行交互。
+ChatBot 是纯 Python 主运行链路中的 NapCat WebSocket 客户端，由根目录服务管理器启动。完整启动、停止和故障排查步骤见 [`START_HERE.md`](../START_HERE.md)。
 
-## 依赖
-需要安装 `requests` 库:
-```bash
-pip install requests
-```
+默认连接地址为 `ws://127.0.0.1:6101`，可通过 `BINES_NAPCAT_WS_URL` 覆盖。访问令牌只从 `BINES_NAPCAT_ACCESS_TOKEN` 环境变量读取；不要把真实令牌写进 Python 文件或文档。
 
-## 使用方法
-
-```python
-from chatBot.napcat_client import NapCatClient
-
-# 初始化
-# 请修改为你的实际地址和Token
-client = NapCatClient(base_url="http://127.0.0.1:6100", token="bD0fkzc3CsaAC-70")
-
-# 1. 发送私聊消息
-client.send_private_msg(user_id=123456789, message="你好，这是一条测试消息")
-
-# 2. 发送群聊消息
-client.send_group_msg(group_id=987654321, message="大家好")
-
-# 3. 发送群聊消息并艾特某人
-client.send_group_msg(group_id=987654321, message="请查收文件", at_user_id=123456789)
-
-# 4. 发送群聊消息并艾特全体
-client.send_group_msg(group_id=987654321, message="重要通知", at_user_id="all")
-
-# 5. 调用其他任意 API
-client.raw_api("get_status", {})
-```
-
-## 目录结构
-- `napcat_client.py`: 核心客户端类实现。
+模块管理器启动 ChatBot 时会继承启动器的环境变量。NapCat 服务本身是外部依赖，需要先在本机运行。
