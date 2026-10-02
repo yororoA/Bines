@@ -1,6 +1,6 @@
 # 项目启动说明（纯 Python 主链路）
 
-当前运行链路使用根目录的 Python 代码。`refactoring/` 和 `ts_ai_sdk_gateway/` 是实验目录，不需要启动，也不参与服务通信。
+当前运行链路使用根目录的 Python 代码。
 
 ## 日常启动
 
