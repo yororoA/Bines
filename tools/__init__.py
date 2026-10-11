@@ -31,6 +31,7 @@ from .game_mode_tool import enable_game_mode, disable_game_mode
 from .memory_tool import update_status
 from .visual_tool import get_visual_info
 from .sing_tool import list_songs, sing
+from .ark_tool import ARK_TOOLS
 # QQ 工具
 from .qq_tool import send_qq_private_msg, send_qq_group_msg, get_qq_group_list, get_qq_friend_list, broadcast_to_all_friends, broadcast_to_all_groups, at_each_group_member
 
@@ -60,6 +61,7 @@ except ImportError:
 # 工具注册表
 # 格式: "tool_name": function
 TOOLS_REGISTRY = {
+    **ARK_TOOLS,
     "get_time": get_current_time,
     "get_screen_info": get_screen_info_wrapper,  # 使用 wrapper 版本
     "open_application": open_application,

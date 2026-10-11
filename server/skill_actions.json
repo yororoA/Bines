@@ -1,6 +1,31 @@
 {
   "actions": [
     {
+      "name": "get_ark_profile",
+      "description": "读取 Bines 的 Ark 站内身份、权限与在线状态（MCP）。",
+      "enabled": true
+    },
+    {
+      "name": "get_ark_conversations",
+      "description": "列出 Ark 群聊与 Bines 自己的管理员私聊（MCP）。",
+      "enabled": true
+    },
+    {
+      "name": "get_ark_chat_history",
+      "description": "分页读取 Ark 会话消息（MCP）。",
+      "enabled": true
+    },
+    {
+      "name": "send_ark_chat",
+      "description": "仅按用户明确要求向 Ark 群聊或管理员发消息，结果未知先查询原 request_id。",
+      "enabled": true
+    },
+    {
+      "name": "get_ark_operation",
+      "description": "查询原 request_id 的写入状态与已完成结果，避免重复发文或聊天（MCP）。",
+      "enabled": true
+    },
+    {
       "name": "add_moment",
       "description": "发布一条动态（标题必填，正文可选）。",
       "enabled": true
@@ -97,7 +122,7 @@
     },
     {
       "name": "get_moments",
-      "description": "获取当前用户动态草稿。uid/token 由配置读取。",
+      "description": "分页读取已发布动态（page/limit）；配置 MCP 时使用 Bines 独立身份。",
       "enabled": true
     },
     {
