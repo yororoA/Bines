@@ -35,6 +35,7 @@ def _setting(name: str, default: str = "") -> str:
 @dataclass(frozen=True)
 class McpConfig:
     url: str
+    uid: str
     token: str = field(repr=False)
     timeout: float = 20.0
 
@@ -45,11 +46,13 @@ def mcp_config() -> McpConfig | None:
         raise ArkMcpError("CONFIG_ERROR", "ARK_TRANSPORT 必须为 auto、mcp 或 legacy。")
     if mode == "legacy":
         return None
-    url, token = _setting("ARK_MCP_URL"), _setting("ARK_MCP_TOKEN")
-    if mode == "auto" and not url and not token:
+    url, uid, token = _setting("ARK_MCP_URL"), _setting("ARK_MCP_UID"), _setting("ARK_MCP_TOKEN")
+    if mode == "auto" and not url and not uid and not token:
         return None
-    if not url or not token:
-        raise ArkMcpError("CONFIG_ERROR", "请同时配置 ARK_MCP_URL 和 ARK_MCP_TOKEN。")
+    if not url or not uid or not token:
+        raise ArkMcpError("CONFIG_ERROR", "请同时配置 ARK_MCP_URL、ARK_MCP_UID 和 ARK_MCP_TOKEN。")
+    if len(uid) > 128 or not uid.isascii() or any(ord(char) < 33 or ord(char) == 127 for char in uid):
+        raise ArkMcpError("CONFIG_ERROR", "ARK_MCP_UID 必须是有效的账号 UID。")
     parsed = urlsplit(url)
     local_http = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
     if not parsed.hostname or (parsed.scheme != "https" and not local_http) or parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -60,7 +63,7 @@ def mcp_config() -> McpConfig | None:
             raise ValueError()
     except ValueError:
         raise ArkMcpError("CONFIG_ERROR", "ARK_MCP_TIMEOUT 必须为 1–120 秒。") from None
-    return McpConfig(url, token, timeout)
+    return McpConfig(url, uid, token, timeout)
 
 
 def _decode_result(result) -> dict:
@@ -96,7 +99,7 @@ async def _call(config: McpConfig, name: str, arguments: dict) -> dict:
     try:
         async with asyncio.timeout(config.timeout):
             async with httpx2.AsyncClient(
-                headers={"Authorization": f"Bearer {config.token}"},
+                headers={"Authorization": f"Bearer {config.token}", "X-Bines-Uid": config.uid},
                 timeout=config.timeout, follow_redirects=False,
             ) as client:
                 async with streamable_http_client(config.url, http_client=client) as (read, write):

@@ -23,6 +23,17 @@ def main():
     assert url.hostname in {"127.0.0.1", "::1", "localhost"}, "Only a disposable local fixture is allowed"
     identity = get_ark_profile()["data"]
     assert identity["uid"] == "bines-fixture", "Expected arkserver test fixture"
+    saved_uid = os.environ["ARK_MCP_UID"]
+    try:
+        os.environ["ARK_MCP_UID"] = "other-fixture"
+        try:
+            get_ark_profile()
+            raise AssertionError("Wrong UID accepted with valid token")
+        except ArkMcpError as error:
+            assert error.code == "TRANSPORT_ERROR"
+    finally:
+        os.environ["ARK_MCP_UID"] = saved_uid
+    print("PASS UID and token must identify the same fixed account")
     os.environ["MOMENTS_API_BASE_URL"] = "http://127.0.0.1:1"
     moments._check_requests = lambda: (_ for _ in ()).throw(AssertionError("MCP fell back to REST"))
 
@@ -75,15 +86,16 @@ def main():
     assert asyncio.run(synchronous_action_inside_loop())["data"]["uid"] == identity["uid"]
     print("PASS independent presence and synchronous action inside async runtime")
 
-    saved_token = os.environ.pop("ARK_MCP_TOKEN")
-    try:
+    for name in ("ARK_MCP_UID", "ARK_MCP_TOKEN"):
+        saved = os.environ.pop(name)
         try:
-            mcp_config()
-            raise AssertionError("Partial config was accepted")
-        except ArkMcpError as error:
-            assert error.code == "CONFIG_ERROR"
-    finally:
-        os.environ["ARK_MCP_TOKEN"] = saved_token
+            try:
+                mcp_config()
+                raise AssertionError("Partial config was accepted")
+            except ArkMcpError as error:
+                assert error.code == "CONFIG_ERROR"
+        finally:
+            os.environ[name] = saved
     print("PASS incomplete config rejects without fallback")
 
 

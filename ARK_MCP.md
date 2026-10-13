@@ -4,7 +4,7 @@
 
 ## 配置
 
-先部署支持 Bines MCP 的 arkserver 与 Ark 前端，在 Ark `/bines` 登录管理员，绑定原有普通账号（历史动态保留）或创建专用账号，再签发最小权限凭证。首次绑定后 UID 固定。
+arkserver 的 `.env` 或部署环境先设置 `BINES_UID=<已有Bines账号UID>`。只使用该账号，保留其历史动态和评论。部署后端与 Ark 前端，在 `/bines` 登录管理员，签发最小权限凭证；其他用户只能看公开资料，网页没有账号搜索、创建或更换功能。
 
 ```sh
 python -m pip install -r requirements-mcp.txt
@@ -15,6 +15,7 @@ python -m pip install -r requirements-mcp.txt
 ```dotenv
 ARK_TRANSPORT=mcp
 ARK_MCP_URL=https://your-api.example/mcp/bines
+ARK_MCP_UID=<与后端BINES_UID相同的已有账号UID>
 ARK_MCP_TOKEN=<管理页签发的专用凭证>
 ARK_MCP_TIMEOUT=20
 ```
@@ -25,7 +26,9 @@ python ark_mcp_client.py --check
 
 检查命令只读身份和权限，不启动桌面/音频模块，不发文、不聊天、不改变在线状态。不会输出凭证。
 
-`ARK_TRANSPORT=auto` 为兼容默认值：未配置任何 MCP URL/token 时使用 legacy REST；配置其中任一项就要求完整配置。`mcp` 强制 MCP；`legacy` 显式保留旧接口。MCP 失败永不自动切回 REST。legacy 使用原 `MOMENTS_*` 与 `TOGGLE_STATUS_TOKEN`，启动日志明确显示状态模式。
+客户端每个 MCP 请求携带 `X-Bines-Uid: <ARK_MCP_UID>` 和 `Authorization: Bearer <ARK_MCP_TOKEN>`。后端核验 UID 等于 BINES_UID、token 属于同一账号且有效；网页登录 token 不能用于 MCP。完整 token 仅在管理员签发时显示一次。
+
+`ARK_TRANSPORT=auto` 为兼容默认值：未配置任何 MCP URL/UID/token 时使用 legacy REST；配置其中任一项就要求三项完整。`mcp` 强制 MCP；`legacy` 显式保留旧接口。MCP 失败永不自动切回 REST。legacy 使用原 `MOMENTS_*` 与 `TOGGLE_STATUS_TOKEN`，启动日志明确显示状态模式。
 
 ## 动作与权限
 
@@ -59,4 +62,4 @@ get_ark_operation(request_id="<原UUID>")
 
 ## 验证
 
-`verification/ark_mcp_smoke.py` 需要指向隔离 fixture 的 `ARK_MCP_URL / ARK_MCP_TOKEN`，且必须显式 `--local-fixture`。脚本限定回环主机，验证真实 SDK、分页/换行、发布防重、评论、点赞、聊天和在线租约。禁止指向生产服务。
+`verification/ark_mcp_smoke.py` 需要隔离 fixture 的 `ARK_MCP_URL / ARK_MCP_UID / ARK_MCP_TOKEN`，且必须显式 `--local-fixture`。脚本限定回环主机，验证真实 SDK、身份不匹配拒绝、分页/换行、发布防重、评论、点赞、聊天和在线租约。禁止指向生产服务。

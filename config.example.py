@@ -110,6 +110,7 @@ TOGGLE_STATUS_TOKEN = os.environ.get("TOGGLE_STATUS_TOKEN", "")
 # Ark 独立身份：在 Ark /bines 管理页签发。配置后不会回落旧 REST。
 ARK_TRANSPORT = os.environ.get("ARK_TRANSPORT", "auto")  # auto | mcp | legacy
 ARK_MCP_URL = os.environ.get("ARK_MCP_URL", "")
+ARK_MCP_UID = os.environ.get("ARK_MCP_UID", "")  # 与 arkserver 的 BINES_UID 一致
 ARK_MCP_TOKEN = os.environ.get("ARK_MCP_TOKEN", "")
 ARK_MCP_TIMEOUT = float(os.environ.get("ARK_MCP_TIMEOUT", "20"))
 
