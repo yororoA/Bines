@@ -67,7 +67,12 @@
     },
     {
       "name": "browser_search",
-      "description": "与浏览器相关的唯一入口：仅允许通过本工具进行浏览器操作，执行网页搜索。",
+      "description": "使用 DeepSeek Search API 联网搜索，返回标题、URL、日期与摘要；无需启动浏览器。",
+      "enabled": true
+    },
+    {
+      "name": "web_fetch",
+      "description": "使用 DeepSeek Fetch API 读取指定网页正文与标题，保留来源 URL。",
       "enabled": true
     },
     {

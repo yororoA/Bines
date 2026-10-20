@@ -11,13 +11,16 @@ CALL_START = "[[SKILL_CALL]]"
 CALL_END = "[[/SKILL_CALL]]"
 
 QQ_ALLOWED_ACTIONS = {
-    "get_time",
-    "send_qq_group_msg", "send_qq_private_msg",
-    "get_qq_group_list", "get_qq_friend_list",
-    "broadcast_to_all_friends", "broadcast_to_all_groups",
-    "at_each_group_member", "browser_search",
-    "get_moments", "add_moment", "comment_moment", "get_comments",
-    "like_moment", "like_comment", "analyze_moment_images", "sing", "list_songs",
+    "get_time", "send_qq_group_msg", "send_qq_private_msg",
+    "napcat_call", "napcat_discover", "napcat_send", "napcat_forward",
+    "napcat_events", "update_status", "browser_search", "web_fetch",
+}
+QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | {
+    "napcat_operation", "mcp_discover", "mcp_call",
+    "get_qq_group_list", "get_qq_friend_list", "broadcast_to_all_friends",
+    "broadcast_to_all_groups", "at_each_group_member",
+    "get_ark_profile", "get_ark_conversations", "get_ark_chat_history", "send_ark_chat", "get_ark_operation",
+    "get_moments", "add_moment", "comment_moment", "get_comments", "like_moment", "like_comment",
 }
 
 
@@ -130,6 +133,16 @@ class SkillRunner:
 
     def _action_description(self, action: str) -> str:
         function = self.registry[action]
+        # Read the source signature without importing desktop drivers.
+        if hasattr(function, "module"):
+            import ast
+            path = self.skills_dir.parent / "tools" / f"{function.module}.py"
+            if path.exists():
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                node = next((item for item in tree.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == function.name), None)
+                if node:
+                    description = ast.get_docstring(node) or action
+                    return f"{description}\nArguments: ({ast.unparse(node.args)})"
         doc = inspect.getdoc(function) or ""
         description = doc.splitlines()[0].strip() if doc else ""
         description = self.action_descriptions.get(action, description)
@@ -152,7 +165,14 @@ class SkillRunner:
     def actions_for_source(self, source: str | None = None, allowed_skills: Iterable[str] | None = None) -> set[str]:
         enabled = self._enabled_actions()
         if source in ("QQ", "qq"):
-            enabled &= self.qq_allowed_actions
+            from tools.context import CURRENT_CONTEXT
+            context = CURRENT_CONTEXT.get()
+            if not context.event_id:
+                return set()  # Legacy QQ callers lack a trusted event context.
+            if not context.identity.privileged:
+                enabled &= self.qq_allowed_actions
+            else:
+                enabled &= QQ_OWNER_ACTIONS
         if allowed_skills is not None:
             allowed_actions = {
                 action
@@ -234,7 +254,8 @@ class SkillRunner:
         if function is None:
             return f"技能执行失败：Python 动作 {action!r} 不存在。"
         try:
-            inspect.signature(function).bind(**args)
+            target = function.resolve() if hasattr(function, "resolve") else function
+            inspect.signature(target).bind(**args)
             result = function(**args)
             return str(result)
         except TypeError as exc:
