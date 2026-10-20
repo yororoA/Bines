@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-独立视频分析脚本：使用与屏幕分析相同的 DashScope VLM（如 qwen3-vl-flash），
+独立视频分析脚本：使用与屏幕分析相同的 DeepSeek Flash 视觉模型，
 按 5 秒一段对视频进行切分并分析，输出人物表情/动作/环境/交互的连贯叙述。
 
-只依赖根目录的 config.py，可单独运行。DashScope 凭据从环境变量读取。
+只依赖根目录的 config.py，可单独运行。DeepSeek 凭据从项目 .env 读取。
 
 用法:
   python video_analysis_standalone.py --video path/to/video.mp4
@@ -27,13 +27,8 @@ except ImportError:
     print("请安装 requests: pip install requests", file=sys.stderr)
     sys.exit(1)
 
-from config import (
-    DASHSCOPE_API_KEY,
-    DASHSCOPE_API_TIMEOUT,
-    DASHSCOPE_API_URL,
-    DASHSCOPE_VISION_MODEL,
-)
-from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
+from config import DEEPSEEK_API_KEY, require_env
+from vlm_client import call_vision as _call_vision
 
 # 输出图片最大边，控制 API 体积
 MAX_IMAGE_SIZE = 1280
@@ -82,17 +77,12 @@ def frame_to_base64_jpeg(frame, max_size=MAX_IMAGE_SIZE, quality=85):
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
-def call_dashscope_vlm(image_b64: str, prompt: str) -> str:
-    """调用 DashScope 视觉模型，返回文本描述。与屏幕分析使用同一 API 形态。"""
-    if not DASHSCOPE_API_KEY:
-        raise RuntimeError("请设置环境变量 DASHSCOPE_API_KEY")
-    out = _call_dashscope_vlm(
+def call_vision(image_b64: str, prompt: str) -> str:
+    """调用 DeepSeek 视觉模型，返回文本描述。与屏幕分析共用配置。"""
+    require_env("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY)
+    out = _call_vision(
         image_b64,
         prompt,
-        api_url=DASHSCOPE_API_URL,
-        api_key=DASHSCOPE_API_KEY,
-        model=DASHSCOPE_VISION_MODEL,
-        timeout=DASHSCOPE_API_TIMEOUT,
         proxies={"http": None, "https": None},
         empty_message="[VLM 返回解析错误]",
     )
@@ -134,7 +124,7 @@ def run(video_path: str, interval_sec: float = 5.0, output_path: str | None = No
         print(f"  [{i+1}/{total}] 分析 {t_sec}s ...", file=sys.stderr, flush=True)
         prompt = build_prompt(i, total, t_sec, prev_summary)
         img_b64 = frame_to_base64_jpeg(frame)
-        desc = call_dashscope_vlm(img_b64, prompt)
+        desc = call_vision(img_b64, prompt)
         if not desc:
             desc = f"[本段 {t_sec}s 未得到有效描述]"
         # 用于下一段的「上一段概要」：取本段描述的前 200 字或整段（若较短）
@@ -153,7 +143,7 @@ def run(video_path: str, interval_sec: float = 5.0, output_path: str | None = No
 
 def main():
     parser = argparse.ArgumentParser(
-        description="独立视频分析：按固定间隔切帧，用 DashScope VLM 分析人物表情/动作/环境/交互，输出连贯叙述。"
+        description="独立视频分析：按固定间隔切帧，用 DeepSeek 分析人物表情/动作/环境/交互，输出连贯叙述。"
     )
     parser.add_argument("--video", "-v", required=True, help="视频文件路径")
     parser.add_argument("--interval", "-i", type=float, default=5.0, help="分析间隔（秒），默认 5")

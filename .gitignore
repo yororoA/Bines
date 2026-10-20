@@ -8,7 +8,8 @@ ffmpeg-N-122425-g21a3e44fbe-win64-gpl-shared
 server_venv
 static
 *.zip
-config.py
+# Credentials live in .env; config.py contains only environment-backed defaults.
+config.local.py
 hotwords.txt
 list_devices.py
 hearing/t.py
@@ -50,7 +51,6 @@ visual/models/object_models/t.py
 DEPENDENCIES.md
 
 node_modules
-.env.example
 *.env
 test/
 
@@ -64,3 +64,8 @@ thingking/models/
 
 # singing pipeline cache (default SINGING_WORK_DIR)
 singing/work/
+
+# NapCat persistent login / tokens / shared media
+deploy/napcat/data/
+deploy/napcat/.env
+mcp.servers.json

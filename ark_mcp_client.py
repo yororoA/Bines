@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 from uuid import uuid4
+from common.env import load_env
 
 
 class ArkMcpError(RuntimeError):
@@ -23,6 +24,7 @@ class ArkMcpError(RuntimeError):
 
 
 def _setting(name: str, default: str = "") -> str:
+    load_env()
     if name in os.environ:
         return os.environ[name].strip()
     try:
