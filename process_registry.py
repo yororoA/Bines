@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -38,11 +39,14 @@ def _gpt_sovits_process() -> Optional[Dict[str, object]]:
     }
 
 
-def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]]:
+def get_processes(display_script: str = "gui_display.py", profile: str | None = None) -> List[Dict[str, object]]:
     """返回模块进程配置列表。通过 display_script 区分 Web/控制台显示模块入口。"""
     root = str(ROOT_DIR)
+    profile = profile or os.environ.get("BINES_PROFILE", "full")
+    if profile not in {"full", "chatbot"}:
+        raise ValueError("BINES_PROFILE 必须为 full 或 chatbot")
     tts_service = _gpt_sovits_process()
-    return [*([tts_service] if tts_service else []),
+    rows = [*([tts_service] if tts_service else []),
         {
             "name": "ZMQ Bus",
             "script": os.path.join(root, "common", "zmq_bus_server.py"),
@@ -114,5 +118,22 @@ def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]
             "script": os.path.join(root, "chatBot", "main.py"),
             "interpreter": os.path.join(root, "server", "server_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "chatBot"),
+            "ports": [int(os.environ.get("BINES_QQ_GATEWAY_PORT", "6102"))],
+        },
+        {
+            "name": "QQ Thinking",
+            "script": os.path.join(root, "thingking", "qq_thinking.py"),
+            "interpreter": sys.executable,
+            "cwd": root,
         },
     ]
+    if profile == "chatbot":
+        rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking"}]
+    for row in rows:
+        interpreter = row["interpreter"]
+        if not os.path.isfile(interpreter):
+            unix = str(interpreter).replace(os.path.join("Scripts", "python.exe"), os.path.join("bin", "python"))
+            shared = os.path.join(root, ".venv", "Scripts" if os.name == "nt" else "bin",
+                                  "python.exe" if os.name == "nt" else "python")
+            row["interpreter"] = unix if os.path.isfile(unix) else shared if os.path.isfile(shared) else sys.executable
+    return rows

@@ -451,6 +451,11 @@ def get_skill_actions():
             with open(SKILL_ACTIONS_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             all_actions = data.get("actions") or []
+            from tools import TOOLS_REGISTRY
+            listed = {action["name"] for action in all_actions}
+            for name in TOOLS_REGISTRY:
+                if name not in listed:
+                    all_actions.append({"name": name, "description": name, "enabled": True})
             all_actions = sorted(all_actions, key=lambda t: (t.get("name") or ""))
         except Exception as e:
             return jsonify({"success": False, "message": str(e), "actions": []}), 500
@@ -471,6 +476,10 @@ def save_skill_actions():
         with open(SKILL_ACTIONS_PATH, 'r', encoding='utf-8') as f:
             data = json.load(f)
         actions = data.get("actions") or []
+        from tools import TOOLS_REGISTRY
+        listed = {action["name"] for action in actions}
+        actions.extend({"name": name, "description": name, "enabled": True}
+                       for name in TOOLS_REGISTRY if name not in listed)
         for action in actions:
             action["enabled"] = action.get("name") in enabled_set
         data["actions"] = sorted(actions, key=lambda action: (action.get("name") or ""))
@@ -618,13 +627,15 @@ def _realtime_screen_start():
         time.sleep(1.5)
         if _realtime_screen_is_running():
             return True, "已启动实时屏幕分析脚本"
-        return False, "脚本未运行，请查看下方「最近日志」排查（如依赖缺失、DASHSCOPE_API_KEY 未设置等）"
+        return False, "脚本未运行，请查看下方「最近日志」排查（如依赖缺失、.env 中 DEEPSEEK_API_KEY 未设置等）"
     except Exception as e:
         return False, str(e)
 
 
 def _realtime_screen_ensure_from_config():
     """根据保存的配置决定是否启动实时屏幕分析（仅当 enabled 且未在运行时启动）。供其他模块就绪后调用。"""
+    if os.environ.get("BINES_PROFILE", "full") == "chatbot":
+        return False, "纯 ChatBot 模式不启动屏幕模块"
     data = load_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH)
 
     # 【新增】无论是否启动，都同步工具 schema 状态

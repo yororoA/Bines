@@ -106,7 +106,7 @@ def start_process(config):
         p = subprocess.Popen(
             cmd,
             cwd=config['cwd'],
-            creationflags=subprocess.CREATE_NEW_CONSOLE
+            creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
         )
         processes[name] = p
         print(f"{name} started (PID: {p.pid})")
@@ -127,7 +127,34 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='启动 ATRI 系统模块')
     parser.add_argument('--web', action='store_true', help='启动 Web 管理界面（不显示终端窗口）')
     parser.add_argument('--console', action='store_true', help='使用传统控制台模式（显示终端窗口）')
+    parser.add_argument('--profile', choices=['full', 'chatbot'], default=os.environ.get("BINES_PROFILE", "full"),
+                        help='full=完整桌面；chatbot=仅 ChatBot 与 QQ Thinking')
     args = parser.parse_args()
+    os.environ["BINES_PROFILE"] = args.profile
+    os.environ["_BINES_LAUNCH_PROFILE"] = args.profile
+    PROCESSES = get_processes(display_script="display.py", profile=args.profile)
+    if args.profile == "chatbot":
+        from process_runtime import ProcessTree, build_python_runtime_env
+        children = []
+        try:
+            for definition in PROCESSES:
+                children.append(ProcessTree(resolve_process_command(definition), cwd=definition["cwd"],
+                                            env=build_python_runtime_env()))
+            print("纯 ChatBot 模式已启动：ChatBot + QQ Thinking。Ctrl+C 结束。")
+            while all(child.poll() is None for child in children):
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            for child in children:
+                child.terminate()
+            for child in children:
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                child.close()
+        sys.exit(0 if all(child.poll() in {0, -15, None} for child in children) else 1)
     
     # 默认使用 Web 模式
     use_web_mode = args.web or (not args.console)
