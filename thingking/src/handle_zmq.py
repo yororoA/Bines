@@ -43,7 +43,6 @@ from message_flow_utils import (
     build_time_gap_instruction,
     update_screen_monitor_rejection_state,
 )
-from rag_client import RAGServerClient
 from thinking_stream_runner import run_main_agent_rounds
 from qq_reply_flow import handle_qq_reply_if_needed
 from interrupt_flow import submit_pending_interrupt
@@ -202,7 +201,8 @@ qq_merge_coordinator = QQMergeCoordinator(
 # 初始化思考模式大模型助手
 thinking_model_helper = ThinkingModelHelper()
 
-from qq_buffer_manager import QQBufferManager
+# Legacy QQ buffer flow is retained below for reference, but no longer receives input.
+# QQ gateway + qq_thinking.py own all QQ events and shared SQLite persistence.
 
 # --- 配置 ---
 # 主机与端口统一来自全局 config
@@ -269,7 +269,7 @@ except Exception as e:
     print(f"[Thinking] 注册 audio_play_pub_socket 失败: {e}", flush=True)
 
 # 分类结果、QQ 日志和模块管理命令统一从总线接收。
-sub_socket = create_subscriber(context, "classified", "qq_log", "syscmd", label="Thinking main")
+sub_socket = create_subscriber(context, "classified", "syscmd", label="Thinking main")
 
 # SUB: 接收bored检测器的消息
 bored_sub_socket = create_subscriber(context, "bored", label="Thinking bored")
@@ -428,7 +428,7 @@ def send_control_signal(cough_status):
 def _analyze_qq_images(image_urls, timeout=25):
     """
     [新增] 下载并分析 QQ 消息中的图片，返回图片描述文本。
-    使用 DashScope VLM (与 screen_tool 相同的模型) 进行识别。
+    使用 DeepSeek 视觉入口 (与 screen_tool 相同的模型) 进行识别。
     
     Args:
         image_urls: 图片 URL 列表
@@ -443,26 +443,21 @@ def _analyze_qq_images(image_urls, timeout=25):
     try:
         import requests as _requests
         import base64 as _b64
-        from config import (
-            DASHSCOPE_API_URL,
-            DASHSCOPE_API_KEY,
-            DASHSCOPE_VISION_MODEL,
-            DASHSCOPE_API_TIMEOUT,
-        )
-        from vlm_client import call_dashscope_vlm
+        from config import DEEPSEEK_API_KEY, DEEPSEEK_VISION_TIMEOUT
+        from vlm_client import call_vision
     except ImportError as e:
         print(f"[QQ Image] Import error: {e}", flush=True)
         return ""
     
-    if not DASHSCOPE_API_KEY:
-        print("[QQ Image] No DASHSCOPE_API_KEY configured, skipping image analysis", flush=True)
+    if not DEEPSEEK_API_KEY:
+        print("[QQ Image] 请在 .env 中配置 DEEPSEEK_API_KEY", flush=True)
         return ""
     
     descriptions = []
     
     for i, url in enumerate(image_urls[:3]):  # 最多分析 3 张图，防止 Token 爆炸
         try:
-            # 尝试直接使用 URL 调用 VLM（DashScope 支持 URL 输入）
+            # 尝试直接使用 URL 调用 VLM（DeepSeek 支持 URL 输入）
             # 如果 URL 是本地文件路径或无法直接访问，则尝试下载后转 base64
             image_content = url
             
@@ -495,13 +490,10 @@ def _analyze_qq_images(image_urls, timeout=25):
                 print(f"[QQ Image] Download failed: {dl_err}, using URL directly", flush=True)
                 image_content = url
             
-            desc = call_dashscope_vlm(
+            desc = call_vision(
                 image_content,
                 "请详细描述这张图片的内容。如果包含文字请提取出来。如果是表情包/梗图请描述其含义。简洁回复，不超过100字。",
-                api_url=DASHSCOPE_API_URL,
-                api_key=DASHSCOPE_API_KEY,
-                model=DASHSCOPE_VISION_MODEL,
-                timeout=timeout or DASHSCOPE_API_TIMEOUT,
+                timeout=timeout or DEEPSEEK_VISION_TIMEOUT,
                 proxies={"http": None, "https": None},
                 max_tokens=200,
                 request_failed_prefix="[QQ VLM 请求失败",
@@ -543,6 +535,8 @@ def _qq_merge_enqueue(user_input: str, img_descr: str, source: str, qq_context: 
 
 
 def process_message(user_input, img_descr, source=None, extra_data=None):
+    if str(source).lower() == "qq":
+        raise RuntimeError("QQ 对话仅由 qq_thinking.py 处理")
     # 【新增】设置全局状态标签：开始处理对话
     global IS_PROCESSING_DIALOGUE, INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT
     global _CURRENT_B_TASK_ID, _CANCELLED_B_TASK_IDS
@@ -843,15 +837,9 @@ def screen_monitor_thread():
 _qq_buffer_manager_instance = None
 
 def get_qq_buffer_manager():
-    global _qq_buffer_manager_instance
-    if _qq_buffer_manager_instance is None:
-        # Lazy initialization
-        rag_port = ZMQ_PORTS['RAG_SERVER_REQREP']
-        # RAGClient needs global 'context' from handle_zmq.py
-        rag_client = RAGServerClient(context, HOST, rag_port)
-        # summary_agent is a global variable from handle_zmq.py
-        _qq_buffer_manager_instance = QQBufferManager(summary_agent, rag_client)
-    return _qq_buffer_manager_instance
+    raise RuntimeError("旧 QQ Buffer 已停用；请使用共享 MemoryStore")
+    # 旧入口保留说明：原实现创建 RAGServerClient + QQBufferManager，
+    # 将 QQ 消息汇入桌面上下文；现在由独立网关先写 MemoryStore。
 
 def start_zmq_listener():
     global INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT, _EXECUTOR_FOR_INTERRUPT
@@ -1061,6 +1049,9 @@ def start_zmq_listener():
                     user_input = data.get("user_input", "").strip()
                     img_descr = data.get("img_descr", "").strip()
                     source = data.get("source")
+                    if str(source).lower() == "qq":
+                        # Prevent legacy producers from routing QQ into desktop interrupts.
+                        continue
                     qq_context = data.get("qq_context", {})
 
                     if user_input:

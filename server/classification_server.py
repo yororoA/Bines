@@ -32,7 +32,8 @@ context = zmq.Context()
 # SUB: all input topics share the local bus
 sub_asr = create_subscriber(context, "asr", label="Classification ASR")
 sub_text = create_subscriber(context, "text", label="Classification manual text")
-sub_qq = create_subscriber(context, "qq", label="Classification QQ")
+# QQ messages are persisted/processed by the independent ChatBot gateway and Thinking.
+sub_qq = None
 
 # PUB: forward classified input to Thinking through the local bus
 pub_res = create_publisher(context, label="Classification")
@@ -149,7 +150,7 @@ def classification_loop(stop_event=None):
     poller = zmq.Poller()
     poller.register(sub_asr, zmq.POLLIN)
     poller.register(sub_text, zmq.POLLIN)
-    poller.register(sub_qq, zmq.POLLIN) # 注册 QQ socket
+    # Legacy QQ branch remains below for reference; it is deliberately not polled.
     
     while stop_event is None or not stop_event.is_set():
         try:

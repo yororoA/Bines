@@ -5,6 +5,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import FrozenSet
+from common.env import load_env
+
+load_env()
 
 THINKING_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = THINKING_DIR / "src"
@@ -15,11 +18,7 @@ def _owner_qq_ids_from_env() -> FrozenSet[str]:
     raw = os.environ.get("BINES_OWNER_QQ_IDS", "").strip()
     if raw:
         return frozenset(part.strip() for part in raw.split(",") if part.strip())
-    try:
-        from chatBot.config import ADMIN_QQ_LIST
-    except Exception:
-        return frozenset()
-    return frozenset(str(qq) for qq in ADMIN_QQ_LIST)
+    return frozenset()
 
 
 @dataclass(frozen=True)
@@ -52,6 +51,8 @@ class MemorySettings:
 
 def load_settings() -> MemorySettings:
     data_dir = Path(os.environ.get("BINES_MEMORY_DIR", str(DEFAULT_DATA_DIR)))
+    if not data_dir.is_absolute():
+        data_dir = THINKING_DIR.parent / data_dir
     return MemorySettings(
         data_dir=data_dir,
         owner_qq_ids=_owner_qq_ids_from_env(),

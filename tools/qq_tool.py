@@ -1,25 +1,15 @@
 import json
 from typing import Dict, Any, List, Optional
-from chatBot.napcat_client import NapCatClient
+from chatBot.gateway_client import GatewayClient
 from .dependencies import deps
 
 # 全局客户端实例（延迟初始化）
-_qq_client: Optional[NapCatClient] = None
+_qq_client: Optional[GatewayClient] = None
 
-def get_qq_client() -> NapCatClient:
+def get_qq_client() -> GatewayClient:
     global _qq_client
     if _qq_client is None:
-        _qq_client = NapCatClient()
-        # 注意：这里我们只用它来发送请求。
-        # 虽然主要监听是在独立的 chatBot 进程中，但 NapCatClient 是基于 WebSocket 的，
-        # 必须连接才能发送请求。连接后会有心跳和消息接收，但我们不注册任何监听器即可。
-        _qq_client.connect(background=True)
-        # 等待连接成功
-        import time
-        for _ in range(50):
-            if _qq_client.is_connected:
-                break
-            time.sleep(0.1)
+        _qq_client = GatewayClient()
     return _qq_client
 
 def send_qq_private_msg(user_id: int, message: str) -> str:
@@ -147,7 +137,12 @@ def broadcast_to_all_friends(message: str, exclude_user_ids: str = "") -> str:
             final_msg = final_msg.replace("{qq}", str(uid)).replace("{qq号}", str(uid))
             final_msg = final_msg.replace("{备注}", remark or nickname).replace("{remark}", remark or nickname)
             
-            client.send_private_msg(int(uid), final_msg)
+            result = client.send_private_msg(int(uid), final_msg)
+            if result.get("status") != "ok":
+                fail_count += 1
+                if result.get("status") == "uncertain":
+                    break
+                continue
             success_count += 1
             print(f"[QQ Broadcast] 已发送给 {display_name}({uid}) ({success_count}/{total})", flush=True)
         except Exception as e:
@@ -217,7 +212,12 @@ def broadcast_to_all_groups(message: str, exclude_group_ids: str = "") -> str:
             final_msg = final_msg.replace("{群名}", gname).replace("{group_name}", gname)
             final_msg = final_msg.replace("{群号}", str(gid)).replace("{group_id}", str(gid))
             
-            client.send_group_msg(int(gid), final_msg)
+            result = client.send_group_msg(int(gid), final_msg)
+            if result.get("status") != "ok":
+                fail_count += 1
+                if result.get("status") == "uncertain":
+                    break
+                continue
             success_count += 1
             print(f"[QQ Broadcast] 已发送到群 {gname}({gid}) ({success_count}/{total})", flush=True)
         except Exception as e:
@@ -300,7 +300,12 @@ def at_each_group_member(group_id: int, message: str, exclude_user_ids: str = ""
             final_msg = final_msg.replace("{qq}", str(uid)).replace("{qq号}", str(uid))
             final_msg = final_msg.replace("{群名片}", card).replace("{card}", card)
             
-            client.send_group_msg(int(group_id), final_msg, at_user_id=uid)
+            result = client.send_group_msg(int(group_id), final_msg, at_user_id=uid)
+            if result.get("status") != "ok":
+                fail_count += 1
+                if result.get("status") == "uncertain":
+                    break
+                continue
             success_count += 1
             print(f"[QQ @Each] 已艾特 {card}({uid}) ({success_count}/{total})", flush=True)
         except Exception as e:

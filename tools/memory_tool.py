@@ -41,14 +41,13 @@ def update_status(current_location=None,
                        格式：{"inventory": ["A", "B"], "current_location": "地点", ...}
                        如果操作后的状态与预期差异较大，会在返回值中添加警告信息
     """
-    # [依赖注入] 从依赖容器获取记忆系统
-    if deps.memory_system is None:
-        return "Dynamic memory is not available."
-    
-    try:
-        dm = deps.memory_system.dynamic
-    except AttributeError:
-        return "Dynamic memory is not available."
+    from tools.context import CURRENT_CONTEXT
+    from chatBot.store import MemoryStore
+    from types import SimpleNamespace
+    import threading
+    identity = CURRENT_CONTEXT.get().identity
+    store = MemoryStore()
+    dm = SimpleNamespace(lock=threading.RLock(), state=store.state(identity))
 
     # ① 短暂持锁：复制出当前 state，避免主线程读动态记忆时长时间阻塞
     with dm.lock:
@@ -111,9 +110,10 @@ def update_status(current_location=None,
 
     # ③ 短暂持锁：写回并 save()
     with dm.lock:
-        for k, v in s.items():
-            dm.state[k] = copy.deepcopy(v)
-        dm.save()
+        try:
+            dm.state = store.update_state(identity, s, expected_version=operation_start_version)
+        except ValueError as exc:
+            return f"状态更新失败：{exc}"
 
         warnings = []
         if expected_state is not None:
