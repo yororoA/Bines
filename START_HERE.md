@@ -2,9 +2,45 @@
 
 当前运行链路使用根目录的 Python 代码。
 
+## QQ / 纯 ChatBot
+
+NapCat 由 Docker 隔离运行。首次启动：
+
+```bash
+python -m pip install -r requirements-chatbot.txt
+python napcat.py up
+python napcat.py webui
+```
+
+首次需在 WebUI 扫码，令牌位于 `deploy/napcat/.env`；初始化命令会生成随机令牌与持久化目录，并把连接配置补入根 `.env`。已有配置不会被覆盖。设置 `.env` 中的 `DEEPSEEK_API_KEY` 和 `BINES_OWNER_QQ_IDS=主人QQ号`，再启动：
+
+```bash
+python start_modules.py --profile chatbot
+```
+
+此模式只运行 ChatBot 网关和 QQ Thinking，记忆直接使用共享 SQLite，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。Ctrl+C 会结束两个进程。完整桌面模式使用 `python start_modules.py --profile full`，Web 管理器保留原入口。
+
+旧主人 JSON 记忆可无损导入，原文件保留，重复执行不会重复写入：
+
+```bash
+python -m chatBot.migrate_memory
+```
+
+主人私聊与桌面共享记忆；其他私聊独立；群聊只能读取当前群公开记录，个人状态按群和用户分别保存。默认只回复私聊、群内 @机器人和引用机器人消息；`BINES_QQ_GROUP_REPLY=all` 可启用群内全部消息回复。通知、撤回和请求保留原事件，不自动审批。
+
+`python napcat.py status|logs|down|update` 管理容器；`down` 保留数据。媒体宿主目录 `deploy/napcat/data/media` 在容器中为 `/bines-media`。完整能力使用 `napcat_discover` + `napcat_call`，支持所有运行中 NapCat action；`napcat_events` 查看请求原始 flag，`napcat_operation` 查询发送回执。结果不确定的写操作不自动重发。
+
+常用消息使用 `napcat_send`：支持私聊、群聊、`reply_to` 引用回复，以及 `text`、`image`、`face`、`mface` 消息段。图文要放在同一个消息段数组中一次发送，成功返回一个 message_id；自定义图片表情使用 `image.data.sub_type=1`。多选消息使用 `napcat_forward(message_ids=[...])` 按列表顺序合并转发，成功后不会再自动补发重复文字。
+
+普通用户可发送当前会话的图片、base64 图片或 `deploy/napcat/data/media/public/` 公开素材（容器路径 `/bines-media/public/`）；只能引用和转发当前会话中未撤回的消息。本机与主人私聊可按请求跨会话发送。上述参数已对照 [NapCatDocs 4.18.38](https://github.com/NapNeko/NapCatDocs/blob/main/src/api/4.18.38/openapi.json) 和 NapCat 消息处理源码核验；接口可调用不代表每个 QQ 账号、客户端或所有 API 已完成实机验证。
+
+NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网关。其他 MCP 将 `mcp.servers.example.json` 复制为 `mcp.servers.json`，启用相应配置，再用 `mcp_discover/mcp_call` 发现和调用。只有本机与主人私聊可调用外部 MCP。Ark 现有适配继续保留。
+
+协议模拟回归（不连接真实 QQ）：`python -m unittest verification.napcat_integration -v`。当前开发机未安装 Docker、未登录 QQ，真实部署与 QQ API 尚需实机核验。
+
 ## 日常启动
 
-1. 需要 QQ 功能时先启动 NapCat WebSocket。语音播报用的 GPT-SoVITS：在 `.env` 设置 `GPT_SOVITS_DIR`（整合包目录，需含 `runtime\python.exe` 和 `api_v2.py`）后，管理器会把它作为 **GPT-SoVITS** 服务随“启动所有服务”一起启动，端口取自 `BINES_TTS_URL`（默认 9880），模型权重沿用整合包里的 `GPT_SoVITS/configs/tts_infer.yaml`。未设置时需自行启动。
+1. 需要 QQ 功能时先执行 `python napcat.py up`。语音播报用的 GPT-SoVITS：在 `.env` 设置 `GPT_SOVITS_DIR`（整合包目录，需含 `runtime\python.exe` 和 `api_v2.py`）后，管理器会把它作为 **GPT-SoVITS** 服务随“启动所有服务”一起启动，端口取自 `BINES_TTS_URL`（默认 9880），模型权重沿用整合包里的 `GPT_SoVITS/configs/tts_infer.yaml`。未设置时需自行启动。
 2. 双击根目录的 `start_web_manager.bat`，等待终端提示管理页就绪。
 3. 打开 `http://127.0.0.1:5000`，点击“启动所有服务”。
 4. 需要管理记忆库时，服务列表中的 **RAG Web** 会随全部服务启动，可访问 `http://127.0.0.1:5001`。
@@ -24,7 +60,7 @@ flowchart TD
     E --> F[Classification 收齐 5 个就绪消息]
     F --> G[Bored Detector]
     G --> H[Thinking 完成初始化并开始监听]
-    H --> I[ChatBot]
+    H --> I[ChatBot 网关 + QQ Thinking]
 ```
 
 Thinking 会等 Display、Speaking、Visual、RAG Server 和 Hearing 上报就绪后才初始化记忆服务并正式监听。Hearing 首次运行可能下载 ASR 和标点模型；模型加载时间取决于网络与机器性能，等待期间日志不一定立即显示“监听麦克风”。
@@ -66,19 +102,22 @@ python start_modules.py --console
 - `5571`：Classification 到 Thinking 的启动握手
 - `9880`：GPT-SoVITS TTS HTTP 接口（由 `BINES_TTS_URL` 决定）
 
-GPT-SoVITS 和 NapCat 是外部服务，不由本项目启动；默认地址及其他本机配置见 `config.py`。NapCat 使用 `BINES_NAPCAT_WS_URL` 配置 WebSocket 地址，鉴权令牌从 `BINES_NAPCAT_ACCESS_TOKEN` 读取。
+GPT-SoVITS 是外部服务；NapCat 由 `napcat.py` 管理 Docker 生命周期。NapCat 使用 `BINES_NAPCAT_WS_URL` 配置 WebSocket 地址，鉴权令牌从 `BINES_NAPCAT_ACCESS_TOKEN` 读取。网关默认 `6102`、WebUI 默认 `6099`。
 
 ## 模型与配置
 
 - 文本对话、总结、记忆维护、无聊检测和音乐相关文本任务共用 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`。`deepseek-flash` 默认会先推理再回答，项目通过 `DEEPSEEK_THINKING`（默认 `disabled`）统一关闭，避免短回复类调用被推理耗尽 token 而返回空内容。
-- 屏幕、相册和消息图片的视觉理解共用 DashScope 配置；Visual 人脸识别使用 `VISUAL_FACE_MODEL`（默认 `buffalo_l`）；ASR 模型及 revision 由根配置控制，TTS 通过外部 HTTP 服务提供。
+- QQ 图片、屏幕、相册、摄像头场景和视频帧统一使用 DeepSeek 视觉模型，默认 `DEEPSEEK_VISION_MODEL=deepseek-flash`，与文本共用 `DEEPSEEK_API_KEY`。Visual 人脸身份识别仍使用 `VISUAL_FACE_MODEL`（默认 `buffalo_l`）；ASR/TTS 保持原方案。
+- `browser_search` 调用 DeepSeek Search API，`web_fetch` 调用 Fetch API，返回来源 URL、标题、日期/摘要或 Markdown 正文。桌面与纯 ChatBot 均可调用，无需 Selenium 或启动 Chrome。旧浏览器实现保留为未注册的兼容参考，失败时不自动回退。
 - 技能说明放在 `skills/**/SKILL.md`，Python 动作由 Thinking 的 `SkillRunner` 调度；管理页“本地技能”可启停动作。
-- `config.py` 被 Git 忽略，只从环境变量读取凭据。新环境可复制 `config.example.py` 为 `config.py`。
-- 凭据推荐写在根目录 `.env`（已被 Git 忽略），每个服务导入配置时会自动读取；系统环境变量优先于 `.env`。示例：
+- 在项目根目录 `.env` 配置凭据、模型、QQ 身份和连接信息，模板见 `.env.example`。`config.py` 仅保留默认值加载逻辑。QQ、桌面、NapCat 部署、记忆和 MCP 入口均自动加载 `.env`，不受启动时工作目录影响。
+- **`.env` 中的值优先于同名系统环境变量**，包括显式空值；文件未指定的项才读取进程环境或代码默认值。修改后重启服务。支持单行引号、行尾注释、`export KEY=value` 和 `${NAME}` 引用；`BINES_ENV_FILE` 可指定独立配置文件用于测试或多实例。示例：
 
 ```ini
 DEEPSEEK_API_KEY=sk-...
-DASHSCOPE_API_KEY=sk-...
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_VISION_MODEL=deepseek-flash
+BINES_OWNER_QQ_IDS=你的QQ号
 # 按需填写
 BINES_NAPCAT_ACCESS_TOKEN=
 MOMENTS_UID=
@@ -88,4 +127,4 @@ TOGGLE_STATUS_TOKEN=
 
 不要把真实密钥提交到仓库。
 
-截至 2026-10-01，当前配置中的 `deepseek-flash` 是 DeepSeek 官方模型列表中的有效模型 ID；旧名称 `deepseek-chat` 和 `deepseek-reasoner` 已于 2026-07-24 停止服务。视觉模型名为 `qwen3-vl-flash`，由 `DASHSCOPE_VISION_MODEL` 配置。
+截至 2026-10-20，官方 [Vision 文档](https://api-docs.deepseek.com/guides/vision/) 明确 `deepseek-flash` 支持图文输入；[Search / Fetch 文档](https://api-docs.deepseek.com/guides/search/) 提供 `/v1/tools/search`、`/v1/tools/fetch`，使用同一 API Key。本项目使用独立搜索接口，避免依赖仅 V4 Pro 支持的 Responses `web_search` 工具。Search / Fetch 按请求单独计费，参考官方文档。
