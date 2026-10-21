@@ -8,7 +8,7 @@ python3 install.py
 
 Windows 可用 `python install.py`，也可双击 `install.bat`；macOS 可双击 `install.command`。默认安装完整的 6 组 Python 环境。安装脚本自身只依赖标准库，需要电脑上已有 Python 3.10 或更新版本用于启动；实际运行环境统一使用 64 位 Python 3.11/3.12。安装器也会离线查找 uv 已下载的 Python，不要求它出现在 PATH。找不到兼容版本时，通过 uv 和南京大学公开镜像下载 Python 3.12 到项目 `.tools/python`，不修改系统 Python、PATH 或 Windows Python 注册项。
 
-安装结束后填写 `.env` 中的密钥和主人 QQ，再运行 `python bines.py`。启动入口会自动进入 `.venv`，无需手动激活环境。
+安装结束后填写 `.env` 中的密钥和主人 QQ，再运行 `python bines.py`。默认自动构建并启动 Docker QQ 链路；完整模式再启动宿主机桌面模块。需要纯宿主机运行时加 `--host`。
 
 ## 安装范围与命令
 
@@ -38,6 +38,9 @@ python install.py --system
 
 # 不安装 Docker Desktop（使用外部 NapCat 或稍后自行安装）
 python install.py --skip-docker
+
+# 完整安装时同时构建 Docker thinking 镜像（体积较大，供 full 模式使用）
+python install.py --docker-full
 
 # 查看安装计划 / 只验证当前环境
 python install.py --dry-run

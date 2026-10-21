@@ -13,6 +13,29 @@ from urllib.parse import quote, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 DEPLOY = ROOT / "deploy" / "napcat"
+UNIFIED_COMPOSE = ROOT / "deploy" / "docker" / "compose.yaml"
+
+
+def unified_active(docker):
+    """Prefer the compose project started by bines.py when its NapCat container exists."""
+    try:
+        result = subprocess.run(
+            [docker, "ps", "-a", "--filter", "name=bines-napcat-1", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "bines-napcat-1" in (result.stdout or "").split()
+
+
+def compose_command(docker):
+    if UNIFIED_COMPOSE.is_file() and (
+        os.environ.get("BINES_DOCKER_MODE") == "1" or unified_active(docker)
+    ):
+        return [docker, "compose", "--env-file", str(DEPLOY / ".env"),
+                "-f", str(UNIFIED_COMPOSE)]
+    return [docker, "compose", "--project-directory", str(DEPLOY),
+            "-f", str(DEPLOY / "compose.yaml")]
 DEFAULT_IMAGE = "mlikiowa/napcat-docker:latest"
 
 
@@ -214,15 +237,26 @@ def main():
         raise SystemExit("未找到 Docker。请安装并启动 Docker Desktop 后再执行 python napcat.py up。")
     if args.action in {"up", "update"}:
         docker = ensure_docker_ready()
-    command = [docker, "compose", "--project-directory", str(DEPLOY), "-f", str(DEPLOY / "compose.yaml")]
+    command = compose_command(docker)
+    unified = UNIFIED_COMPOSE.is_file() and (
+        os.environ.get("BINES_DOCKER_MODE") == "1" or unified_active(docker)
+    )
     if args.action == "up" and not image_available(docker):
         print("首次运行正在下载 NapCat 镜像，可能需要数分钟。", flush=True)
         subprocess.run(command+["pull", "napcat"], check=True)
-    operations = {"up": ["up", "-d", "--pull", "never"], "down": ["down"], "logs": ["logs", "--tail", "100", "-f"],
-                  "status": ["ps"], "config": ["config", "--quiet"], "update": ["pull"]}
+    if unified:
+        operations = {"up": ["up", "-d", "--pull", "never", "napcat"],
+                      "down": ["stop", "napcat"],
+                      "logs": ["logs", "--tail", "100", "-f", "napcat"],
+                      "status": ["ps", "napcat"], "config": ["config", "--quiet"],
+                      "update": ["pull", "napcat"]}
+    else:
+        operations = {"up": ["up", "-d", "--pull", "never"], "down": ["down"],
+                      "logs": ["logs", "--tail", "100", "-f"],
+                      "status": ["ps"], "config": ["config", "--quiet"], "update": ["pull"]}
     subprocess.run(command+operations[args.action], check=True)
     if args.action == "update":
-        subprocess.run(command+["up", "-d"], check=True)
+        subprocess.run(command + (["up", "-d", "napcat"] if unified else ["up", "-d"]), check=True)
     if args.action == "up":
         print("NapCat 已启动；另开终端运行 python3 napcat.py logs，扫描日志中的二维码。")
         print("管理页使用 python3 napcat.py webui 打开；6099 WebUI 需要 token，不显示登录二维码。")

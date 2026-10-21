@@ -136,6 +136,7 @@ class Installer:
             self.env["UV_CACHE_DIR"] = str(self.log_dir / "uv-cache")
         self.device = self.select_device(options.device)
         self.python = None
+        self.docker_build_error = None
 
     @staticmethod
     def select_device(requested):
@@ -576,6 +577,36 @@ class Installer:
                 notices.append("唱歌换声还需配置 SOVITS_SVC_DIR 和自己的模型权重；安装器仅管理分离/混音环境")
         return notices
 
+    def prepare_docker_images(self):
+        """Build the launcher image so ``python bines.py`` works immediately."""
+        if self.options.skip_docker:
+            return
+        if not shutil.which("docker"):
+            print("  Docker 不可用，跳过镜像构建；python bines.py 将回退宿主机模式", flush=True)
+            return
+        from docker_launcher import compose_command, ensure_engine
+
+        try:
+            ensure_engine(timeout=self.options.docker_download_timeout)
+        except (RuntimeError, OSError) as exc:
+            self.docker_build_error = str(exc)
+            print(f"  Docker 引擎未就绪，跳过镜像构建：{exc}", flush=True)
+            return
+        env = dict(self.env)
+        env.setdefault("BINES_UID", str(os.getuid() if hasattr(os, "getuid") else 1000))
+        env.setdefault("BINES_GID", str(os.getgid() if hasattr(os, "getgid") else 1000))
+        services = ["chatbot"]
+        if self.options.profile == "full" and self.options.docker_full:
+            services.append("memory-server")
+        for service in services:
+            try:
+                self.run(compose_command(self.options.profile, "build", service),
+                         f"构建 Docker 镜像 {service}", env=env, timeout=3600)
+            except (InstallError, OSError, subprocess.SubprocessError) as exc:
+                self.docker_build_error = str(exc)
+                print(f"  Docker 镜像 {service} 构建失败：{exc}", flush=True)
+                print("  可稍后运行 python bines.py，由启动器自动构建", flush=True)
+
     def execute(self):
         print("Bines 依赖安装 · " + self.options.profile + " · " + self.device, flush=True)
         if self.options.dry_run:
@@ -605,6 +636,7 @@ class Installer:
                 print(f"  ✗ {name}：{exc}", flush=True)
         if not self.options.check and self.results.get("launcher") == "ok":
             self.initialize_settings()
+            self.prepare_docker_images()
         print("\n安装结果：", flush=True)
         for name, result in self.results.items():
             print(f"  {name}: {'通过' if result == 'ok' else '失败'}", flush=True)
@@ -628,6 +660,8 @@ def main(argv=None):
     parser.add_argument("--only", nargs="+", choices=ENVIRONMENTS, help="仅安装/重试指定组（自动包含 launcher）")
     parser.add_argument("--python", help="已有 64 位 Python 3.11/3.12 路径；未指定时自动发现或下载")
     parser.add_argument("--no-python-download", action="store_true", help="找不到兼容 Python 时直接报告错误")
+    parser.add_argument("--docker-full", action="store_true",
+                        help="完整安装时同时构建 Docker thinking 镜像（体积较大）")
     parser.add_argument(
         "--python-mirror",
         default=os.environ.get("BINES_PYTHON_MIRROR", DEFAULT_PYTHON_MIRROR),

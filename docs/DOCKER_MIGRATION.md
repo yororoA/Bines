@@ -304,25 +304,28 @@ supervisor 只启动 `runtime == "host"` 的服务；容器服务由 compose 管
 
 资产位于 `deploy/docker/Dockerfile.launcher`、`deploy/docker/Dockerfile.thinking`、`deploy/docker/compose.yaml` 与仓库根目录 `.dockerignore`。
 
-启动前先停止宿主机的 Bines，避免 6099/6101/6102 端口冲突；再统一宿主 UID/GID，避免挂载目录出现属主问题：
+启动入口不再需要手写 compose 命令，`bines.py` 会调用 `docker_launcher.py` 自动处理 UID/GID、env-file、profile、健康等待和停止：
 
-```sh
-export BINES_UID=$(id -u)
-export BINES_GID=$(id -g)
-mkdir -p thingking/models/hf-cache
-
-# QQ 模式
-docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml --profile chatbot up -d --build
-
-# 完整模式：额外启动 memory-server 与 rag-web
-BINES_PROFILE=full docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml --profile full up -d --build
+```bash
+python bines.py                      # 完整模式：Docker QQ/记忆链路 + 宿主桌面模块
+python bines.py --profile chatbot    # 只跑 QQ：Docker 链路并跟随日志
+python bines.py --host               # 纯宿主机模式，不启动 Docker
+python bines.py --external-napcat    # 连接已有 NapCat，走宿主机模式
 ```
 
 - `chatbot` 模式启动 `napcat`、`chatbot`、`qq-thinking`、`memory-worker`，记忆嵌入网关。
-- `full` 模式额外启动 `memory-server` 与 `rag-web`。
-- `BINES_PROFILE` 属于 compose 变量插值，默认只读 shell 环境；完整模式必须在命令前设置，容器内的根 `.env` 仍会正常加载。
-- `--env-file deploy/napcat/.env` 用于补齐 `NAPCAT_ACCOUNT`、UID/GID；首次使用前可运行 `python napcat.py init` 同步根 `.env` 中的 NapCat 令牌。
-- 停止并保留数据：`docker compose -f deploy/docker/compose.yaml down`（不要加 `-v`）。
-- 首次登录或登录态失效时，二维码在 NapCat 容器日志中：`docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs -f napcat`。网页 `http://127.0.0.1:6099` 需要 WebUI token，不是扫码页。
-- 首次构建 `thinking` 镜像会下载 PyTorch 与嵌入模型，耗时与镜像体积都明显大于 launcher。
+- `full` 模式额外启动 `memory-server` 与 `rag-web`，并在容器健康后启动宿主机桌面模块；宿主机不再重复启动 ChatBot、QQ Thinking、Memory Worker、RAG Server 和 RAG Web。
+- `bines.py` 启动时自动设置 `BINES_UID`/`BINES_GID`、`BINES_PROFILE` 和 `--env-file deploy/napcat/.env`；镜像已存在时不会追加 `--build`，仅在缺少镜像时构建。
+- Ctrl+C 只停止本次新启动的容器；启动前已在运行的容器保持不动，数据卷始终保留。
+- 首次使用前可运行 `python napcat.py init` 同步根 `.env` 中的 NapCat 令牌。
+- 首次登录或登录态失效时，二维码在 NapCat 容器日志中：`python napcat.py logs`。网页 `http://127.0.0.1:6099` 需要 WebUI token，不是扫码页，可用 `python napcat.py webui` 打开。
+- 首次构建 `thinking` 镜像会下载 PyTorch 与嵌入模型，耗时与镜像体积都明显大于 launcher；`install.py` 默认只构建 launcher，完整模式需要 `python install.py --docker-full` 预构建 thinking 镜像。
+- 手动运维仍可使用 compose（调试用，日常启动请用 `bines.py`）：
+
+```sh
+docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml ps
+docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs -f --tail 80
+docker compose -f deploy/docker/compose.yaml down --remove-orphans   # 不要加 -v
+```
+
 - 当前 `bines-launcher:local` 已构建，QQ 链路容器已启动；NapCat 登录态失效时需按上面的日志命令重新扫码。

@@ -13,6 +13,14 @@ THINKING_STARTUP_DEPENDENCIES = frozenset({
     "Hearing",
     "RAG Server",
 })
+DOCKER_MANAGED = frozenset({
+    "ChatBot", "QQ Thinking", "Memory Worker", "RAG Server", "RAG Web",
+})
+
+
+def docker_mode() -> bool:
+    """When set, the compose chain owns QQ and memory services."""
+    return os.environ.get("BINES_DOCKER_MODE") == "1"
 
 
 def _gpt_sovits_process() -> Optional[Dict[str, object]]:
@@ -146,6 +154,8 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
     ]
     if profile == "chatbot":
         rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking", "Memory Worker"}]
+    if docker_mode():
+        rows = [row for row in rows if row["name"] not in DOCKER_MANAGED]
     dependencies = {
         "Classification": ["ZMQ Bus"],
         "Display": ["ZMQ Bus"],
@@ -163,6 +173,8 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
     for row in rows:
         name = row["name"]
         row["depends_on"] = dependencies.get(name, [])
+        if docker_mode():
+            row["depends_on"] = [item for item in row["depends_on"] if item not in DOCKER_MANAGED]
         row["autostart"] = name != "RAG Web"
         if name == "Realtime Screen":
             from realtime_screen_config import load_realtime_screen_config

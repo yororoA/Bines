@@ -1,28 +1,43 @@
-# 项目启动说明（纯 Python 主链路）
+# 项目启动说明（Docker 优先，宿主机兜底）
 
-当前运行链路使用根目录的 Python 代码。
+QQ 与记忆链路默认使用 Docker；桌面显示、视觉、听觉和桌面 Thinking 仍在宿主机运行。
 
 ## 一键安装
 
-首次运行 `python install.py` 安装全部 6 组环境；只使用 QQ 可运行 `python install.py --profile chatbot`。Windows 可双击 `install.bat`，macOS 可双击 `install.command`。
+首次运行 `python install.py` 安装全部 6 组环境并构建 Docker launcher 镜像；只使用 QQ 可运行 `python install.py --profile chatbot`。需要同时构建 Docker thinking 镜像时加 `--docker-full`。Windows 可双击 `install.bat`，macOS 可双击 `install.command`。
 
 安装器自动寻找或下载兼容 Python、创建/复用虚拟环境、安装并检查依赖，保留原 `.env` 和记忆。macOS/Windows 缺少 Docker Desktop 时会自动下载安装并触发一次系统授权，首次协议仍由用户在 Docker 窗口确认；使用外部 NapCat 时可加 `--skip-docker`。系统音视频库可加 `--system` 通过已有包管理器安装。部分失败可用 `--only visual hearing` 单独重试；完整说明见 [依赖安装](docs/INSTALL.md)。
 
 ## 一个启动入口
 
-配置好根目录 `.env` 并安装相应 Python 依赖后，日常只需要：
-
 ```bash
 python bines.py
 ```
 
-默认运行 `.env` 中 `BINES_PROFILE` 选定的模式（未配置为 full）。完整模式自动打开管理页并启动服务；纯 QQ 使用 `python bines.py --profile chatbot`，需要管理页时加 `--web`。macOS 可双击 `start_bines.command`，Windows 可双击 `start_web_manager.bat`。
+默认使用 Docker 启动 QQ 链路和记忆服务；完整模式再启动宿主机的桌面模块并打开管理页。只运行 QQ：
 
-启动器自动检查/启动本机 Docker NapCat、补全连接配置、调度前置依赖，并等待每个模块真实上报就绪；首次缺少 NapCat 镜像时会单独下载并显示等待进度，不再受普通容器启动的短超时限制。首次 QQ 登录需另开终端运行 `python3 napcat.py logs`，扫描容器日志中的二维码。已有 NapCat 可设置 `BINES_NAPCAT_DEPLOY=external`，或使用 `--external-napcat`。仅打开管理器、不自动启动服务使用 `--manager-only`。
+```bash
+python bines.py --profile chatbot
+```
 
-停止终端或按 Ctrl+C 会逆序停止本次管理的服务，并停止本次新启动的 NapCat 容器，保留数据；已经在外部运行的容器不受影响。单独在管理页启动 Thinking 会自动补启其依赖，停止前置服务会先停止依赖它的服务。状态显示“启动中 / 已就绪 / 依赖阻塞 / 失败”，失败原因和日志保留。
+强制回到纯宿主机模式（不启动 Docker）：
 
-完整模式自动启动 **RAG Server（Memory Server）**，统一持有 SQLite 和 Chroma 索引；纯 QQ 模式在网关中运行轻量记忆服务。RAG Web 为完整模式按需启动的记忆管理页面；唱歌流水线收到唱歌请求时才运行。
+```bash
+python bines.py --host
+python bines.py --host --profile chatbot
+```
+
+`python bines.py --profile chatbot` 会构建并启动 NapCat、ChatBot、QQ Thinking、Memory Worker，随后跟随日志；Ctrl+C 停止本次启动的容器并保留数据。首次登录二维码在容器日志中：
+
+```bash
+docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs -f napcat
+```
+
+已有外部 NapCat 时使用 `--external-napcat`，会走宿主机模式。仅打开管理器、不自动启动服务使用 `--manager-only`。
+
+停止终端或按 Ctrl+C 会停止本次启动的宿主服务，并停止本次新启动的容器，保留数据；已经在外部运行的容器不受影响。单独在管理页启动 Thinking 会自动补启其依赖，停止前置服务会先停止依赖它的服务。状态显示“启动中 / 已就绪 / 依赖阻塞 / 失败”，失败原因和日志保留。
+
+完整模式的 Memory Server 与 RAG Web 运行在 Docker 中，统一持有 SQLite 和 Chroma 索引；纯 QQ 模式在网关中运行轻量记忆服务。唱歌流水线收到唱歌请求时才运行。
 
 ## QQ / 纯 ChatBot
 
