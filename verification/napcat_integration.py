@@ -204,6 +204,44 @@ class Integration(unittest.TestCase):
             bot.process(rows, Model())
         self.assertNotIn("'role': 'assistant'", str(self.store.context(self.store.identity(event("3")))))
 
+    def test_long_group_reply_is_split_into_short_messages(self):
+        from chatBot.messages import split_qq_text
+
+        self.assertEqual(split_qq_text("短回复"), ["短回复"])
+        long_text = (
+            "这是一段比较长的说明。它会被拆成多条短消息发送。"
+            "每条只讲一个意思。这样群里看起来不会太累。"
+        ) * 3
+        chunks = split_qq_text(long_text)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 15 for chunk in chunks))
+
+        for group in ("10", None):
+            with self.subTest(group=group):
+                ev = event("2", group=group, msg_id=80, message=[
+                    {"type": "at", "data": {"qq": "99"}},
+                    {"type": "text", "data": {"text": "讲个长的"}},
+                ])
+                self.insert(ev)
+                rows = self.store.claim("worker", 0, 0)
+                class Model:
+                    def run_skill_protocol(inner, conversation, runner, **kwargs):
+                        return long_text, [], []
+                bot = QQThinking(self.store, self.client)
+                bot.process(rows, Model())
+                expected = "send_group_msg" if group else "send_private_msg"
+                sends = [params for action, params in self.api.calls if action == expected]
+                self.assertGreater(len(sends), 1)
+                self.assertTrue(all(len(params["message"][-1]["data"]["text"]) <= 15 for params in sends))
+                if group:
+                    self.assertEqual(sum(
+                        any(part["type"] == "at" for part in params["message"]) for params in sends
+                    ), 1)
+                    self.assertTrue(all(
+                        not any(part["type"] == "at" for part in params["message"]) for params in sends[1:]
+                    ))
+                self.store.finish([row["id"] for row in rows], "worker")
+
     def test_cq_and_streaming_transport_nonblocking(self):
         self.assertEqual(segments("[CQ:at,qq=99]a&amp;b")[1]["data"]["text"], "a&b")
         holder = {}

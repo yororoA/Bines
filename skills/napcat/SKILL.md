@@ -17,8 +17,9 @@ actions: napcat_discover, napcat_catalog, napcat_call, napcat_operation, napcat_
 - 指定收件人：传 `user_id`；指定群：传 `group_id`，二者只能选一个。普通 QQ 用户仅当前会话，本机与主人私聊可按请求指定其他目标。
 - 多选合并转发：`napcat_forward(message_ids=["101","102"])`。从上下文或历史读取真实 message_id，不编造 ID；列表顺序就是转发顺序。此操作发一条合并转发消息。原生接口为 `send_group_forward_msg` / `send_private_forward_msg`，`messages` 是多个 `{"type":"node","data":{"id":"101"}}`。普通用户不能改写节点发送人或夹带另一个会话的内容。
 - 图文同一条发送：将所有段一次传给 `napcat_send`，不能分别调用文字发送和图片发送。例如 `message=[{"type":"text","data":{"text":"这张图片"}},{"type":"image","data":{"file":"图片来源"}}]`。这会发送一条消息并返回一个 message_id；QQ 客户端如何排版由客户端决定，不能控制服务端时间戳。
+- 群聊和私聊的回复都要短；超过 15 个字时系统会自动拆成多条消息，不需要手动分段。手动发送长内容时，也按 15 字左右一条调用 `napcat_send`，第一条 @ 对方，后续不要重复 @。
 - 自定义图片表情：`{"type":"image","data":{"file":"图片来源","sub_type":1,"summary":"[表情]"}}`；普通图片 `sub_type=0`。支持的 GIF 也走图片段；不能用 `face` 代替自定义图片。
-- 机器人 QQ 账号收藏的表情：仅当本轮动作列表提供 `napcat_custom_faces` / `napcat_send_custom_face` 时，先查看索引与描述，再按索引发送；这两个专用动作允许主人群聊使用。动作未提供时不要尝试调用。不要用历史聊天图片冒充收藏表情，也不要编造或直接复用可能过期的 QQ 临时 URL。
+- 机器人 QQ 账号收藏的表情：仅当本轮动作列表提供 `napcat_custom_faces` / `napcat_send_custom_face` 时，先查看索引与描述，再按索引发送；这两个专用动作允许主人群聊使用。动作未提供时不要尝试调用。发送结果会附带该表情的描述，只能依据描述说明画面，不要声称自己直接看到了图片。不要用历史聊天图片冒充收藏表情，也不要编造或直接复用可能过期的 QQ 临时 URL。
 - QQ 自带表情：`{"type":"face","data":{"id":"表情编号"}}`。商城表情：`{"type":"mface","data":{"emoji_package_id":123,"emoji_id":"实际ID","key":"实际key","summary":"[表情]"}}`，参数必须来自有效表情信息，不能编造。
 
 普通用户的图片来源可以是当前会话 image 段中的 `file` / `url`（填入发送段的 `file`）、`base64://...`，或本机明确放入 `deploy/napcat/data/media/public/` 的公开图片（发送路径 `/bines-media/public/文件名`）。普通用户不能自行读取其他容器路径、其他会话的图片或任意 URL；需要使用外部图片时由本机/主人私聊操作或先将图片发送到当前会话。整个 `message` 支持单段对象或段数组。原生接口支持 CQ 文本；便捷入口 `napcat_send` 将字符串作为纯文字，复杂消息必须用段对象。

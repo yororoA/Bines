@@ -45,6 +45,16 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("不在回复中谈论人格提示", guard)
         self.assertIn("以下示例只约束语气", guard)
 
+    def test_qq_style_guard_is_short_and_light_on_punctuation(self):
+        guard = persona_profile.qq_style_guard()
+        self.assertIn("QQ 回复格式", guard)
+        self.assertIn("简洁优先", guard)
+        self.assertIn("少用标点", guard)
+        self.assertIn("超过 15 个字", guard)
+        self.assertIn("拆成多条消息", guard)
+        self.assertNotIn("正常使用逗号、顿号、句号", guard)
+        self.assertIn("两个空格", persona_profile.output_rules())
+
     def test_relationship_mood_for_every_level(self):
         from relationship_state import RELATIONSHIP_STATES
 

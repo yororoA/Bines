@@ -76,6 +76,28 @@ def readable(message):
     return "".join(parts)
 
 
+def split_qq_text(text, limit=15):
+    """Split one long QQ reply into short, semantically ordered messages."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    units = [part.strip() for part in re.split(r"(?<=[。！？!?…\n])", text) if part.strip()]
+    chunks = []
+    for unit in units:
+        while len(unit) > limit:
+            chunks.append(unit[:limit].strip())
+            unit = unit[limit:].strip()
+        if not unit:
+            continue
+        if chunks and len(chunks[-1]) + len(unit) <= limit:
+            chunks[-1] += unit
+        else:
+            chunks.append(unit)
+    return [chunk for chunk in chunks if chunk]
+
+
 @dataclass(frozen=True)
 class Identity:
     account: str

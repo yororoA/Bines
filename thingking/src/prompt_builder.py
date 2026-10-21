@@ -21,7 +21,7 @@ SCENE_QQ_GROUP = "qq_group"
 
 _QQ_TOOL_POLICY = (
     "你无法通过屏幕或摄像头看到对方。本轮只能使用技能清单中允许的 QQ 消息、网页搜索、时间与动态动作，"
-    "禁止调用视觉、屏幕和本地桌面操作。不需要技能就能回答时直接回复。回复要极度简洁，直击重点。"
+    "禁止调用视觉、屏幕和本地桌面操作。不需要技能就能回答时直接回复。回复要极度简洁，少用标点，直击重点。"
 )
 _PRIVACY_POLICY = "对方不是管理员：不要透露管理员的私人信息，也不要提及你和管理员的私下对话。"
 
@@ -186,7 +186,8 @@ def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]
     if recall:
         messages.append({"role": "system", "content": recall})
     messages.extend(_working_messages(context, scene))
-    messages.append({"role": "system", "content": persona_profile.style_guard()})
+    guard = persona_profile.qq_style_guard() if scene != SCENE_LOCAL else persona_profile.style_guard()
+    messages.append({"role": "system", "content": guard})
     return messages
 
 

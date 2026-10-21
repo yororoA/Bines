@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 from chatBot.config import DEBOUNCE, MAX_WAIT, WORKERS, GROUP_REPLY_MODE
-from chatBot.messages import segments, readable, SEND_ACTIONS, sent_message
+from chatBot.messages import segments, readable, SEND_ACTIONS, sent_message, split_qq_text
 from chatBot.store import MemoryStore
 from chatBot.gateway_client import GatewayClient
 from tools.context import ToolContext, tool_context
@@ -102,6 +102,33 @@ class QQThinking:
                        external_id=f"{identity.account}:{identity.group or 'p:'+identity.user}:{message_id}",
                        raw={"message": message, "receipt": result})
 
+    def reply_actions(self, identity, texts):
+        """One send action per short segment; only the first group message carries the @."""
+        actions = []
+        for index, text in enumerate(texts):
+            chain = [{"type": "text", "data": {"text": text}}]
+            if identity.group and index == 0:
+                chain.insert(0, {"type": "at", "data": {"qq": identity.user}})
+            if identity.group:
+                actions.append({"action": "send_group_msg",
+                                "params": {"group_id": identity.group, "message": chain}})
+            else:
+                actions.append({"action": "send_private_msg",
+                                "params": {"user_id": identity.user, "message": chain}})
+        return actions
+
+    def send_actions(self, identity, turn_id, actions, start=0):
+        """Send segments once each; persisted progress lets a crash resume without duplicates."""
+        for index in range(start, len(actions)):
+            item = actions[index]
+            self.store.save_turn(turn_id, "ready", {"actions": actions, "next": index})
+            result = self.client.raw_api(item["action"], item["params"],
+                                         operation_id=f"{turn_id}:reply:{index}")
+            self.remember_send(identity, item["params"], result)
+            if not successful(result):
+                raise RuntimeError(f"回复发送状态={result.get('status')}，回执={turn_id}:reply:{index}")
+        self.store.save_turn(turn_id, "done")
+
     def process(self, rows, model):
         events = [json.loads(row["raw"]) for row in rows]
         identity = self.store.identity(events[-1])
@@ -117,6 +144,9 @@ class QQThinking:
                     return
                 if previous["status"] == "ready":
                     saved = json.loads(previous["payload"])
+                    if "actions" in saved:
+                        self.send_actions(identity, turn_id, saved["actions"], int(saved.get("next", 0)))
+                        return
                     result = self.client.raw_api(saved["action"], saved["params"], operation_id=f"{turn_id}:reply")
                     self.remember_send(identity, saved["params"], result)
                     if successful(result):
@@ -157,7 +187,7 @@ class QQThinking:
             conversation = prompt_builder.build_conversation_messages(memory_context)
             conversation.extend([
                 {"role": "system", "content": prompt},
-                {"role": "system", "content": persona_profile.style_guard()},
+                {"role": "system", "content": persona_profile.qq_style_guard()},
                 {"role": "user", "content": f"请回复 QQ:{identity.user} 本轮消息：\n{request}"},
             ])
             text, _, _ = model.run_skill_protocol(conversation, self.runner, source="QQ")
@@ -183,18 +213,11 @@ class QQThinking:
                 return
             if text.strip().startswith("[[SKILL_CALL]]"):
                 raise RuntimeError("模型技能调用超过上限，未生成最终回复")
-            chain = [{"type": "text", "data": {"text": text}}]
-            if identity.group:
-                chain.insert(0, {"type": "at", "data": {"qq": identity.user}})
-                action, params = "send_group_msg", {"group_id": identity.group, "message": chain}
-            else:
-                action, params = "send_private_msg", {"user_id": identity.user, "message": chain}
-            self.store.save_turn(turn_id, "ready", {"action": action, "params": params})
-            result = self.client.raw_api(action, params, operation_id=f"{turn_id}:reply")
-            self.remember_send(identity, params, result)
-            if not successful(result):
-                raise RuntimeError(f"回复发送状态={result.get('status')}，回执={turn_id}:reply")
-            self.store.save_turn(turn_id, "done")
+            parts = split_qq_text(text)
+            if not parts:
+                self.store.save_turn(turn_id, "done")
+                return
+            self.send_actions(identity, turn_id, self.reply_actions(identity, parts))
 
     def worker(self):
         worker = str(uuid.uuid4())

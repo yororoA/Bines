@@ -80,8 +80,13 @@ def output_rules(persona: Dict[str, Any] | None = None) -> str:
     return "--- 回复格式（必须遵守） ---\n" + _numbered(p["output_format"])
 
 
-def style_guard(persona: Dict[str, Any] | None = None) -> str:
-    """High-priority voice reminder placed immediately before the current turn."""
+def qq_output_rules(persona: Dict[str, Any] | None = None) -> str:
+    p = persona or load_persona()
+    rules = p.get("qq_output_format") or p["output_format"]
+    return "--- QQ 回复格式（必须遵守） ---\n" + _numbered(rules)
+
+
+def _guard(persona: Dict[str, Any] | None, rules: str) -> str:
     p = persona or load_persona()
     guard = p["voice_guard"]
     examples = "\n".join(
@@ -93,9 +98,21 @@ def style_guard(persona: Dict[str, Any] | None = None) -> str:
         _bullets(guard["directives"]),
         "以下示例只约束语气，不要照抄内容：",
         examples,
-        output_rules(p),
+        rules,
         "直接以碧波的口吻回答，不要输出开场白、推理过程或 Markdown。",
     ])
+
+
+def style_guard(persona: Dict[str, Any] | None = None) -> str:
+    """High-priority voice reminder placed immediately before the current turn."""
+    p = persona or load_persona()
+    return _guard(p, output_rules(p))
+
+
+def qq_style_guard(persona: Dict[str, Any] | None = None) -> str:
+    """QQ-specific style: shorter, fewer punctuation marks and segmented long replies."""
+    p = persona or load_persona()
+    return _guard(p, qq_output_rules(p))
 
 
 def brief(persona: Dict[str, Any] | None = None) -> str:
@@ -131,6 +148,8 @@ def render_markdown(persona: Dict[str, Any] | None = None) -> str:
         character_prompt(p),
         "",
         style_guard(p),
+        "",
+        qq_style_guard(p),
         "```",
         "",
         "## 主动发言心情（按关系等级）",
