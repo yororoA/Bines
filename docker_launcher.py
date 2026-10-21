@@ -71,25 +71,58 @@ def run(profile: str, *args: str, timeout: float = 3600) -> subprocess.Completed
     )
 
 
+SOURCE_PATTERNS = (
+    "*.py", "chatBot/**/*.py", "common/**/*.py", "tools/**/*.py",
+    "thingking/*.py", "thingking/src/**/*.py", "thingking/persona/*",
+    "skills/**/*.md", "requirements/*.txt", "requirements-chatbot.txt",
+    "server/skill_actions.json", "deploy/docker/Dockerfile.*", ".dockerignore",
+)
+
+
+def _newest_source() -> float:
+    newest = 0.0
+    for pattern in SOURCE_PATTERNS:
+        for path in ROOT.glob(pattern):
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue
+    return newest
+
+
+def _image_created(docker: str, image: str) -> float:
+    from datetime import datetime
+
+    result = subprocess.run(
+        [docker, "image", "inspect", image, "--format", "{{.Created}}"],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    if result.returncode:
+        return 0.0
+    try:
+        return datetime.fromisoformat(result.stdout.strip().replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
 def _images_ready(profile: str) -> bool:
+    """Require both the image and its embedded source to be current."""
     docker = docker_executable()
     if not docker:
         return False
     images = ["bines-launcher:local"]
     if profile == "full":
         images.append("bines-thinking:local")
+    newest = _newest_source()
     for image in images:
-        result = subprocess.run(
-            [docker, "image", "inspect", image],
-            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        if result.returncode:
+        created = _image_created(docker, image)
+        if created < newest:
             return False
     return True
 
 
 def up(profile: str) -> None:
-    """Start the chain in the background; build only when an image is missing."""
+    """Start the chain in the background; rebuild when code inside the image is stale."""
     args = ["up", "-d"] + ([] if _images_ready(profile) else ["--build"])
     result = run(profile, *args)
     if result.returncode:

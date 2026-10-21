@@ -315,7 +315,7 @@ python bines.py --external-napcat    # 连接已有 NapCat，走宿主机模式
 
 - `chatbot` 模式启动 `napcat`、`chatbot`、`qq-thinking`、`memory-worker`，记忆嵌入网关。
 - `full` 模式额外启动 `memory-server` 与 `rag-web`，并在容器健康后启动宿主机桌面模块；宿主机不再重复启动 ChatBot、QQ Thinking、Memory Worker、RAG Server 和 RAG Web。
-- `bines.py` 启动时自动设置 `BINES_UID`/`BINES_GID`、`BINES_PROFILE` 和 `--env-file deploy/napcat/.env`；镜像已存在时不会追加 `--build`，仅在缺少镜像时构建。
+- `bines.py` 启动时自动设置 `BINES_UID`/`BINES_GID`、`BINES_PROFILE` 和 `--env-file deploy/napcat/.env`；镜像存在且内嵌源码不旧于仓库时不追加 `--build`，代码或 Dockerfile 更新后会自动重建。
 - Ctrl+C 只停止本次新启动的容器；启动前已在运行的容器保持不动，数据卷始终保留。
 - 首次使用前可运行 `python napcat.py init` 同步根 `.env` 中的 NapCat 令牌。
 - 首次登录或登录态失效时，二维码在 NapCat 容器日志中：`python napcat.py logs`。网页 `http://127.0.0.1:6099` 需要 WebUI token，不是扫码页，可用 `python napcat.py webui` 打开。

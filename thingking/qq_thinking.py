@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -120,11 +121,21 @@ class QQThinking:
         for index in range(start, len(actions)):
             item = actions[index]
             self.store.save_turn(turn_id, "ready", {"actions": actions, "next": index})
-            result = self.client.raw_api(item["action"], item["params"],
-                                         operation_id=f"{turn_id}:reply:{index}")
+            operation_id = f"{turn_id}:reply:{index}"
+            for attempt in range(2):
+                result = self.client.raw_api(item["action"], item["params"],
+                                             operation_id=operation_id)
+                # A missing receipt proves the gateway never began the write, so the
+                # same operation_id is safe to resend. Resuming an interrupted turn
+                # otherwise leaves that segment silently lost.
+                retry = (result.get("status") == "uncertain"
+                         and self.client.operation_state(operation_id).get("status") == "not_found")
+                if not retry:
+                    break
+                time.sleep(0.5)
             self.remember_send(identity, item["params"], result)
             if not successful(result):
-                raise RuntimeError(f"回复发送状态={result.get('status')}，回执={turn_id}:reply:{index}")
+                raise RuntimeError(f"回复发送状态={result.get('status')}，回执={operation_id}")
         self.store.save_turn(turn_id, "done")
 
     def process(self, rows, model):
@@ -150,8 +161,13 @@ class QQThinking:
                     if successful(result):
                         self.store.save_turn(turn_id, "done")
                         return
-                # Re-running a model after a crash can repeat remote Skill/MCP writes.
-                raise RuntimeError(f"中断的回复轮次 {turn_id}，保留回执，禁止重新生成并重复执行")
+                if previous["status"] == "started" and not self.store.turn_writes(turn_id):
+                    # 上一次进程在生成回复前中断，没有发出任何写操作，重新生成是安全的。
+                    log.warning("中断的回复轮次 %s 尚未产生写操作，重新生成", turn_id)
+                    self.store.drop_turn(turn_id)
+                else:
+                    # Re-running a model after a crash can repeat remote Skill/MCP writes.
+                    raise RuntimeError(f"中断的回复轮次 {turn_id}，保留回执，禁止重新生成并重复执行")
             self.import_history(identity)
             history = self.store.context(identity, include_ids=True)
             request = "\n".join(readable(event.get("message", event.get("raw_message", ""))) for event in relevant)
@@ -240,11 +256,15 @@ class QQThinking:
                     self.store.renew(ids, worker)
             lease_thread = threading.Thread(target=renew, daemon=True)
             lease_thread.start()
+            started = time.monotonic()
             try:
                 self.process(rows, model)
                 self.store.finish(ids, worker)
+                elapsed = time.monotonic() - started
+                if elapsed >= 10:
+                    log.info("QQ turn 完成 · %.1fs", elapsed)
             except Exception as exc:
-                log.warning("QQ turn failed · %s", exc)
+                log.warning("QQ turn failed · %s（%.1fs）", exc, time.monotonic() - started)
                 self.store.finish(ids, worker, str(exc))
             finally:
                 finished.set()

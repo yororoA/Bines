@@ -125,7 +125,7 @@ class MemoryStore:
                 db.execute("UPDATE messages SET recalled=1,content='[消息已撤回]',raw=NULL,memory_synced=0 WHERE external_id=?", (external,))
         return True
 
-    def claim(self, worker, debounce=1.5, max_wait=5, limit=12, lease=600):
+    def claim(self, worker, debounce=1.5, max_wait=5, limit=12, lease=120):
         """Atomically claim one sender's batch; no two workers own the same conversation."""
         now = time.time()
         with self.connection() as db:
@@ -155,7 +155,7 @@ class MemoryStore:
                            (worker, now+lease, batch, event["id"]))
             return [{**dict(row), "batch": batch} for row in rows]
 
-    def renew(self, ids, worker, lease=600):
+    def renew(self, ids, worker, lease=120):
         with self.connection() as db:
             for event_id in ids:
                 db.execute("UPDATE events SET lease=? WHERE id=? AND worker=? AND status='working'",
@@ -267,3 +267,15 @@ class MemoryStore:
         with self.connection() as db:
             db.execute("UPDATE turns SET status=?,payload=? WHERE id=?",
                        (status, json.dumps(payload, ensure_ascii=False) if payload else None, turn_id))
+
+    def drop_turn(self, turn_id):
+        """Forget an interrupted turn that never dispatched a write."""
+        with self.connection() as db:
+            db.execute("DELETE FROM turns WHERE id=? AND status='started'", (turn_id,))
+
+    def turn_writes(self, turn_id):
+        """Count write operations already dispatched under this turn prefix."""
+        with self.connection() as db:
+            row = db.execute("SELECT COUNT(*) FROM operations WHERE substr(id,1,?)=?",
+                             (len(turn_id)+1, turn_id+":")).fetchone()
+        return int(row[0])

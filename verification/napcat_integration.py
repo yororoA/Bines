@@ -378,6 +378,39 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
         self.assertEqual(sum(action == "send_private_msg" for action, _ in self.api.calls), 1)
         self.assertIn("persisted reply", str(self.store.context(self.store.identity(ev))))
 
+    def test_interrupted_started_turn_without_writes_reruns_model(self):
+        ev = event("2")
+        self.insert(ev)
+        rows = self.store.claim("worker", 0, 0)
+        turn = rows[0]["batch"]
+        # A process died after starting the turn but before any Skill write.
+        self.store.begin_turn(turn)
+        class Model:
+            called = False
+            def run_skill_protocol(inner, conversation, runner, **kwargs):
+                inner.called = True
+                return "重试后的回复", [], []
+        model = Model()
+        QQThinking(self.store, self.client).process(rows, model)
+        self.assertTrue(model.called)
+        self.assertIn("重试后的回复", str(self.store.context(self.store.identity(ev))))
+
+    def test_interrupted_turn_with_write_receipt_does_not_rerun_model(self):
+        ev = event("2")
+        self.insert(ev)
+        rows = self.store.claim("worker", 0, 0)
+        turn = rows[0]["batch"]
+        params = {"user_id": "2", "message": [{"type": "text", "data": {"text": "半条回复"}}]}
+        self.store.begin_turn(turn)
+        self.store.begin_operation(f"{turn}:reply:0", "send_private_msg", params)
+        class Model:
+            def run_skill_protocol(*args, **kwargs):
+                raise AssertionError("已有写回执时不应重新调用模型")
+        bot = QQThinking(self.store, self.client)
+        with self.assertRaises(RuntimeError):
+            bot.process(rows, Model())
+        self.assertEqual(self.store.turn_writes(turn), 1)
+
     def test_actual_light_launcher(self):
         env = dict(os.environ)
         # Keep the real installation's .env (including explicit empty secrets)

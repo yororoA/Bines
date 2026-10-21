@@ -58,6 +58,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if not identity.privileged:
                     raise PermissionError("回执查询只允许本机或主人私聊")
                 result = service.store.operation(data["operation_id"])
+            elif self.path == "/operation_state":
+                # Internal endpoint for local Thinking processes: it only reads the
+                # receipt table so a lost HTTP request can be retried without guessing.
+                result = service.store.operation(data["operation_id"])
             elif self.path == "/events":
                 with service.store.connection() as db:
                     rows = db.execute(

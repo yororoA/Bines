@@ -59,6 +59,13 @@ class GatewayClient:
     def discover(self, query="", action=None):
         return self.request("/discover", {"query": query, "action": action})
 
+    def operation_state(self, operation_id):
+        """Read a write receipt; ``not_found`` means the gateway never started it."""
+        try:
+            return self.request("/operation_state", {"operation_id": operation_id}, timeout=10)
+        except RuntimeError:
+            return {}
+
     def send_private_msg(self, user_id, message):
         return self.raw_api("send_private_msg", {"user_id": user_id, "message": message})
 
