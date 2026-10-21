@@ -2,6 +2,8 @@ __pycache__
 .idea
 envs
 .venv/
+.tools/
+singing/singing_venv/
 voiceprints
 /model
 ffmpeg-N-122425-g21a3e44fbe-win64-gpl-shared

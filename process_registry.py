@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 from config import GPT_SOVITS_DIR, HTTP_PORTS, ROOT_DIR, TTS_HTTP_BASE_URL, ZMQ_PORTS
+from runtime_environments import SERVICE_ENVIRONMENTS, service_python
 
 THINKING_STARTUP_DEPENDENCIES = frozenset({
     "Display",
@@ -167,13 +168,6 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
             row["ready_url"] = f"http://127.0.0.1:{HTTP_PORTS['RAG_MEMORY']}/"
         if name == "GPT-SoVITS":
             row["ready_url"] = TTS_HTTP_BASE_URL.rstrip("/") + "/openapi.json"
-        interpreter = row["interpreter"]
-        if name == "QQ Thinking":
-            interpreter = os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe")
-            row["interpreter"] = interpreter
-        if not os.path.isfile(interpreter):
-            unix = str(interpreter).replace(os.path.join("Scripts", "python.exe"), os.path.join("bin", "python"))
-            shared = os.path.join(root, ".venv", "Scripts" if os.name == "nt" else "bin",
-                                  "python.exe" if os.name == "nt" else "python")
-            row["interpreter"] = unix if os.path.isfile(unix) else shared if os.path.isfile(shared) else sys.executable
+        if name in SERVICE_ENVIRONMENTS:
+            row["interpreter"] = service_python(name, ROOT_DIR)
     return rows

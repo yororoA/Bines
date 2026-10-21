@@ -13,15 +13,14 @@ echo.
 
 cd /d %~dp0
 
-REM Web 管理界面依赖 Flask / flask-cors / pyzmq，这些只装在 thinking_venv 中，
-REM 因此必须用 thinking_venv 的解释器启动，不能用系统裸 python。
+REM install.py 将管理器与 QQ 安装到 .venv；兼容旧 thinking_venv。
 set "PYTHON=%~dp0.venv\Scripts\python.exe"
 if not exist "%PYTHON%" set "PYTHON=%~dp0thingking\thinking_venv\Scripts\python.exe"
 
 if not exist "%PYTHON%" (
-    echo [错误] 未找到 thinking_venv 解释器:
+    echo [错误] 未找到 Bines 运行环境:
     echo   %PYTHON%
-    echo 请检查 thinking_venv 是否完整。
+    echo 请先双击 install.bat 或执行 python install.py。
     pause
     exit /b 1
 )

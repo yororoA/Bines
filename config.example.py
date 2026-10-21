@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 from common.env import load_env
+from runtime_environments import environment_python
 
 ROOT_DIR = Path(__file__).resolve().parent
 load_env()
@@ -84,7 +85,10 @@ GPT_SOVITS_DIR = os.environ.get("GPT_SOVITS_DIR", "")
 
 # Singing: separate vocals -> so-vits-svc -> remix, cached per song (see singing/README.md).
 SOVITS_SVC_DIR = os.environ.get("SOVITS_SVC_DIR", "")
-SINGING_PYTHON = os.environ.get("SINGING_PYTHON", "")
+_INSTALLED_SINGING_PYTHON = environment_python("singing", ROOT_DIR)
+SINGING_PYTHON = os.environ.get("SINGING_PYTHON") or (
+    str(_INSTALLED_SINGING_PYTHON) if _INSTALLED_SINGING_PYTHON.is_file() else ""
+)
 SINGING_WORK_DIR = Path(os.environ.get("SINGING_WORK_DIR", str(ROOT_DIR / "singing" / "work")))
 SINGING_LIBRARY_DIR = Path(os.environ.get("SINGING_LIBRARY_DIR", str(ROOT_DIR / "static" / "music" / "library")))
 SINGING_SVC_MODEL = os.environ.get("SINGING_SVC_MODEL", "logs/44k/G_36000.pth")

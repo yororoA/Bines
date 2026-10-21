@@ -4,6 +4,10 @@ import os
 import sys
 import time
 
+if __name__ == "__main__":
+    from runtime_environments import enter_launcher
+    enter_launcher()
+
 from config import HTTP_HOST, HTTP_PORTS
 from process_registry import get_processes
 from service_supervisor import ServiceSupervisor

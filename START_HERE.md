@@ -2,6 +2,12 @@
 
 当前运行链路使用根目录的 Python 代码。
 
+## 一键安装
+
+首次运行 `python install.py` 安装全部 6 组环境；只使用 QQ 可运行 `python install.py --profile chatbot`。Windows 可双击 `install.bat`，macOS 可双击 `install.command`。
+
+安装器自动寻找或下载兼容 Python、创建/复用虚拟环境、安装并检查依赖，保留原 `.env` 和记忆。系统音视频库可加 `--system` 通过已有包管理器安装。部分失败可用 `--only visual hearing` 单独重试；完整说明见 [依赖安装](docs/INSTALL.md)。
+
 ## 一个启动入口
 
 配置好根目录 `.env` 并安装相应 Python 依赖后，日常只需要：
@@ -23,7 +29,7 @@ python bines.py
 NapCat 由 Docker 隔离运行。首次启动：
 
 ```bash
-python -m pip install -r requirements-chatbot.txt
+python install.py --profile chatbot
 ```
 
 设置 `.env` 中的 `DEEPSEEK_API_KEY` 和 `BINES_OWNER_QQ_IDS=主人QQ号`，再启动：
@@ -104,14 +110,16 @@ python bines.py --console
 
 ## Python 环境
 
-管理器通过 `thingking/thinking_venv` 启动。各服务沿用自己的依赖环境：
+安装器与启动器共用 `runtime_environments.py` 中的环境路径；`python bines.py` 自动进入 `.venv`：
 
-- `server/server_venv`：ZMQ Bus、Classification、Display、Speaking、ChatBot
+- `.venv`：管理器、ChatBot、QQ Thinking（纯 QQ 安装只创建这一组）
+- `server/server_venv`：ZMQ Bus、Classification、Display、Speaking
 - `visual/envs/runtime_venv`：Visual
 - `hearing/envs/runtime_venv`：Hearing
-- `thingking/thinking_venv`：RAG Server、按需 RAG Web、Bored Detector、桌面 Thinking、QQ Thinking
+- `thingking/thinking_venv`：RAG Server、按需 RAG Web、Bored Detector、桌面 Thinking、实时屏幕
+- `singing/singing_venv`：唱歌分离与混音；so-vits-svc 换声仍使用整合包环境
 
-启动器不会创建虚拟环境或安装依赖。若模块日志显示解释器不存在或依赖导入失败，先检查对应环境和该模块的 requirements 文件。
+启动器不在运行时安装依赖；安装和验证统一使用 `python install.py` / `python install.py --check`。兼容环境会复用，不兼容的已有目录会明确报错，安装器不会自动删除。
 
 ## 端口与通信
 
