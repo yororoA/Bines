@@ -6,7 +6,7 @@
 
 首次运行 `python install.py` 安装全部 6 组环境；只使用 QQ 可运行 `python install.py --profile chatbot`。Windows 可双击 `install.bat`，macOS 可双击 `install.command`。
 
-安装器自动寻找或下载兼容 Python、创建/复用虚拟环境、安装并检查依赖，保留原 `.env` 和记忆。系统音视频库可加 `--system` 通过已有包管理器安装。部分失败可用 `--only visual hearing` 单独重试；完整说明见 [依赖安装](docs/INSTALL.md)。
+安装器自动寻找或下载兼容 Python、创建/复用虚拟环境、安装并检查依赖，保留原 `.env` 和记忆。macOS/Windows 缺少 Docker Desktop 时会自动下载安装并触发一次系统授权，首次协议仍由用户在 Docker 窗口确认；使用外部 NapCat 时可加 `--skip-docker`。系统音视频库可加 `--system` 通过已有包管理器安装。部分失败可用 `--only visual hearing` 单独重试；完整说明见 [依赖安装](docs/INSTALL.md)。
 
 ## 一个启动入口
 

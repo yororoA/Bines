@@ -6,11 +6,96 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import sys
+import time
 from common.env import load_env, read_env
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
 DEPLOY = ROOT / "deploy" / "napcat"
+
+
+def docker_executable():
+    """Find Docker Desktop's CLI even before a newly opened shell refreshes PATH."""
+    found = shutil.which("docker")
+    if found:
+        return found
+    candidates = []
+    if sys.platform == "darwin":
+        candidates = [
+            Path.home() / ".docker" / "bin" / "docker",
+            Path("/Applications/Docker.app/Contents/Resources/bin/docker"),
+            Path.home() / "Applications" / "Docker.app" / "Contents" / "Resources" / "bin" / "docker",
+        ]
+    elif os.name == "nt":
+        candidates = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Docker" / "Docker" / "resources" / "bin" / "docker.exe",
+            Path(os.environ.get("LOCALAPPDATA", ""))
+            / "Docker" / "resources" / "bin" / "docker.exe",
+        ]
+    return str(next((path for path in candidates if path.is_file()), "")) or None
+
+
+def docker_desktop_app():
+    if sys.platform == "darwin":
+        candidates = [
+            Path("/Applications/Docker.app"),
+            Path.home() / "Applications" / "Docker.app",
+        ]
+    elif os.name == "nt":
+        candidates = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Docker" / "Docker" / "Docker Desktop.exe",
+            Path(os.environ.get("LOCALAPPDATA", ""))
+            / "Docker" / "Docker Desktop.exe",
+        ]
+    else:
+        candidates = []
+    return next((path for path in candidates if path.exists()), None)
+
+
+def start_docker_desktop():
+    app = docker_desktop_app()
+    if not app:
+        return False
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(app)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.Popen(
+            [str(app)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+    return True
+
+
+def ensure_docker_ready(timeout=180, cancel=None):
+    docker = docker_executable()
+    if not docker:
+        raise RuntimeError("未找到 Docker；请重新运行依赖安装器，或配置 BINES_NAPCAT_DEPLOY=external")
+
+    def ready():
+        try:
+            result = subprocess.run(
+                [docker, "info", "--format", "{{.ServerVersion}}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    if ready():
+        return docker
+    if not start_docker_desktop():
+        raise RuntimeError("Docker 引擎未运行，且无法找到 Docker Desktop")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("等待 Docker 启动已取消")
+        if ready():
+            return docker
+        time.sleep(2)
+    raise RuntimeError("Docker Desktop 尚未就绪；请在其窗口接受协议并完成首次初始化")
 
 
 def write_secret(path, value):
@@ -101,9 +186,12 @@ def main():
         webbrowser.open("http://127.0.0.1:6099")
         print("WebUI token 存于 deploy/napcat/.env 的 NAPCAT_WEBUI_TOKEN；首次需扫码。")
         return
-    if not shutil.which("docker"):
+    docker = docker_executable()
+    if not docker:
         raise SystemExit("未找到 Docker。请安装并启动 Docker Desktop 后再执行 python napcat.py up。")
-    command = ["docker", "compose", "--project-directory", str(DEPLOY), "-f", str(DEPLOY / "compose.yaml")]
+    if args.action in {"up", "update"}:
+        docker = ensure_docker_ready()
+    command = [docker, "compose", "--project-directory", str(DEPLOY), "-f", str(DEPLOY / "compose.yaml")]
     operations = {"up": ["up", "-d"], "down": ["down"], "logs": ["logs", "--tail", "100", "-f"],
                   "status": ["ps"], "config": ["config", "--quiet"], "update": ["pull"]}
     subprocess.run(command+operations[args.action], check=True)

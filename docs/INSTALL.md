@@ -36,6 +36,9 @@ python install.py --python-download-timeout 300
 # 可选：通过已有系统包管理器安装音视频依赖
 python install.py --system
 
+# 不安装 Docker Desktop（使用外部 NapCat 或稍后自行安装）
+python install.py --skip-docker
+
 # 查看安装计划 / 只验证当前环境
 python install.py --dry-run
 python install.py --check
@@ -58,6 +61,8 @@ python install.py --profile chatbot --check
 ## 系统依赖
 
 完整环境需要 Python wheel 之外的系统库。默认只安装 Python 依赖，系统缺失项会单独列出；`--system` 会使用已安装的 Homebrew、apt 或 winget，安装器不自动安装这些包管理器。
+
+Docker Desktop 单独处理：macOS 和 Windows 缺少 Docker 时默认自动安装。macOS 从 Docker 官方地址下载约 600 MB 的对应架构 DMG，校验应用签名后弹出一次系统管理员授权，安装器不会代替用户接受 Docker 协议；Docker Desktop 随后自动打开，首次需在其窗口阅读并接受协议。Windows 通过 winget 安装。自动安装失败不会中断 Python 依赖，可重新运行续传，或使用 `--skip-docker`。Linux 不自动修改系统软件仓库。
 
 - macOS：先安装 Xcode Command Line Tools（`xcode-select --install`），并通过 Homebrew 准备 `ffmpeg portaudio pkg-config tesseract tesseract-lang cmake libsamplerate`。也可使用 `--system` 安装这些 Homebrew 包。
 - Debian/Ubuntu：准备 `build-essential pkg-config cmake portaudio19-dev libsamplerate0-dev libsndfile1 ffmpeg tesseract-ocr tesseract-ocr-chi-sim libgl1 libxcb-cursor0`。`--system` 在交互终端使用 sudo，仅系统包安装提权，Python 环境仍由当前用户创建。
@@ -82,7 +87,7 @@ Apple Silicon、Windows/Linux x86_64 是完整安装的主要目标；Intel macO
 
 安装 Python 依赖不等于模型和外部应用就绪：
 
-- NapCat 由启动器自动下载 Docker 镜像；Docker Desktop/Engine 和首次 QQ 扫码仍需准备。
+- NapCat 由启动器自动下载 Docker 镜像；Docker Desktop 缺失时由依赖安装器自动安装，启动 Bines 时也会自动打开并等待 Docker 引擎。首次 Docker 协议确认和首次 QQ 扫码仍需用户完成。
 - GPT-SoVITS、so-vits-svc 整合包及个人音色权重使用自己的运行环境，不往其中批量覆盖依赖；路径分别设置在 `GPT_SOVITS_DIR`、`SOVITS_SVC_DIR`。
 - ASR/人脸/记忆嵌入模型沿用模块的首次运行下载流程；唱歌分离模型首次使用时下载，个人换声音色模型不能自动生成。
 - 桌面角色图片、TTS 参考音频、操作系统摄像头/麦克风/录屏权限需要按实际环境配置。

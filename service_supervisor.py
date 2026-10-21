@@ -165,17 +165,11 @@ class ServiceSupervisor:
         if self._docker_prepared:
             return
         import napcat
-        import shutil
-        if not shutil.which("docker"):
-            raise RuntimeError("未找到 Docker；安装并启动 Docker Desktop，或配置 BINES_NAPCAT_DEPLOY=external")
         self._napcat_message = "正在启动 Docker NapCat"
         self.emit("NapCat", "starting", self._napcat_message)
-        command = ["docker", "compose", "--project-directory", str(napcat.DEPLOY),
+        docker = napcat.ensure_docker_ready(timeout=180, cancel=self.cancel)
+        command = [docker, "compose", "--project-directory", str(napcat.DEPLOY),
                    "-f", str(napcat.DEPLOY / "compose.yaml")]
-        daemon = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
-                                capture_output=True, text=True, timeout=10)
-        if daemon.returncode:
-            raise RuntimeError("Docker daemon 未就绪，请启动 Docker Desktop")
         if self.cancel.is_set():
             raise RuntimeError("启动已取消")
         napcat.initialize(settings_path=env_path())
@@ -295,9 +289,12 @@ class ServiceSupervisor:
                        if key in selected and key in self.records]
             if name is None and self._docker_owned:
                 import napcat
-                command = ["docker", "compose", "--project-directory", str(napcat.DEPLOY),
-                           "-f", str(napcat.DEPLOY / "compose.yaml"), "stop", "napcat"]
+                docker = napcat.docker_executable()
                 try:
+                    if not docker:
+                        raise OSError("Docker CLI unavailable")
+                    command = [docker, "compose", "--project-directory", str(napcat.DEPLOY),
+                               "-f", str(napcat.DEPLOY / "compose.yaml"), "stop", "napcat"]
                     outcome = subprocess.run(command, capture_output=True, timeout=30)
                     if outcome.returncode:
                         results.append({"name": "NapCat", "success": False, "message": "容器停止失败，请检查 Docker"})

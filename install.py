@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import ctypes.util
+import getpass
 import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import shutil
 import signal
 import subprocess
@@ -22,6 +24,12 @@ DEFAULT_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 DEFAULT_PYTHON_MIRROR = (
     "https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone"
 )
+DOCKER_DESKTOP_MAC_URLS = {
+    "arm64": "https://desktop.docker.com/mac/main/arm64/Docker.dmg",
+    "aarch64": "https://desktop.docker.com/mac/main/arm64/Docker.dmg",
+    "x86_64": "https://desktop.docker.com/mac/main/amd64/Docker.dmg",
+    "amd64": "https://desktop.docker.com/mac/main/amd64/Docker.dmg",
+}
 PROFILES = {"chatbot": ("launcher",), "full": tuple(ENVIRONMENTS)}
 IMPORTS = {
     "launcher": ("flask", "flask_cors", "zmq", "requests", "websocket", "openai", "yaml", "mcp"),
@@ -120,6 +128,7 @@ class Installer:
         self.selected = selected_environments(options.profile, options.only)
         self.log_dir = Path(tempfile.mkdtemp(prefix="bines-install-")) if not options.dry_run else None
         self.results = {}
+        self.docker_install_error = None
         self.command_number = 0
         self.env = clean_environment()
         self.env["UV_PYTHON_INSTALL_DIR"] = str(self.root / ".tools" / "python")
@@ -293,6 +302,109 @@ class Installer:
         else:
             raise InstallError("当前平台没有可用的系统包管理器；请按 docs/INSTALL.md 准备系统依赖")
 
+    def install_docker_desktop(self):
+        """Install Docker Desktop from Docker's public installer without accepting its license."""
+        import napcat
+
+        docker = napcat.docker_executable()
+        if docker:
+            print(f"  复用 Docker：{docker}", flush=True)
+            return
+        if sys.platform == "darwin":
+            machine = platform.machine().lower()
+            url = DOCKER_DESKTOP_MAC_URLS.get(machine)
+            if not url:
+                raise InstallError(f"Docker Desktop 不支持当前 Mac 架构：{machine}")
+            download_dir = self.root / ".tools" / "downloads"
+            download_dir.mkdir(parents=True, exist_ok=True)
+            dmg = download_dir / "Docker.dmg"
+            partial = download_dir / "Docker.dmg.part"
+            if not dmg.is_file():
+                curl = shutil.which("curl") or "/usr/bin/curl"
+                self.run(
+                    [curl, "--fail", "--location", "--retry", "2", "--connect-timeout", "15",
+                     "--continue-at", "-", "--output", partial, url],
+                    "下载 Docker Desktop（约 600 MB）",
+                    timeout=self.options.docker_download_timeout,
+                )
+                partial.replace(dmg)
+            else:
+                print("  复用已下载的 Docker Desktop 安装包", flush=True)
+
+            mount = self.log_dir / "docker-volume"
+            mount.mkdir()
+            try:
+                self.run(
+                    ["/usr/bin/hdiutil", "attach", dmg, "-nobrowse", "-readonly",
+                     "-mountpoint", mount],
+                    "挂载 Docker Desktop 安装包",
+                    timeout=120,
+                )
+            except Exception:
+                dmg.unlink(missing_ok=True)
+                raise
+            app = mount / "Docker.app"
+            installer = app / "Contents" / "MacOS" / "install"
+            try:
+                if not installer.is_file():
+                    raise InstallError("Docker Desktop 安装包中缺少官方安装程序")
+                try:
+                    self.run(
+                        ["/usr/sbin/spctl", "--assess", "--type", "execute",
+                         "--verbose=2", app],
+                        "验证 Docker Desktop 签名",
+                        timeout=120,
+                    )
+                except Exception:
+                    dmg.unlink(missing_ok=True)
+                    raise
+                elevated = shlex.join([str(installer), f"--user={getpass.getuser()}"])
+                script = f"do shell script {json.dumps(elevated)} with administrator privileges"
+                print("  macOS 将请求一次管理员授权；Docker 协议仍由你在首次启动窗口确认。",
+                      flush=True)
+                self.run(
+                    ["/usr/bin/osascript", "-e", script],
+                    "安装 Docker Desktop",
+                    timeout=900,
+                )
+            finally:
+                subprocess.run(
+                    ["/usr/bin/hdiutil", "detach", mount, "-force"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+                )
+            if not napcat.docker_executable():
+                raise InstallError("Docker Desktop 安装结束，但未找到 Docker CLI")
+            dmg.unlink(missing_ok=True)
+            napcat.start_docker_desktop()
+            print("  Docker Desktop 已打开；首次使用请在其窗口接受协议并完成初始化。",
+                  flush=True)
+            return
+
+        if os.name == "nt":
+            winget = shutil.which("winget")
+            if not winget:
+                raise InstallError("Windows 自动安装 Docker Desktop 需要 winget")
+            self.run(
+                [winget, "install", "--id", "Docker.DockerDesktop", "--exact", "--silent",
+                 "--accept-source-agreements", "--accept-package-agreements"],
+                "安装 Docker Desktop",
+                timeout=self.options.docker_download_timeout,
+            )
+            napcat.start_docker_desktop()
+            return
+        raise InstallError("Linux 暂不自动修改系统 Docker 仓库；请安装 Docker Engine 或使用外部 NapCat")
+
+    def prepare_docker(self):
+        if self.options.skip_docker:
+            return
+        try:
+            self.install_docker_desktop()
+        except (InstallError, OSError, subprocess.SubprocessError) as exc:
+            self.docker_install_error = str(exc)
+            print(f"  Docker 自动安装未完成：{exc}", flush=True)
+            print("  Python 依赖将继续安装；之后可重新运行，或使用 --skip-docker 跳过。",
+                  flush=True)
+
     def native_build_env(self):
         env = dict(self.env)
         if sys.platform == "darwin":
@@ -430,8 +542,21 @@ class Installer:
 
     def external_status(self):
         notices = []
-        if not shutil.which("docker"):
-            notices.append("Docker 未安装：QQ 容器需要 Docker Desktop/Engine，或外部 NapCat")
+        import napcat
+        docker = napcat.docker_executable()
+        if not docker:
+            detail = f"（{self.docker_install_error}）" if self.docker_install_error else ""
+            notices.append("Docker 未安装：QQ 容器需要 Docker Desktop/Engine，或外部 NapCat" + detail)
+        else:
+            try:
+                ready = subprocess.run(
+                    [docker, "info", "--format", "{{.ServerVersion}}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+                ).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                ready = False
+            if not ready and napcat.docker_desktop_app():
+                notices.append("Docker Desktop 已安装并已打开；首次请在其窗口接受协议并完成初始化")
         if "server" in self.selected and not shutil.which("ffplay"):
             notices.append("ffplay 未在 PATH：桌面声音播放需要系统 FFmpeg（必须含 ffplay）")
         if "thinking" in self.selected:
@@ -456,10 +581,13 @@ class Installer:
         if self.options.dry_run:
             for name in self.selected:
                 print(f"  {name:10} → {ENVIRONMENTS[name]} · requirements/{name}.txt")
+            if not self.options.skip_docker:
+                print("  docker     → 缺失时自动安装 Docker Desktop（首次需确认协议）")
             print("仅预览；未下载或修改文件。Python 使用 64 位 3.11/3.12。")
             return 0
         print(f"详细日志：{self.log_dir}", flush=True)
         if not self.options.check:
+            self.prepare_docker()
             self.system_packages()
             self.python = self.choose_python()
             print(f"使用 Python：{self.python}", flush=True)
@@ -509,6 +637,9 @@ def main(argv=None):
                         help="Python 下载最长等待秒数，默认 180；连接和读超时另有短限制")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="默认跨平台 CPU；cuda 需要 NVIDIA CUDA 12.8 兼容驱动")
     parser.add_argument("--system", action="store_true", help="额外通过已有 brew/apt/winget 安装系统音视频依赖")
+    parser.add_argument("--skip-docker", action="store_true", help="不自动安装 Docker Desktop")
+    parser.add_argument("--docker-download-timeout", type=int, default=1800,
+                        help="Docker Desktop 下载最长等待秒数，默认 1800")
     parser.add_argument(
         "--index-url",
         default=os.environ.get("BINES_PYPI_INDEX_URL", DEFAULT_INDEX_URL),
@@ -525,6 +656,8 @@ def main(argv=None):
         parser.error("--python-mirror 必须为 HTTP(S) URL")
     if options.python_download_timeout <= 0:
         parser.error("--python-download-timeout 必须大于 0")
+    if options.docker_download_timeout <= 0:
+        parser.error("--docker-download-timeout 必须大于 0")
     try:
         installer = Installer(options)
         if options.dry_run or options.check:
