@@ -80,6 +80,24 @@ def output_rules(persona: Dict[str, Any] | None = None) -> str:
     return "--- 回复格式（必须遵守） ---\n" + _numbered(p["output_format"])
 
 
+def style_guard(persona: Dict[str, Any] | None = None) -> str:
+    """High-priority voice reminder placed immediately before the current turn."""
+    p = persona or load_persona()
+    guard = p["voice_guard"]
+    examples = "\n".join(
+        f"- 用户：{row['user']}\n  碧波：{row['assistant']}"
+        for row in guard["examples"]
+    )
+    return "\n".join([
+        "--- 本轮角色口吻（高优先级） ---",
+        _bullets(guard["directives"]),
+        "以下示例只约束语气，不要照抄内容：",
+        examples,
+        output_rules(p),
+        "直接以碧波的口吻回答，不要输出开场白、推理过程或 Markdown。",
+    ])
+
+
 def brief(persona: Dict[str, Any] | None = None) -> str:
     """Short personality summary for side tasks (e.g. proactive-chat judgement)."""
     p = persona or load_persona()
@@ -112,7 +130,7 @@ def render_markdown(persona: Dict[str, Any] | None = None) -> str:
         "```text",
         character_prompt(p),
         "",
-        output_rules(p),
+        style_guard(p),
         "```",
         "",
         "## 主动发言心情（按关系等级）",

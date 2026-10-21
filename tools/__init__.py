@@ -38,7 +38,9 @@ _MODULES = {
         "send_qq_private_msg", "send_qq_group_msg", "get_qq_group_list", "get_qq_friend_list",
         "broadcast_to_all_friends", "broadcast_to_all_groups", "at_each_group_member")},
     "napcat_tool": {name: name for name in (
-        "napcat_call", "napcat_discover", "napcat_catalog", "napcat_operation", "napcat_events", "napcat_send", "napcat_forward")},
+        "napcat_call", "napcat_discover", "napcat_catalog", "napcat_operation",
+        "napcat_events", "napcat_send", "napcat_forward",
+        "napcat_custom_faces", "napcat_send_custom_face")},
     "moments_tool": {
         "get_moments": "get_moments_simple", **{name: name for name in (
             "add_moment", "comment_moment", "get_comments", "like_moment", "like_comment", "analyze_moment_images")}},

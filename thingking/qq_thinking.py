@@ -157,6 +157,7 @@ class QQThinking:
             conversation = prompt_builder.build_conversation_messages(memory_context)
             conversation.extend([
                 {"role": "system", "content": prompt},
+                {"role": "system", "content": persona_profile.style_guard()},
                 {"role": "user", "content": f"请回复 QQ:{identity.user} 本轮消息：\n{request}"},
             ])
             text, _, _ = model.run_skill_protocol(conversation, self.runner, source="QQ")

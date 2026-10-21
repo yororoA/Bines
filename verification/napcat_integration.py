@@ -35,10 +35,23 @@ class FakeAPI:
         self.calls = []
         self.history = []
         self.send_status = "ok"
+        self.custom_faces = [
+            {
+                "url": f"https://p.qpic.cn/qq_expression/test/{index}",
+                "md5": f"FACE{index}", "desc": f"收藏表情{index}",
+            }
+            for index in range(3)
+        ]
     def raw_api(self, action, params, timeout=30, **kwargs):
         self.calls.append((action, params))
         if action.endswith("msg_history"):
             return {"status": "ok", "retcode": 0, "data": {"messages": self.history}}
+        if action == "fetch_custom_face":
+            return {"status": "ok", "retcode": 0,
+                    "data": [row["url"] for row in self.custom_faces[:int(params.get("count", 20))]]}
+        if action == "fetch_custom_face_detail":
+            return {"status": "ok", "retcode": 0,
+                    "data": self.custom_faces[:int(params.get("count", 20))]}
         return {"status": self.send_status, "retcode": 0,
                 "data": {"message_id": 1000+len(self.calls)}}
 
@@ -449,6 +462,46 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
                 for message in (sticker, [market_face], [sticker, {"type": "text", "data": {"text": "好耶"}}]):
                     self.assertEqual(self.client.raw_api(action, {**target, "message": message})["status"], "ok")
                     self.assertEqual(self.api.calls[-1][1]["message"], message if isinstance(message, list) else [message])
+
+    def test_owner_group_can_list_and_send_account_custom_face(self):
+        from unittest.mock import patch
+        from tools.napcat_tool import napcat_custom_faces, napcat_send_custom_face
+        ev = event("1", group="10", msg_id=31)
+        event_id = self.insert(ev)
+        identity = self.store.identity(ev)
+        self.assertTrue(identity.owner)
+        with tool_context(ToolContext(identity, event_id, "custom-face")):
+            with patch("tools.napcat_tool.GatewayClient", return_value=self.client):
+                rows = napcat_custom_faces(3)
+                result = napcat_send_custom_face(1)
+        self.assertEqual([row["index"] for row in rows], [0, 1, 2])
+        self.assertEqual(result["status"], "ok")
+        action, params = self.api.calls[-1]
+        self.assertEqual(action, "send_group_msg")
+        self.assertEqual(params["message"][0]["data"]["file"], self.api.custom_faces[1]["url"])
+        self.assertEqual(params["message"][0]["data"]["sub_type"], 1)
+
+        stranger = event("2", group="10", msg_id=32)
+        stranger_id = self.insert(stranger)
+        with tool_context(ToolContext(self.store.identity(stranger), stranger_id, "no-custom-face")):
+            with self.assertRaises(PermissionError):
+                napcat_custom_faces()
+
+    def test_stale_observed_image_url_is_not_reused(self):
+        ev = event("2", group="10", msg_id=33, time=self.service.started_at - 60, message=[
+            {"type": "image", "data": {
+                "file": "old-image", "url": "https://qq.example/expired.gif",
+            }},
+        ])
+        self.insert(ev)
+        identity = self.store.identity(ev)
+        with self.assertRaises(PermissionError):
+            self.service.call(identity, "send_group_msg", {
+                "group_id": "10",
+                "message": {"type": "image", "data": {
+                    "file": "https://qq.example/expired.gif", "sub_type": 1,
+                }},
+            }, "stale-image")
 
     def test_forward_selection_order_and_current_scope(self):
         from unittest.mock import patch

@@ -58,18 +58,27 @@ def scene_for(envelope: Dict[str, Any]) -> str:
 def _scene_policy(envelope: Dict[str, Any], scene: str) -> str:
     owner_title = persona_profile.load_persona()["identity"]["owner_title"]
     name = envelope.get("actor_name") or "对方"
+    is_owner = bool(envelope.get("owner_identity"))
     if scene == SCENE_LOCAL:
         return f"--- 当前场景 ---\n你正在电脑前和{owner_title}直接聊天（语音或文字）。"
     if scene == SCENE_OWNER_QQ:
         return f"--- 当前场景 ---\n{owner_title}正在通过 QQ 私聊找你。{_QQ_TOOL_POLICY}"
     if scene == SCENE_QQ_PRIVATE:
         return f"--- 当前场景 ---\nQQ 用户「{name}」正在私聊你。{_PRIVACY_POLICY}{_QQ_TOOL_POLICY}"
+    identity_policy = (
+        f"发言者已通过绑定的 QQ 账号确认为{owner_title}本人。"
+        f"必须承认这一身份；当对方问自己是不是{owner_title}、你是否认识对方时，要直接肯定回答。"
+        if is_owner else _PRIVACY_POLICY
+    )
     lines = [
         f"--- 当前场景 ---\n你在 QQ 群 {envelope.get('external_group_id')} 中，「{name}」在群里@了你。"
-        f"群成员不一定认识{owner_title}，{_PRIVACY_POLICY}{_QQ_TOOL_POLICY}"
+        f"群成员不一定认识{owner_title}，{identity_policy}{_QQ_TOOL_POLICY}"
     ]
-    if envelope.get("owner_identity"):
-        lines.append(f"这条群消息来自{owner_title}，请优先响应，但仍然不要在群里谈论私下的事情。")
+    if is_owner:
+        lines.append(
+            f"这条群消息来自{owner_title}。请优先响应并明确承认对方身份，"
+            "但群聊仍是公开场景：不要公开账号号码、私聊内容、私人记忆或仅限私聊的状态。"
+        )
     return "\n".join(lines)
 
 
@@ -171,14 +180,13 @@ def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]
         "--- 行为准则 ---\n" + "\n".join(f"{i}. {rule}" for i, rule in enumerate(_OPERATING_RULES, 1)),
         _state_block(context.get("state") or {}),
         _profile_block(context, scene),
-        persona_profile.output_rules(),
     ]
     messages = [{"role": "system", "content": "\n\n".join(s for s in system_sections if s)}]
     recall = _memory_recall_block(context)
     if recall:
         messages.append({"role": "system", "content": recall})
     messages.extend(_working_messages(context, scene))
-    messages.append({"role": "system", "content": "不要输出任何开场白、推理过程或 Markdown。"})
+    messages.append({"role": "system", "content": persona_profile.style_guard()})
     return messages
 
 

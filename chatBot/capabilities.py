@@ -18,6 +18,18 @@ SCOPED = {
     "send_group_msg", "send_private_msg", "send_msg", "delete_msg", "send_like",
     "send_group_forward_msg", "send_private_forward_msg", "send_forward_msg",
 }
+OWNER_GROUP_READS = {"fetch_custom_face", "fetch_custom_face_detail"}
+IMAGE_URL_TTL_SECONDS = 15 * 60
+CUSTOM_FACE_URL_PREFIX = "https://p.qpic.cn/qq_expression/"
+
+
+def allowed_actions(identity, schemas):
+    if identity.privileged:
+        return set(schemas)
+    allowed = set(schemas) & SCOPED
+    if identity.owner and identity.group:
+        allowed |= set(schemas) & OWNER_GROUP_READS
+    return allowed
 
 
 def is_read(action):
@@ -75,7 +87,7 @@ class SchemaCatalog:
         schemas = self.schemas()
         manifest, _ = bundled_document()
         documented = set(reference_catalog())
-        allowed = set(schemas) if identity.privileged else set(schemas) & SCOPED
+        allowed = allowed_actions(identity, schemas)
         return {
             "documented_version": manifest["version"], "source": manifest["source"],
             "documented_actions": len(documented), "catalog_actions": len(schemas),
@@ -89,7 +101,8 @@ class SchemaCatalog:
 
     def discover(self, identity, query="", action=None):
         schemas = self.schemas()
-        allowed = schemas if identity.privileged else {key: value for key, value in schemas.items() if key in SCOPED}
+        allowed_names = allowed_actions(identity, schemas)
+        allowed = {key: value for key, value in schemas.items() if key in allowed_names}
         if action:
             if action not in allowed:
                 raise PermissionError("当前身份无权发现该动作")
@@ -105,6 +118,7 @@ class CapabilityService:
     def __init__(self, client, store, catalog=None):
         self.client, self.store = client, store
         self.catalog = catalog or SchemaCatalog()
+        self.started_at = time.time()
 
     def _message(self, identity, message_id):
         # Equality matters: LIKE would let a model-supplied "%" bypass the scope lookup.
@@ -144,11 +158,21 @@ class CapabilityService:
             if host_path.is_relative_to(host_root.resolve()) and host_path.is_file():
                 return
             raise ValueError("公开图片文件不存在或超出素材目录")
+        if identity.owner and source.startswith(CUSTOM_FACE_URL_PREFIX):
+            result = self.client.raw_api("fetch_custom_face", {"count": 100}, timeout=30)
+            available = result.get("data") if isinstance(result, dict) and result.get("status") == "ok" else []
+            if source in (available or []):
+                return
+            raise ValueError("该账号收藏表情已失效或不在当前表情列表中")
         # Resend an image actually observed in this conversation. Text containing
         # a path/URL is not an image grant, nor is a file from another QQ conversation.
+        valid_after = max(self.started_at, time.time() - IMAGE_URL_TTL_SECONDS)
         with self.store.connection() as db:
-            rows = db.execute("SELECT raw FROM messages WHERE scope=? AND recalled=0 AND raw IS NOT NULL",
-                              (identity.scope,))
+            rows = db.execute(
+                """SELECT raw FROM messages
+                WHERE scope=? AND recalled=0 AND raw IS NOT NULL AND ts>=?""",
+                (identity.scope, valid_after),
+            )
             for row in rows:
                 event = json.loads(row["raw"])
                 for part in segments(event.get("message", [])):
@@ -182,6 +206,8 @@ class CapabilityService:
 
     def authorize(self, identity, action, params):
         if identity.privileged:
+            return
+        if identity.owner and identity.group and action in OWNER_GROUP_READS:
             return
         if action not in SCOPED:
             raise PermissionError("该 NapCat 动作需要本机或显式绑定主人的私聊授权")

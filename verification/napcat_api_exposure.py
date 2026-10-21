@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 
 from chatBot.catalog import bundled_document, reference_catalog, action_tool_specs, mcp_action_name
-from chatBot.capabilities import SchemaCatalog, CapabilityService, SCOPED
+from chatBot.capabilities import SchemaCatalog, CapabilityService, OWNER_GROUP_READS, SCOPED
 from chatBot.gateway import GatewayServer
 from chatBot.gateway_client import GatewayClient
 from chatBot.messages import LOCAL_IDENTITY, Identity, FORWARD_ACTIONS, SEND_ACTIONS
@@ -98,7 +98,31 @@ class APIExposure(unittest.TestCase):
             self.assertIn("napcat_catalog", self.runner.actions_for_source("QQ"))
             for action in expected:
                 self.assertIn(f"- {action}:", instructions)
-        for identity in (Identity("99", "2"), Identity("99", "1", "10", owner=True)):
+        stranger_group = Identity("99", "2", "10")
+        with tool_context(ToolContext(stranger_group, "trusted-test-event", "remote")):
+            instructions = self.runner.instructions_for_source("QQ")
+            self.assertIn(f"- send_group_msg:", instructions)
+            self.assertNotIn("Action `napcat_send_custom_face`", instructions)
+            self.assertNotIn("- get_credentials:", instructions)
+        discovered = self.catalog.discover(stranger_group)
+        self.assertEqual({row["action"] for row in discovered}, expected & SCOPED)
+
+        owner_group = Identity("99", "1", "10", owner=True)
+        with tool_context(ToolContext(owner_group, "trusted-owner-group", "owner-group")):
+            instructions = self.runner.instructions_for_source("QQ")
+            self.assertIn("napcat_send_custom_face", instructions)
+            self.assertNotIn("- get_credentials:", instructions)
+        discovered = self.catalog.discover(owner_group)
+        self.assertEqual(
+            {row["action"] for row in discovered},
+            expected & (SCOPED | OWNER_GROUP_READS),
+        )
+        self.assertEqual(
+            self.server.service.call(owner_group, "fetch_custom_face", {"count": 20})["status"],
+            "ok",
+        )
+
+        for identity in (Identity("99", "2"),):
             with tool_context(ToolContext(identity, "trusted-test-event", "remote")):
                 instructions = self.runner.instructions_for_source("QQ")
                 self.assertIn(f"- send_group_msg:", instructions)
@@ -108,7 +132,19 @@ class APIExposure(unittest.TestCase):
             self.assertFalse(self.catalog.status(identity)["all_actions_allowed"])
             with self.assertRaises(PermissionError):
                 self.server.service.call(identity, "get_credentials", {})
-        self.assertFalse(self.napcat.calls)
+        self.assertEqual(self.napcat.calls, [("fetch_custom_face", {"count": 20})])
+
+    def test_deepseek_dsml_fallback_is_parsed_as_a_skill_call(self):
+        text = """<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="napcat_discover">
+<｜｜DSML｜｜ parameter name="query" string="true">自定义表情 表情列表 custom face emoji</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>"""
+        self.assertEqual(self.runner.parse_model_command(text), {
+            "skill": "napcat",
+            "action": "napcat_discover",
+            "args": {"query": "自定义表情 表情列表 custom face emoji"},
+        })
 
     def test_runtime_catalog_additions_and_missing_actions_reported(self):
         runtime = {

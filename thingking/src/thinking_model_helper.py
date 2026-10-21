@@ -51,7 +51,7 @@ class ThinkingModelHelper:
         for index in range(max_iterations):
             final_text = self.complete_text(conversation, temperature=temperature, max_tokens=max_tokens)
             try:
-                command = skill_runner.parse_command(final_text)
+                command = skill_runner.parse_model_command(final_text)
             except SkillProtocolError as exc:
                 command = {"skill": "", "action": "", "args": {}}
                 result = f"技能协议错误：{exc}。请按协议重试。"

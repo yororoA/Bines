@@ -1,9 +1,11 @@
 """Local SKILL.md catalog and constrained text-protocol dispatcher."""
 from __future__ import annotations
 
+import html
 import inspect
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, List, Mapping
 
 
@@ -15,7 +17,8 @@ QQ_ALLOWED_ACTIONS = {
     "napcat_call", "napcat_discover", "napcat_catalog", "napcat_send", "napcat_forward",
     "napcat_events", "update_status", "browser_search", "web_fetch",
 }
-QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | {
+QQ_GROUP_OWNER_ACTIONS = {"napcat_custom_faces", "napcat_send_custom_face"}
+QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | QQ_GROUP_OWNER_ACTIONS | {
     "napcat_operation", "mcp_discover", "mcp_call",
     "get_qq_group_list", "get_qq_friend_list", "broadcast_to_all_friends",
     "broadcast_to_all_groups", "at_each_group_member",
@@ -169,10 +172,12 @@ class SkillRunner:
             context = CURRENT_CONTEXT.get()
             if not context.event_id:
                 return set()  # Legacy QQ callers lack a trusted event context.
-            if not context.identity.privileged:
-                enabled &= self.qq_allowed_actions
-            else:
+            if context.identity.privileged:
                 enabled &= QQ_OWNER_ACTIONS
+            elif context.identity.owner:
+                enabled &= self.qq_allowed_actions | QQ_GROUP_OWNER_ACTIONS
+            else:
+                enabled &= self.qq_allowed_actions
         if allowed_skills is not None:
             allowed_actions = {
                 action
@@ -236,6 +241,56 @@ class SkillRunner:
         if not isinstance(command["args"], dict):
             raise SkillProtocolError("args 必须是 JSON 对象")
         return command
+
+    def parse_model_command(self, text: str) -> Dict[str, Any] | None:
+        """Accept the project protocol and DeepSeek's equivalent DSML text fallback."""
+        command = self.parse_command(text)
+        if command is not None:
+            return command
+        normalized = (text or "").strip().replace("｜", "|")
+        wrapper = re.fullmatch(
+            r"<\|\|DSML\|\|\s+calls>\s*(.*?)\s*</\|\|DSML\|\|\s+calls>",
+            normalized,
+            re.DOTALL,
+        )
+        if not wrapper:
+            return None
+        invoke = re.fullmatch(
+            r"<\|\|DSML\|\|\s+invoke\s+name=\"([^\"]+)\">\s*(.*?)\s*"
+            r"</\|\|DSML\|\|\s+invoke>",
+            wrapper.group(1),
+            re.DOTALL,
+        )
+        if not invoke:
+            raise SkillProtocolError("DSML 必须且只能包含一个完整 invoke")
+        action = html.unescape(invoke.group(1))
+        skill = self.action_to_skill.get(action)
+        if not skill:
+            raise SkillProtocolError(f"DSML 使用了未知动作 {action!r}")
+        args: Dict[str, Any] = {}
+        body = invoke.group(2)
+        parameter_pattern = re.compile(
+            r"<\|\|DSML\|\|\s+parameter\s+([^>]*)>(.*?)"
+            r"</\|\|DSML\|\|\s+parameter>",
+            re.DOTALL,
+        )
+        matches = list(parameter_pattern.finditer(body))
+        if re.sub(parameter_pattern, "", body).strip():
+            raise SkillProtocolError("DSML invoke 中包含无法识别的内容")
+        for match in matches:
+            attributes = dict(re.findall(r"([A-Za-z_][\w-]*)=\"([^\"]*)\"", match.group(1)))
+            name = attributes.get("name")
+            if not name or name in args:
+                raise SkillProtocolError("DSML parameter 缺少唯一 name")
+            value = html.unescape(match.group(2).strip())
+            if attributes.get("string", "").lower() == "true":
+                args[name] = value
+            else:
+                try:
+                    args[name] = json.loads(value)
+                except json.JSONDecodeError:
+                    args[name] = value
+        return {"skill": skill, "action": action, "args": args}
 
     def execute(
         self,

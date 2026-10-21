@@ -2,6 +2,27 @@
 from chatBot.gateway_client import GatewayClient
 
 
+def _custom_face_access():
+    from tools.context import CURRENT_CONTEXT
+    identity = CURRENT_CONTEXT.get().identity
+    if not (identity.local or identity.owner):
+        raise PermissionError("账号收藏表情仅允许本机或已绑定的主人使用")
+    return identity
+
+
+def _custom_face_rows(count):
+    count = int(count)
+    if not 1 <= count <= 100:
+        raise ValueError("count 必须在 1 到 100 之间")
+    result = GatewayClient().raw_api("fetch_custom_face_detail", {"count": count})
+    if not isinstance(result, dict) or result.get("status") != "ok":
+        raise RuntimeError("读取账号收藏表情失败")
+    rows = result.get("data") or []
+    if not isinstance(rows, list):
+        raise RuntimeError("NapCat 返回的收藏表情格式无效")
+    return [row for row in rows if isinstance(row, dict) and row.get("url")]
+
+
 def _destination(group_id, user_id):
     from tools.context import CURRENT_CONTEXT
     identity = CURRENT_CONTEXT.get().identity
@@ -40,6 +61,42 @@ def napcat_forward(message_ids: list, group_id: str = "", user_id: str = "",
     nodes = [{"type": "node", "data": {"id": str(message_id)}} for message_id in message_ids]
     return GatewayClient().raw_api("send_"+destination+"_forward_msg", {**params, "messages": nodes},
                                    operation_id=operation_id)
+
+
+def napcat_custom_faces(count: int = 20):
+    """列出机器人 QQ 账号收藏的自定义表情，返回可供发送的索引和描述。"""
+    _custom_face_access()
+    rows = _custom_face_rows(count)
+    return [{
+        "index": index,
+        "description": row.get("desc") or row.get("ocrWord") or "[表情]",
+        "md5": row.get("md5", ""),
+    } for index, row in enumerate(rows)]
+
+
+def napcat_send_custom_face(index: int = 0, group_id: str = "", user_id: str = "",
+                            operation_id: str | None = None):
+    """按索引发送机器人 QQ 账号收藏的自定义表情；默认发送到当前会话。"""
+    _custom_face_access()
+    index = int(index)
+    if not 0 <= index < 100:
+        raise ValueError("index 必须在 0 到 99 之间")
+    rows = _custom_face_rows(max(20, index + 1))
+    if index >= len(rows):
+        raise ValueError(f"表情索引不存在；当前只返回 {len(rows)} 个表情")
+    row = rows[index]
+    message = {
+        "type": "image",
+        "data": {
+            "file": row["url"],
+            "sub_type": 1,
+            "summary": row.get("desc") or row.get("ocrWord") or "[表情]",
+        },
+    }
+    return napcat_send(
+        message, group_id=group_id, user_id=user_id,
+        operation_id=operation_id,
+    )
 
 
 def napcat_discover(query: str = "", action: str | None = None):
