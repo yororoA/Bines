@@ -51,7 +51,7 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("简洁优先", guard)
         self.assertIn("少用标点", guard)
         self.assertIn("超过 15 个字", guard)
-        self.assertIn("拆成多条消息", guard)
+        self.assertIn("不要从词中间截断", guard)
         self.assertNotIn("正常使用逗号、顿号、句号", guard)
         self.assertIn("两个空格", persona_profile.output_rules())
 

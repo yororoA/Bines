@@ -215,6 +215,11 @@ class Integration(unittest.TestCase):
         chunks = split_qq_text(long_text)
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= 15 for chunk in chunks))
+        # Words must not be cut in half: split only at whitespace or punctuation.
+        self.assertEqual(
+            split_qq_text("知道啊 黑白简笔画少女闭眼举双手 头顶写着投降两字"),
+            ["知道啊", "黑白简笔画少女闭眼举双手", "头顶写着投降两字"],
+        )
 
         for group in ("10", None):
             with self.subTest(group=group):

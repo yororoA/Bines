@@ -77,25 +77,39 @@ def readable(message):
 
 
 def split_qq_text(text, limit=15):
-    """Split one long QQ reply into short, semantically ordered messages."""
+    """Split QQ replies at punctuation or spaces near ``limit`` without cutting words."""
     text = (text or "").strip()
     if not text:
         return []
     if len(text) <= limit:
         return [text]
-    units = [part.strip() for part in re.split(r"(?<=[。！？!?…\n])", text) if part.strip()]
-    chunks = []
-    for unit in units:
-        while len(unit) > limit:
-            chunks.append(unit[:limit].strip())
-            unit = unit[limit:].strip()
-        if not unit:
+    # Keep whitespace as a visible boundary so merged pieces do not run together.
+    tokens = []
+    spaced = False
+    for piece in re.split(r"(\s+)", text):
+        if not piece:
             continue
-        if chunks and len(chunks[-1]) + len(unit) <= limit:
-            chunks[-1] += unit
+        if piece.isspace():
+            spaced = True
+            continue
+        for unit in re.split(r"(?<=[。！？!?…\n，,、；;：:])", piece):
+            unit = unit.strip()
+            if unit:
+                tokens.append((unit, spaced))
+                spaced = False
+        spaced = True
+    chunks, current = [], ""
+    for unit, add_space in tokens:
+        candidate = current + (" " if current and add_space else "") + unit
+        if current and len(candidate) <= limit:
+            current = candidate
         else:
-            chunks.append(unit)
-    return [chunk for chunk in chunks if chunk]
+            if current:
+                chunks.append(current)
+            current = unit
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 @dataclass(frozen=True)
