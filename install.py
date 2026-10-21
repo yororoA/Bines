@@ -18,6 +18,10 @@ from urllib.parse import urlsplit
 
 from runtime_environments import ENVIRONMENTS, ROOT, environment_python
 
+DEFAULT_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
+DEFAULT_PYTHON_MIRROR = (
+    "https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone"
+)
 PROFILES = {"chatbot": ("launcher",), "full": tuple(ENVIRONMENTS)}
 IMPORTS = {
     "launcher": ("flask", "flask_cors", "zmq", "requests", "websocket", "openai", "yaml", "mcp"),
@@ -191,10 +195,30 @@ class Installer:
             info = python_info(command, self.env)
             if supported_python(info):
                 return info["executable"]
+        # UV_PYTHON_INSTALL_DIR above isolates new downloads, but also hides uv's
+        # existing user cache. Discover that cache separately, strictly offline.
+        uv = shutil.which("uv")
+        if uv:
+            discovery_env = clean_environment()
+            existing_dir = os.environ.get("UV_PYTHON_INSTALL_DIR")
+            if existing_dir:
+                discovery_env["UV_PYTHON_INSTALL_DIR"] = existing_dir
+            for version in ("3.12", "3.11"):
+                try:
+                    found = subprocess.run(
+                        [uv, "--no-config", "--offline", "python", "find", "--no-project",
+                         "--managed-python", "--no-python-downloads", version],
+                        env=discovery_env, capture_output=True, text=True, timeout=10,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                candidate = found.stdout.strip()
+                info = python_info([candidate], self.env) if found.returncode == 0 else None
+                if supported_python(info):
+                    return info["executable"]
         if self.options.no_python_download:
             raise InstallError("未找到 64 位 Python 3.11/3.12；请安装或使用 --python 指定")
         # Download Python into this project; never replace the user's system Python.
-        uv = shutil.which("uv")
         if not uv:
             bootstrap = self.root / ".tools" / "installer"
             bootstrap_python = bootstrap / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -202,8 +226,20 @@ class Installer:
                 self.run([sys.executable, "-m", "venv", bootstrap], "创建安装器环境")
             self.pip(bootstrap_python, ["uv>=0.12,<1"], "安装 Python 下载工具")
             uv = str(bootstrap_python.parent / ("uv.exe" if os.name == "nt" else "uv"))
-        self.run([uv, "--no-config", "python", "install", "--no-bin", "--no-registry", "3.12"],
-                 "下载项目专用 Python 3.12", timeout=900)
+        command = [uv, "--no-config", "python", "install", "--no-bin", "--no-registry", "3.12"]
+        if self.options.python_mirror:
+            command += ["--mirror", self.options.python_mirror]
+        download_env = {**self.env, "UV_HTTP_CONNECT_TIMEOUT": "15",
+                        "UV_HTTP_TIMEOUT": "45", "UV_HTTP_RETRIES": "1"}
+        try:
+            self.run(command, "下载项目专用 Python 3.12", env=download_env,
+                     timeout=self.options.python_download_timeout)
+        except InstallError as exc:
+            raise InstallError(
+                f"{exc}\nPython 下载尚未完成；可用 --python 指定已有 Python 3.12，"
+                "或 --python-mirror 更换公开镜像。"
+                "\n--index-url 只影响 pip 包，不影响 Python 安装包下载。"
+            ) from exc
         found = subprocess.run([uv, "--no-config", "python", "find", "--managed-python", "3.12"],
                                env=self.env, capture_output=True, text=True, timeout=15)
         candidate = found.stdout.strip()
@@ -215,7 +251,7 @@ class Installer:
         command = [python, "-I", "-m", "pip", "--isolated", "--disable-pip-version-check",
                    "install", "--no-input", "--progress-bar", "off", "--prefer-binary",
                    "--retries", "2", "--timeout", "60",
-                   "--index-url", self.options.index_url or "https://pypi.org/simple"]
+                   "--index-url", self.options.index_url]
         command += list(extra) + list(packages)
         return self.run(command, label, env=env)
 
@@ -426,6 +462,7 @@ class Installer:
         if not self.options.check:
             self.system_packages()
             self.python = self.choose_python()
+            print(f"使用 Python：{self.python}", flush=True)
         for name in self.selected:
             try:
                 if self.options.check:
@@ -463,9 +500,20 @@ def main(argv=None):
     parser.add_argument("--only", nargs="+", choices=ENVIRONMENTS, help="仅安装/重试指定组（自动包含 launcher）")
     parser.add_argument("--python", help="已有 64 位 Python 3.11/3.12 路径；未指定时自动发现或下载")
     parser.add_argument("--no-python-download", action="store_true", help="找不到兼容 Python 时直接报告错误")
+    parser.add_argument(
+        "--python-mirror",
+        default=os.environ.get("BINES_PYTHON_MIRROR", DEFAULT_PYTHON_MIRROR),
+        help=f"Python 安装包镜像，默认南京大学镜像：{DEFAULT_PYTHON_MIRROR}",
+    )
+    parser.add_argument("--python-download-timeout", type=int, default=180,
+                        help="Python 下载最长等待秒数，默认 180；连接和读超时另有短限制")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="默认跨平台 CPU；cuda 需要 NVIDIA CUDA 12.8 兼容驱动")
     parser.add_argument("--system", action="store_true", help="额外通过已有 brew/apt/winget 安装系统音视频依赖")
-    parser.add_argument("--index-url", help="Python 包镜像 URL；PyTorch CPU/CUDA 包仍使用官方索引")
+    parser.add_argument(
+        "--index-url",
+        default=os.environ.get("BINES_PYPI_INDEX_URL", DEFAULT_INDEX_URL),
+        help=f"Python 包镜像，默认清华 PyPI：{DEFAULT_INDEX_URL}；PyTorch CPU/CUDA 仍使用官方索引",
+    )
     parser.add_argument("--check", action="store_true", help="仅检查已安装环境，不安装 Python 包")
     parser.add_argument("--dry-run", "--preview", action="store_true", help="仅预览环境与依赖清单，不修改文件")
     options = parser.parse_args(argv)
@@ -473,6 +521,10 @@ def main(argv=None):
         parser.error("--check 不能与 --system 同时使用")
     if options.index_url and urlsplit(options.index_url).scheme not in {"http", "https"}:
         parser.error("--index-url 必须为 HTTP(S) URL")
+    if options.python_mirror and urlsplit(options.python_mirror).scheme not in {"http", "https"}:
+        parser.error("--python-mirror 必须为 HTTP(S) URL")
+    if options.python_download_timeout <= 0:
+        parser.error("--python-download-timeout 必须大于 0")
     try:
         installer = Installer(options)
         if options.dry_run or options.check:

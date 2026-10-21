@@ -6,7 +6,7 @@
 python3 install.py
 ```
 
-Windows 可用 `python install.py`，也可双击 `install.bat`；macOS 可双击 `install.command`。默认安装完整的 6 组 Python 环境。安装脚本自身只依赖标准库，需要电脑上已有 Python 3.10 或更新版本用于启动；实际运行环境统一使用 64 位 Python 3.11/3.12。找不到兼容版本时，通过 uv 下载 Python 3.12 到项目 `.tools/python`，不修改系统 Python、PATH 或 Windows Python 注册项。
+Windows 可用 `python install.py`，也可双击 `install.bat`；macOS 可双击 `install.command`。默认安装完整的 6 组 Python 环境。安装脚本自身只依赖标准库，需要电脑上已有 Python 3.10 或更新版本用于启动；实际运行环境统一使用 64 位 Python 3.11/3.12。安装器也会离线查找 uv 已下载的 Python，不要求它出现在 PATH。找不到兼容版本时，通过 uv 和南京大学公开镜像下载 Python 3.12 到项目 `.tools/python`，不修改系统 Python、PATH 或 Windows Python 注册项。
 
 安装结束后填写 `.env` 中的密钥和主人 QQ，再运行 `python bines.py`。启动入口会自动进入 `.venv`，无需手动激活环境。
 
@@ -23,11 +23,15 @@ python install.py --only singing
 # NVIDIA GPU；需 CUDA 12.8 兼容驱动，仅 Windows/Linux x86_64
 python install.py --device cuda
 
-# 已有 Python / 自定义包镜像
+# 已有 Python / 自定义包镜像（默认已使用清华 PyPI）
 python install.py --python /path/to/python3.12
 python install.py --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 # 禁止下载 Python，只使用已安装的兼容解释器
 python install.py --no-python-download
+# Python 安装包镜像（默认南京大学，与上面的 pip 包镜像不同）
+python install.py --python-mirror https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone
+# 慢速网络可调整 Python 下载的总时限，默认 180 秒
+python install.py --python-download-timeout 300
 
 # 可选：通过已有系统包管理器安装音视频依赖
 python install.py --system
@@ -64,12 +68,13 @@ Apple Silicon、Windows/Linux x86_64 是完整安装的主要目标；Intel macO
 ## 配置与重复安装
 
 - 已有兼容虚拟环境会复用，pip 安装满足清单的版本；安装器不删除环境、模型或记忆。请先停止正在运行的 Bines 再升级依赖。
-- Python 优先从系统命令、已有项目虚拟环境和 `.tools/python` 查找，重复运行不需要再次下载解释器。
+- Python 优先从系统命令、已有项目虚拟环境、`.tools/python` 和 uv 用户缓存查找，重复运行不需要再次下载解释器。用户缓存查找禁用网络和自动下载，兼容自定义 `UV_PYTHON_INSTALL_DIR`。
 - 检测到非虚拟环境目录、损坏环境或不兼容 Python 时，该组停止并报告原因，需要用户先备份并移走旧目录。
 - 不并发修改同一组环境；每组结束执行 `pip check` 与核心模块导入核验。QQ 组额外核验记忆网关、人格、提示词和摘要模块，确保轻量入口不会提前加载 Chroma、Torch 或桌面驱动。不会打开摄像头/麦克风或发 QQ 消息。
 - `.env` 不存在时从 `.env.example` 创建；仅补齐不存在的 `BINES_PROFILE`、`HEARING_ASR_DEVICE` 和 `SINGING_PYTHON`，保留已有凭据、显式空值和用户配置。
 - 输出仅展示步骤、进度和成功/失败；pip 和编译器详细日志放在系统临时目录，失败时显示具体日志路径。部分失败时退出码为 1，已成功的环境保留。
 - Python 包镜像用 `--index-url` 指定。安装器忽略个人 pip 安装目标配置，避免 `--user`、`--target` 等将包写到虚拟环境之外；网络代理仍遵循进程环境。
+- Python 安装包下载与 pip 下载使用独立地址：Python 默认使用南京大学的 `python-build-standalone` GitHub Release 镜像，普通包默认使用清华 PyPI；不使用内部软件源。`--index-url` 不会改变 Python 下载源，也不会替换 Windows/Linux 的 PyTorch 官方 CPU/CUDA 索引。可用环境变量 `BINES_PYTHON_MIRROR`、`BINES_PYPI_INDEX_URL` 或同名命令参数覆盖。下载连接限时 15 秒、网络读取限时 45 秒，最多重试一次，总等待默认不超过 180 秒。
 
 `thingking/tests` 的记忆回归使用 Chroma，需先安装 `thinking` 组再用该组 Python 运行；只安装 QQ 组不足以运行这些向量检索测试。
 
