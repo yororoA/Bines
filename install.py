@@ -596,7 +596,7 @@ class Installer:
         env.setdefault("BINES_UID", str(os.getuid() if hasattr(os, "getuid") else 1000))
         env.setdefault("BINES_GID", str(os.getgid() if hasattr(os, "getgid") else 1000))
         services = ["chatbot"]
-        if self.options.profile == "full" and self.options.docker_full:
+        if self.options.docker_full:
             services.append("memory-server")
         for service in services:
             try:
@@ -661,7 +661,7 @@ def main(argv=None):
     parser.add_argument("--python", help="已有 64 位 Python 3.11/3.12 路径；未指定时自动发现或下载")
     parser.add_argument("--no-python-download", action="store_true", help="找不到兼容 Python 时直接报告错误")
     parser.add_argument("--docker-full", action="store_true",
-                        help="完整安装时同时构建 Docker thinking 镜像（体积较大）")
+                        help="同时构建 RAG/thinking 镜像（体积较大，chatbot 模式也用它提供向量记忆）")
     parser.add_argument(
         "--python-mirror",
         default=os.environ.get("BINES_PYTHON_MIRROR", DEFAULT_PYTHON_MIRROR),

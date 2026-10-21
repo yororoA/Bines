@@ -37,6 +37,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.launcher
       args:
+        BASE_IMAGE: ${BINES_PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim}
         BINES_UID: "${BINES_UID:-1000}"
         BINES_GID: "${BINES_GID:-1000}"
     image: bines-launcher:local
@@ -65,7 +66,6 @@ services:
         condition: service_started
       memory-server:
         condition: service_healthy
-        required: false
     networks:
       - bines
     healthcheck:
@@ -118,11 +118,11 @@ services:
       - bines
 
   memory-server:
-    profiles: ["full"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.thinking
       args:
+        BASE_IMAGE: ${BINES_PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim}
         BINES_UID: "${BINES_UID:-1000}"
         BINES_GID: "${BINES_GID:-1000}"
     image: bines-thinking:local

@@ -65,7 +65,7 @@ Docker 化不是必须的隔离手段，但能减少“换机器重装依赖”�
 | zmq-bus | bines-server | `python common/zmq_bus_server.py` | - | 5550、5551 |
 | classification | bines-server | `python server/classification_server.py` | zmq-bus | 无 |
 | speaking | bines-server | `python speaking/main.py` | zmq-bus、外部 TTS | 无 |
-| chatbot | bines-launcher | `python chatBot/main.py` | napcat、memory-server（full） | 可选 6102 |
+| chatbot | bines-launcher | `python chatBot/main.py` | napcat、memory-server | 可选 6102 |
 | qq-thinking | bines-launcher | `python thingking/qq_thinking.py` | chatbot | 无 |
 | memory-server | bines-thinking | `python thingking/rag_server.py` | 无 | 5560 |
 | rag-web | bines-thinking | `python thingking/rag_web_server.py` | memory-server | 5001 |
@@ -313,13 +313,15 @@ python bines.py --host               # 纯宿主机模式，不启动 Docker
 python bines.py --external-napcat    # 连接已有 NapCat，走宿主机模式
 ```
 
-- `chatbot` 模式启动 `napcat`、`chatbot`、`qq-thinking`、`memory-worker`，记忆嵌入网关。
-- `full` 模式额外启动 `memory-server` 与 `rag-web`，并在容器健康后启动宿主机桌面模块；宿主机不再重复启动 ChatBot、QQ Thinking、Memory Worker、RAG Server 和 RAG Web。
+- `chatbot` 模式启动 `napcat`、`memory-server`、`chatbot`、`qq-thinking`、`memory-worker`，QQ 记忆统一走 Memory Server 的向量 RAG。
+- `full` 模式额外启动 `rag-web`，并在容器健康后启动宿主机桌面模块；宿主机不再重复启动 ChatBot、QQ Thinking、Memory Worker、RAG Server 和 RAG Web。
 - `bines.py` 启动时自动设置 `BINES_UID`/`BINES_GID`、`BINES_PROFILE` 和 `--env-file deploy/napcat/.env`；镜像存在且内嵌源码不旧于仓库时不追加 `--build`，代码或 Dockerfile 更新后会自动重建。
 - Ctrl+C 只停止本次新启动的容器；启动前已在运行的容器保持不动，数据卷始终保留。
 - 首次使用前可运行 `python napcat.py init` 同步根 `.env` 中的 NapCat 令牌。
 - 首次登录或登录态失效时，二维码在 NapCat 容器日志中：`python napcat.py logs`。网页 `http://127.0.0.1:6099` 需要 WebUI token，不是扫码页，可用 `python napcat.py webui` 打开。
-- 首次构建 `thinking` 镜像会下载 PyTorch 与嵌入模型，耗时与镜像体积都明显大于 launcher；`install.py` 默认只构建 launcher，完整模式需要 `python install.py --docker-full` 预构建 thinking 镜像。
+- 首次构建 `thinking` 镜像会下载 PyTorch 与嵌入模型，耗时与镜像体积都明显大于 launcher；`chatbot` 与 `full` 都依赖它，可提前用 `python install.py --docker-full` 预构建，否则首次 `python bines.py` 会自动构建。
+- 基础镜像默认走 `docker.m.daocloud.io/library/python:3.12-slim`，避开 Docker Hub 拉取超时；海外网络可在 `.env` 设 `BINES_PYTHON_IMAGE=python:3.12-slim`。
+- Memory Server 启动时会加载嵌入模型并补建 Chroma 索引，第一次启动可能多等几分钟；之后索引增量更新。
 - 手动运维仍可使用 compose（调试用，日常启动请用 `bines.py`）：
 
 ```sh

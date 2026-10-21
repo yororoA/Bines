@@ -16,8 +16,8 @@ COMPOSE_FILE = ROOT / "deploy" / "docker" / "compose.yaml"
 NAPCAT_ENV = ROOT / "deploy" / "napcat" / ".env"
 
 REQUIRED_SERVICES = {
-    "chatbot": ("napcat", "chatbot", "qq-thinking", "memory-worker"),
-    "full": ("napcat", "chatbot", "qq-thinking", "memory-worker", "memory-server", "rag-web"),
+    "chatbot": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker"),
+    "full": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
 }
 HEALTH_REQUIRED = {"chatbot", "memory-server", "rag-web", "napcat"}
 
@@ -110,9 +110,7 @@ def _images_ready(profile: str) -> bool:
     docker = docker_executable()
     if not docker:
         return False
-    images = ["bines-launcher:local"]
-    if profile == "full":
-        images.append("bines-thinking:local")
+    images = ["bines-launcher:local", "bines-thinking:local"]
     newest = _newest_source()
     for image in images:
         created = _image_created(docker, image)
@@ -160,7 +158,7 @@ def running_services(profile: str = "chatbot") -> Set[str]:
     return {name for name, row in _ps(profile).items() if (row.get("State") or "").lower() == "running"}
 
 
-def wait_ready(profile: str, timeout: float = 240) -> None:
+def wait_ready(profile: str, timeout: float = 420) -> None:
     """Wait for every required service to be running and healthchecked."""
     import time
 

@@ -27,7 +27,7 @@ python bines.py --host
 python bines.py --host --profile chatbot
 ```
 
-`python bines.py --profile chatbot` 会构建并启动 NapCat、ChatBot、QQ Thinking、Memory Worker，随后跟随日志；Ctrl+C 停止本次启动的容器并保留数据。首次登录二维码在容器日志中：
+`python bines.py --profile chatbot` 会构建并启动 NapCat、Memory Server、ChatBot、QQ Thinking、Memory Worker，随后跟随日志；Ctrl+C 停止本次启动的容器并保留数据。首次登录二维码在容器日志中：
 
 ```bash
 docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs -f napcat
@@ -37,7 +37,7 @@ docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs 
 
 停止终端或按 Ctrl+C 会停止本次启动的宿主服务，并停止本次新启动的容器，保留数据；已经在外部运行的容器不受影响。单独在管理页启动 Thinking 会自动补启其依赖，停止前置服务会先停止依赖它的服务。状态显示“启动中 / 已就绪 / 依赖阻塞 / 失败”，失败原因和日志保留。
 
-完整模式的 Memory Server 与 RAG Web 运行在 Docker 中，统一持有 SQLite 和 Chroma 索引；纯 QQ 模式在网关中运行轻量记忆服务。唱歌流水线收到唱歌请求时才运行。
+Memory Server 在两种模式都会启动并统一持有 SQLite 和 Chroma 向量索引，ChatBot 通过网关使用同一套 RAG；只有 `--host` 且本机 Memory Server 未运行时才退回网关内置的词面检索。完整模式另有 RAG Web。唱歌流水线收到唱歌请求时才运行。
 
 ## QQ / 纯 ChatBot
 
@@ -96,7 +96,7 @@ flowchart TD
     Q --> W[Memory Worker：摘要 / 事实 / 日记]
     A --> C[ZMQ Bus]
     C --> D[Classification / Display / Speaking / Visual / Hearing]
-    A --> M[完整模式 Memory Server]
+    A --> M[Memory Server：SQLite + Chroma RAG]
     M --> Q
     M --> T
     D --> T[桌面 Thinking]
@@ -116,7 +116,7 @@ python bines.py --console
 
 ## 记忆系统与人格
 
-- 完整模式 **RAG Server** 独占 `thingking/memory_data/memory.db` 和 `index/`（可重建的 Chroma 索引），桌面客户端使用 `5560`；QQ 客户端经网关转发。纯 QQ 模式由网关独占同一新版记忆库，使用词面检索，切回完整模式后补建向量索引。
+- 无论完整模式还是纯 QQ 模式，**RAG Server** 都独占 `thingking/memory_data/memory.db` 和 `index/`（可重建的 Chroma 索引），桌面客户端直接使用 `5560`；QQ 客户端经 ChatBot 网关转发到同一个 RAG Server。`--host --profile chatbot` 且本机没有 RAG Server 时，网关才退回内置词面检索，之后切到 RAG 会自动补建向量索引。
 - QQ 原始消息、事件队列和发送回执保存在独立的 `gateway.db`，提交成功后同步到记忆库。启动时自动识别旧 NapCat `memory.db` 的表结构并迁移到 `gateway.db`，不会覆盖新版库；同步可恢复且去重。
 - 本机与 `BINES_OWNER_QQ_IDS` 显式绑定的主人私聊共享 owner 记忆和状态；其他私聊按机器人账号与用户隔离，群聊按账号与群号隔离，个人状态再按发言人区分。群管理员角色不赋予主人身份。
 - 摘要、长期事实提取和每日日记由独立 Memory Worker 统一处理所有渠道，任务状态记在 SQLite，失败会重试。它通过 ChatBot 网关访问记忆，QQ Thinking 只负责对话与工具。

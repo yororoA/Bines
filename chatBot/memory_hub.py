@@ -29,18 +29,25 @@ class MemoryHub:
         self.service = service
         self.source = "gateway:" + hashlib.sha256(str(Path(store.path).resolve()).encode()).hexdigest()
         profile = profile or os.environ.get("_BINES_LAUNCH_PROFILE") or os.environ.get("BINES_PROFILE", "full")
-        if self.service is None and profile == "chatbot":
-            from memory.lexical_index import LexicalIndex
-            from memory.repository import MemoryRepository
-            from memory.service import MemoryService
-            from memory.settings import load_settings
-            settings = settings or load_settings()
-            repo = MemoryRepository(settings.db_path)
-            self.service = MemoryService(repo, LexicalIndex(repo), settings)
-            self.service.sync_identities()
-        if self.service is None:
+        if self.service is None and client is not None:
+            self.client = client
+        elif self.service is None:
             from config import ZMQ_HOST, ZMQ_PORTS
-            self.client = client or MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
+            remote = MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
+            # Vector RAG is the source of truth whenever the Memory Server is up;
+            # the embedded lexical service only covers a standalone QQ host. An
+            # explicit ``settings`` always means isolated embedded memory (tests).
+            if profile != "chatbot" or (settings is None and remote.ping(timeout_ms=3000)):
+                self.client = remote
+            else:
+                from memory.lexical_index import LexicalIndex
+                from memory.repository import MemoryRepository
+                from memory.service import MemoryService
+                from memory.settings import load_settings
+                settings = settings or load_settings()
+                repo = MemoryRepository(settings.db_path)
+                self.service = MemoryService(repo, LexicalIndex(repo), settings)
+                self.service.sync_identities()
 
     def _call(self, method, **params):
         if self.service is not None:
@@ -110,6 +117,10 @@ class MemoryHub:
             return self._call(method, **params)
 
     def start(self):
+        import logging
+        logging.getLogger("bines.memory.gateway").info(
+            "记忆后端 · %s", "网关内置词面检索" if self.service is not None else "Memory Server (RAG)"
+        )
         self._call("ping")
         self.import_legacy()
         while self.sync() == 500:
