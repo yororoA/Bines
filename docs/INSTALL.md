@@ -87,7 +87,8 @@ Apple Silicon、Windows/Linux x86_64 是完整安装的主要目标；Intel macO
 
 安装 Python 依赖不等于模型和外部应用就绪：
 
-- NapCat 由启动器自动下载 Docker 镜像；Docker Desktop 缺失时由依赖安装器自动安装，启动 Bines 时也会自动打开并等待 Docker 引擎。首次 Docker 协议确认和首次 QQ 扫码仍需用户完成。
+- NapCat 由启动器自动下载 Docker 镜像；Docker Desktop 缺失时由依赖安装器自动安装，启动 Bines 时也会自动打开并等待 Docker 引擎。首次 Docker 协议确认仍需用户完成。QQ 登录二维码位于 `python3 napcat.py logs` 的容器日志中；端口 6099 是需要 token 的管理页，使用 `python3 napcat.py webui` 可自动携带 token 打开。
+- 首次 NapCat 镜像拉取与容器创建分开执行：下载默认最多等待 1800 秒，并每 30 秒显示进度；可用 `BINES_NAPCAT_PULL_TIMEOUT` 调整。已有镜像时不会联网检查更新，需更新时执行 `python napcat.py update`。
 - GPT-SoVITS、so-vits-svc 整合包及个人音色权重使用自己的运行环境，不往其中批量覆盖依赖；路径分别设置在 `GPT_SOVITS_DIR`、`SOVITS_SVC_DIR`。
 - ASR/人脸/记忆嵌入模型沿用模块的首次运行下载流程；唱歌分离模型首次使用时下载，个人换声音色模型不能自动生成。
 - 桌面角色图片、TTS 参考音频、操作系统摄像头/麦克风/录屏权限需要按实际环境配置。

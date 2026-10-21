@@ -9,10 +9,11 @@ import subprocess
 import sys
 import time
 from common.env import load_env, read_env
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 DEPLOY = ROOT / "deploy" / "napcat"
+DEFAULT_IMAGE = "mlikiowa/napcat-docker:latest"
 
 
 def docker_executable():
@@ -98,6 +99,25 @@ def ensure_docker_ready(timeout=180, cancel=None):
     raise RuntimeError("Docker Desktop 尚未就绪；请在其窗口接受协议并完成首次初始化")
 
 
+def image_name():
+    values = read_env(DEPLOY / ".env") if (DEPLOY / ".env").exists() else {}
+    return values.get("NAPCAT_IMAGE") or os.environ.get("NAPCAT_IMAGE") or DEFAULT_IMAGE
+
+
+def image_available(docker=None):
+    docker = docker or docker_executable()
+    if not docker:
+        return False
+    try:
+        result = subprocess.run(
+            [docker, "image", "inspect", image_name()],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def write_secret(path, value):
     # The supervisor may load .env in several child startups simultaneously.
     # Atomic replacement prevents readers from seeing a partially written file.
@@ -177,14 +197,17 @@ def main():
     parser = argparse.ArgumentParser(description="NapCat Docker 部署管理")
     parser.add_argument("action", choices=["init", "up", "down", "logs", "status", "update", "config", "webui"])
     args = parser.parse_args()
-    if args.action in {"init", "up"}:
+    if args.action in {"init", "up", "webui"}:
         initialize()
     if args.action == "init":
         return
     if args.action == "webui":
         import webbrowser
-        webbrowser.open("http://127.0.0.1:6099")
-        print("WebUI token 存于 deploy/napcat/.env 的 NAPCAT_WEBUI_TOKEN；首次需扫码。")
+        values = read_env(DEPLOY / ".env")
+        port = values.get("NAPCAT_WEBUI_PORT", "6099")
+        token = quote(values.get("NAPCAT_WEBUI_TOKEN", ""), safe="")
+        webbrowser.open(f"http://127.0.0.1:{port}/webui?token={token}")
+        print("已使用 deploy/napcat/.env 中的 token 打开 NapCat WebUI。")
         return
     docker = docker_executable()
     if not docker:
@@ -192,13 +215,17 @@ def main():
     if args.action in {"up", "update"}:
         docker = ensure_docker_ready()
     command = [docker, "compose", "--project-directory", str(DEPLOY), "-f", str(DEPLOY / "compose.yaml")]
-    operations = {"up": ["up", "-d"], "down": ["down"], "logs": ["logs", "--tail", "100", "-f"],
+    if args.action == "up" and not image_available(docker):
+        print("首次运行正在下载 NapCat 镜像，可能需要数分钟。", flush=True)
+        subprocess.run(command+["pull", "napcat"], check=True)
+    operations = {"up": ["up", "-d", "--pull", "never"], "down": ["down"], "logs": ["logs", "--tail", "100", "-f"],
                   "status": ["ps"], "config": ["config", "--quiet"], "update": ["pull"]}
     subprocess.run(command+operations[args.action], check=True)
     if args.action == "update":
         subprocess.run(command+["up", "-d"], check=True)
     if args.action == "up":
-        print("NapCat 已启动；访问 http://127.0.0.1:6099 扫码登录。")
+        print("NapCat 已启动；另开终端运行 python3 napcat.py logs，扫描日志中的二维码。")
+        print("管理页使用 python3 napcat.py webui 打开；6099 WebUI 需要 token，不显示登录二维码。")
 
 
 if __name__ == "__main__":

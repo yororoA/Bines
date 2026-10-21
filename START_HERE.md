@@ -18,7 +18,7 @@ python bines.py
 
 默认运行 `.env` 中 `BINES_PROFILE` 选定的模式（未配置为 full）。完整模式自动打开管理页并启动服务；纯 QQ 使用 `python bines.py --profile chatbot`，需要管理页时加 `--web`。macOS 可双击 `start_bines.command`，Windows 可双击 `start_web_manager.bat`。
 
-启动器自动检查/启动本机 Docker NapCat、补全连接配置、调度前置依赖，并等待每个模块真实上报就绪；首次 QQ 登录仍需要 WebUI 扫码。已有 NapCat 可设置 `BINES_NAPCAT_DEPLOY=external`，或使用 `--external-napcat`。仅打开管理器、不自动启动服务使用 `--manager-only`。
+启动器自动检查/启动本机 Docker NapCat、补全连接配置、调度前置依赖，并等待每个模块真实上报就绪；首次缺少 NapCat 镜像时会单独下载并显示等待进度，不再受普通容器启动的短超时限制。首次 QQ 登录需另开终端运行 `python3 napcat.py logs`，扫描容器日志中的二维码。已有 NapCat 可设置 `BINES_NAPCAT_DEPLOY=external`，或使用 `--external-napcat`。仅打开管理器、不自动启动服务使用 `--manager-only`。
 
 停止终端或按 Ctrl+C 会逆序停止本次管理的服务，并停止本次新启动的 NapCat 容器，保留数据；已经在外部运行的容器不受影响。单独在管理页启动 Thinking 会自动补启其依赖，停止前置服务会先停止依赖它的服务。状态显示“启动中 / 已就绪 / 依赖阻塞 / 失败”，失败原因和日志保留。
 
@@ -38,7 +38,7 @@ python install.py --profile chatbot
 python bines.py --profile chatbot
 ```
 
-此模式只运行 ChatBot 网关和 QQ Thinking 两个 Python 进程，NapCat 由 Docker 自动管理。网关内的 MemoryService 使用 SQLite 和词面检索，不下载嵌入模型，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。QQ Thinking 通过鉴权 HTTP 读写记忆并在后台生成摘要、长期事实和日记。首次需在 `http://127.0.0.1:6099` WebUI 扫码，令牌位于 `deploy/napcat/.env`；已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
+此模式只运行 ChatBot 网关和 QQ Thinking 两个 Python 进程，NapCat 由 Docker 自动管理。网关内的 MemoryService 使用 SQLite 和词面检索，不下载嵌入模型，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。QQ Thinking 通过鉴权 HTTP 读写记忆并在后台生成摘要、长期事实和日记。首次登录二维码打印在 `python3 napcat.py logs` 的容器日志中；`http://127.0.0.1:6099` 是需要 WebUI token 的管理页，可用 `python3 napcat.py webui` 自动携带 token 打开。令牌位于 `deploy/napcat/.env`，已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
 
 停止服务后，旧 JSON 和 Chroma 记忆可导入新版库；原文件保留，重复执行不会重复写入：
 

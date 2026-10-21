@@ -142,6 +142,45 @@ class ServiceSupervisor:
             self._state(name, "failed", message)
             return {"name": name, "success": False, "message": message}
 
+    def _run_setup_command(self, command, label, timeout):
+        """Run a bounded setup command while keeping noisy pull output in a runtime log."""
+        log_path = Path(self.runtime.name) / "napcat-pull.log"
+        with log_path.open("w", encoding="utf-8") as output:
+            tree = ProcessTree(
+                command, cwd=Path(__file__).resolve().parent,
+                env=build_python_runtime_env(), stdout=output,
+                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            )
+            started = time.monotonic()
+            next_notice = started + 30
+            try:
+                while tree.poll() is None:
+                    now = time.monotonic()
+                    if self.cancel.is_set():
+                        raise RuntimeError("启动已取消")
+                    if now - started > timeout:
+                        raise RuntimeError(f"{label}超时（{int(timeout)} 秒）")
+                    if now >= next_notice:
+                        self._napcat_message = f"{label}（已等待 {int(now-started)} 秒）"
+                        self.emit("NapCat", "starting", self._napcat_message)
+                        next_notice = now + 30
+                    self.cancel.wait(0.5)
+                if tree.poll():
+                    output.flush()
+                    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    raise RuntimeError(f"{label}失败：" + " ".join(lines[-8:])[-800:])
+            except BaseException:
+                if tree.poll() is None:
+                    tree.terminate()
+                    try:
+                        tree.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        tree.kill()
+                        tree.wait()
+                raise
+            finally:
+                tree.close()
+
     def _prepare_napcat(self):
         if not self.use_napcat:
             return
@@ -179,12 +218,31 @@ class ServiceSupervisor:
         })
         prior = subprocess.run(command+["ps", "--status", "running", "-q", "napcat"],
                                capture_output=True, text=True, timeout=10)
-        startup = subprocess.run(command+["up", "-d"], capture_output=True, text=True, timeout=60)
+        if not napcat.image_available(docker):
+            value = os.environ.get("BINES_NAPCAT_PULL_TIMEOUT", "1800")
+            try:
+                pull_timeout = float(value)
+            except ValueError as exc:
+                raise ValueError("BINES_NAPCAT_PULL_TIMEOUT 必须为有限正数") from exc
+            import math
+            if not math.isfinite(pull_timeout) or pull_timeout <= 0:
+                raise ValueError("BINES_NAPCAT_PULL_TIMEOUT 必须为有限正数")
+            self._napcat_message = "首次运行正在下载 NapCat 镜像（可能需要数分钟）"
+            self.emit("NapCat", "starting", self._napcat_message)
+            self._run_setup_command(
+                command+["pull", "napcat"], "正在下载 NapCat 镜像", pull_timeout,
+            )
+        startup = subprocess.run(
+            command+["up", "-d", "--pull", "never"],
+            capture_output=True, text=True, timeout=120,
+        )
         if startup.returncode:
             raise RuntimeError("Docker NapCat 启动失败：" + startup.stderr[-600:])
         self._docker_owned = prior.returncode == 0 and not prior.stdout.strip()
         self._docker_prepared = True
-        self._napcat_message = "容器已启动，等待 QQ 登录；首次在 WebUI 扫码"
+        self._napcat_message = (
+            "容器已启动，等待 QQ 登录；另开终端运行 python3 napcat.py logs 扫描二维码"
+        )
         self.emit("NapCat", "waiting", self._napcat_message)
 
     def start(self, targets=None):

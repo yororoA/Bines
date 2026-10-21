@@ -42,7 +42,7 @@ MCP 与文本 Skill 使用同一网关和权限判定，不分别维护功能白
 
 使用 NapCat 官方维护的 `mlikiowa/napcat-docker` 镜像，独立网络和数据卷，宿主端口默认仅绑定回环地址。QQ 登录数据、NapCat 配置、插件与共享媒体分别持久化，不挂载项目或 Docker socket，不使用 privileged / host network。
 
-初始化脚本生成 OneBot WebSocket 与 WebUI 配置及随机令牌；部署、日志、检查、更新和停止提供统一命令。第一次登录需要在 NapCat WebUI 扫码。
+初始化脚本生成 OneBot WebSocket 与 WebUI 配置及随机令牌；部署、日志、检查、更新和停止提供统一命令。第一次登录运行 `python3 napcat.py logs` 扫描容器日志中的二维码；WebUI 只负责管理且需要 token。
 
 ## 核验来源
 
