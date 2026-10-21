@@ -6,13 +6,11 @@
 - 视觉刺激：低概率随机拉一次视觉；若出现新物体/变化则瞬间填满无聊值并以「新发现」为由发起对话。
 - 文件读取使用 mtime 缓存，仅文件变更时读盘，降低 IO。
 """
-import os
 import sys
 import json
 import time
 import zmq
 import datetime
-import re
 import random
 from pathlib import Path
 from path_setup import ensure_project_root
@@ -29,9 +27,8 @@ from config import (
 from common.deepseek_client import get_deepseek_client
 from common.zmq_bus import create_publisher
 
-# 导入短期记忆系统、动态状态和永久记忆
-from layered_memory import ShortTermMemory, DynamicMemory, PermanentMemory
-# 导入关系状态计算函数
+import persona_profile
+from memory.client import MemoryClient
 from relationship_state import (
     compute_relationship_weights,
     collapse_relationship_level,
@@ -46,34 +43,6 @@ if sys.platform.startswith('win'):
     except (AttributeError, OSError):
         pass
 # -------------------------------------------------------------------
-
-# 初始化短期记忆系统、动态状态和永久记忆
-memory_system = ShortTermMemory()
-dynamic_memory = DynamicMemory()
-permanent_memory = PermanentMemory()
-
-
-class CachedMemory:
-    """基于文件 mtime 的缓存：仅当文件被修改时才重新 load，大幅降低重复 IO。"""
-    def __init__(self, memory_obj):
-        self.memory = memory_obj
-        self.last_mtime = 0
-
-    def reload_if_needed(self):
-        try:
-            current_mtime = os.path.getmtime(self.memory.filepath)
-            if current_mtime > self.last_mtime:
-                self.memory.load()
-                self.last_mtime = current_mtime
-                return True
-        except (FileNotFoundError, OSError):
-            pass
-        return False
-
-
-cached_short_mem = CachedMemory(memory_system)
-cached_dynamic_mem = CachedMemory(dynamic_memory)
-cached_permanent_mem = CachedMemory(permanent_memory)
 
 # 无聊值(Entropy)系统：0-100 进度条，达 100 时可触发
 # 基准：1.0 倍速率下约 20 分钟从 0 涨到 100
@@ -143,6 +112,16 @@ BORED_TOPIC = "bored"
 context = zmq.Context()
 pub_socket = create_publisher(context, label="Bored Detector")
 print("[Bored Detector] ZMQ PUB connected to local bus", flush=True)
+
+# 管理员本机会话与状态从 Memory Server 读取
+memory_client = MemoryClient(HOST, ZMQ_PORTS["RAG_SERVER_REQREP"], context, timeout_ms=5000)
+
+
+def _owner_relationship_score():
+    try:
+        return memory_client.get_state("owner").get("data", {}).get("relationship_score", 0)
+    except Exception:
+        return 0
 
 
 def _fetch_visual_snapshot():
@@ -287,9 +266,7 @@ def send_bored_message():
             payload["visual_stimulus"] = last_visual_stimulus_reason
             last_visual_stimulus_reason = None
         pub_socket.send_multipart([BORED_TOPIC.encode("utf-8"), json.dumps(payload).encode("utf-8")])
-        cached_dynamic_mem.reload_if_needed()
-        score = dynamic_memory.state.get("relationship_score", 0)
-        cooldown = calculate_next_cooldown(score)
+        cooldown = calculate_next_cooldown(_owner_relationship_score())
         next_allowed_trigger_time = time.time() + cooldown
         boredom_value = 0.0
         print(f"[Bored Detector] Sent bored message. 无聊值已清零，下次允许: {time.strftime('%H:%M:%S', time.localtime(next_allowed_trigger_time))}", flush=True)
@@ -300,22 +277,11 @@ def send_bored_message():
 
 
 def _parse_last_message_timestamp(last_message, fallback_time):
-    """从最后一条消息解析时间戳。"""
-    ts = last_message.get("timestamp")
-    if ts is not None:
-        try:
-            return float(ts)
-        except (TypeError, ValueError):
-            pass
-    content = last_message.get("content", "")
-    match = re.search(r"\[(\d{4}/\d{1,2}/\d{1,2})\s+(\d{1,2}:\d{1,2})\]:", content)
-    if match:
-        try:
-            dt = datetime.datetime.strptime(f"{match.group(1)} {match.group(2)}", "%Y/%m/%d %H:%M")
-            return dt.timestamp()
-        except ValueError:
-            pass
-    return fallback_time
+    """最后一条消息的时间戳。"""
+    try:
+        return float(last_message.get("ts"))
+    except (TypeError, ValueError):
+        return fallback_time
 
 
 def _is_user_online():
@@ -344,12 +310,14 @@ def check_bored():
         if now < next_allowed_trigger_time:
             return False
 
-        # 仅当文件 mtime 变化时读盘，降低 IO
-        cached_short_mem.reload_if_needed()
-        cached_dynamic_mem.reload_if_needed()
-        cached_permanent_mem.reload_if_needed()
-
-        messages = memory_system.get_messages()
+        try:
+            snapshot = memory_client.activity_snapshot()
+        except Exception as e:
+            print(f"[Bored Detector] Memory Server 不可用，跳过本次检查: {e}", flush=True)
+            next_allowed_trigger_time = now + 60
+            return False
+        messages = snapshot.get("messages") or []
+        owner_state = snapshot.get("state") or {}
         if not messages:
             last_check_time = now
             return False
@@ -357,7 +325,7 @@ def check_bored():
         last_message = messages[-1]
         last_ts = _parse_last_message_timestamp(last_message, now)
         role = last_message.get("role", "")
-        relationship_score = dynamic_memory.state.get("relationship_score", 0)
+        relationship_score = owner_state.get("relationship_score", 0)
         is_sleep = is_sleeping_time()
 
         # RL-Lite：处理上次主动发起后的用户响应延迟，更新该时段权重
@@ -410,20 +378,19 @@ def check_bored():
         hours_since = int(time_since_last / 3600)
         days_since = int(time_since_last / 86400)
         time_description = f"{days_since}天" if days_since > 0 else (f"{hours_since}小时" if hours_since > 0 else f"{minutes_since}分钟")
-        dynamic_state_str = dynamic_memory.to_prompt_str()
-        with permanent_memory.lock:
-            facts = permanent_memory.data.get("facts", [])
-            personality_info = "\n".join([f"- {fact}" for fact in facts]) if facts else "无性格信息"
+        npc_state = owner_state.get("npc_state") or {}
+        dynamic_state_str = "；".join(
+            f"{label}: {value}" for label, value in (
+                ("位置", owner_state.get("current_location")),
+                ("正在做的事", npc_state.get("current_activity")),
+                ("约定或任务", owner_state.get("active_quest")),
+                ("最近的重要情况", owner_state.get("important_thing")),
+            ) if value
+        ) or "无"
+        personality_info = persona_profile.brief()
         relationship_weights = compute_relationship_weights(relationship_score, softness=DEFAULT_SOFTNESS)
         collapsed_level = collapse_relationship_level(relationship_weights)
-        mood_map = {
-            "敌对": "当前心情：敌对。她可能因'烦躁'而主动说话，而非'寂寞'。",
-            "冷淡": "当前心情：冷淡。可能完全沉默，不会主动发起闲聊。",
-            "普通": "当前心情：普通。不会主动发起闲聊，主动仅限公事。",
-            "亲近": "当前心情：亲近。可能话多，愿意主动发起对话。",
-            "非常亲密": "当前心情：非常亲密。很愿意主动发起对话。",
-        }
-        mood_description = mood_map.get(collapsed_level, f"当前心情：{collapsed_level}。")
+        mood_description = persona_profile.relationship_mood(collapsed_level)
 
         system_prompt = """你是一个情感判断模块。请判断角色在当前是否感到无聊并想要**主动**发起对话。
 规则：不要太频繁；深夜尽量安静；告别语后不发起；关系低时冷淡、高时粘人；结合「当下的心情」。

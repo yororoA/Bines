@@ -49,27 +49,13 @@ def sanitize_user_input(user_input: str) -> Tuple[str, bool, bool]:
     return cleaned_user_input, cleaned_user_input != user_input, False
 
 
-def build_time_gap_instruction(memory_system, user_input: str, current_date_obj: datetime.datetime) -> str:
-    """构建“久别重逢”提示词（保持原逻辑）。"""
+def build_time_gap_instruction(last_user_ts: Optional[float], user_input: str, current_date_obj: datetime.datetime) -> str:
+    """构建“久别重逢”提示词：距离上一条用户消息跨天时，按人设抱怨分别太久。"""
     try:
-        history = memory_system.short_term.get_messages()
-        last_date_obj = None
-
-        for msg in reversed(history):
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                match = re.search(r"\[(\d{4}/\d{1,2}/\d{1,2})\]:", content)
-                if match:
-                    try:
-                        last_date_obj = datetime.datetime.strptime(match.group(1), "%Y/%m/%d")
-                        break
-                    except ValueError:
-                        pass
-
-        if not last_date_obj:
+        if not last_user_ts:
             return ""
-
-        delta_days = (current_date_obj - last_date_obj).days
+        last_date_obj = datetime.datetime.fromtimestamp(float(last_user_ts))
+        delta_days = (current_date_obj.date() - last_date_obj.date()).days
         wakeup_words = ["你好", "在吗", "醒醒", "启动", "喂", "hi", "hello"]
         is_wakeup = any(w in user_input.lower() for w in wakeup_words)
 

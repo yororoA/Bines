@@ -1,6 +1,7 @@
 """Pure-Python DeepSeek agents using the local SKILL.md text protocol."""
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from config import DEEPSEEK_MODEL
@@ -46,11 +47,10 @@ class MainAgent:
         self.skill_instructions = instructions or ""
 
     def get_system_prompt(self) -> str:
-        base = """你是一个有鲜明人设的情感对话助手。理解用户意图并自然回应，保持角色语气。
+        base = """理解用户意图并按随后给出的角色设定自然回应。
 - 用户问过去的对话、记忆或聊天记录时，先从已提供的上下文中回答，不要调用屏幕或浏览器动作。
 - 用户明确要求实际操作时，必须使用已启用的本地技能；不要编造执行结果。
 - 不输出括号内的动作描述。若无需回复则保持空内容。
-- 用户要求写代码、调试或解释技术问题时，应直接给出有帮助的回答。
 """
         sections = [base, SKILL_PROTOCOL]
         if self.skill_instructions:
@@ -148,51 +148,19 @@ class MainAgent:
             return f"任务已完成：{tool_result}"
 
 
-class SummaryAgent:
-    """Summary and state-maintenance prompts use the same DeepSeek model."""
-
-    def __init__(self, skill_runner: SkillRunner | None = None):
-        self.thinking_helper = ThinkingModelHelper()
-        self.skill_runner = skill_runner
-
-    def set_skill_runner(self, skill_runner: SkillRunner) -> None:
-        self.skill_runner = skill_runner
-
-    def update_state(self, state_update_description: str, context: str, base_messages: List[Dict]) -> str:
-        if self.skill_runner is None:
-            return "本地技能运行器尚未初始化。"
-        messages = _clean_legacy_messages(base_messages)
-        messages.extend([
-            {"role": "system", "content": "根据对话事实维护动态状态。只更新明确发生变化的字段；无变化时直接回复无需更新。"},
-            {"role": "user", "content": f"状态变化描述：{state_update_description}\n上下文：{context or '无'}"},
-        ])
-        try:
-            result, _, _ = self.thinking_helper.run_skill_protocol(
-                messages, self.skill_runner, allowed_skills={"memory-maintenance"},
-                max_iterations=3, temperature=0.0, max_tokens=1200,
-            )
-            return result or "状态更新完成。"
-        except Exception as exc:
-            return f"状态更新失败：{exc}"
-
-    def summarize_content(self, content: str) -> str:
-        if not content:
-            return ""
-        try:
-            return self.thinking_helper.complete_text([
-                {"role": "system", "content": "你是对话摘要助手。准确压缩重要话题、事实、参与者和观点，忽略无关寒暄。"},
-                {"role": "user", "content": f"请总结以下内容：\n\n{content}"},
-            ], temperature=0.3, max_tokens=1024)
-        except Exception as exc:
-            return f"摘要失败：{exc}"
-
-
 class DynamicMemoryMaintainer:
-    """Update dynamic memory through the memory-maintenance Skill."""
+    """Update the owner's dynamic state through the memory-maintenance Skill after a new episode summary."""
 
-    def __init__(self, skill_runner: SkillRunner | None = None):
+    def __init__(self, skill_runner: SkillRunner | None = None, memory_client=None):
         self.thinking_helper = ThinkingModelHelper()
         self.skill_runner = skill_runner
+        self.memory_client = memory_client
+
+    def update_from_summary(self, summary_text: str) -> str:
+        if not self.memory_client:
+            return ""
+        state = self.memory_client.get_state("owner").get("data") or {}
+        return self.update_dynamic_memory_from_summary(summary_text, json.dumps(state, ensure_ascii=False, indent=2))
 
     def update_dynamic_memory_from_summary(self, summary_text: str, current_dynamic_json: str) -> str:
         if not self.skill_runner or not summary_text.strip():

@@ -7,7 +7,7 @@
 1. 需要 QQ 功能时先启动 NapCat WebSocket。语音播报用的 GPT-SoVITS：在 `.env` 设置 `GPT_SOVITS_DIR`（整合包目录，需含 `runtime\python.exe` 和 `api_v2.py`）后，管理器会把它作为 **GPT-SoVITS** 服务随“启动所有服务”一起启动，端口取自 `BINES_TTS_URL`（默认 9880），模型权重沿用整合包里的 `GPT_SoVITS/configs/tts_infer.yaml`。未设置时需自行启动。
 2. 双击根目录的 `start_web_manager.bat`，等待终端提示管理页就绪。
 3. 打开 `http://127.0.0.1:5000`，点击“启动所有服务”。
-4. 需要管理记忆库时，服务列表中的 **RAG Web** 会随全部服务启动，可访问 `http://127.0.0.1:5001`。
+4. 需要管理记忆库时，服务列表中的 **RAG Web**（记忆管理页）会随全部服务启动，可访问 `http://127.0.0.1:5001`。
 
 停止时在管理页点击“停止所有服务”，再关闭管理器。日志和服务状态都在管理页查看。
 
@@ -37,6 +37,15 @@ python start_modules.py --console
 
 控制台模式会为模块分别打开窗口；关闭启动器不会停止这些模块，需要逐个关闭服务窗口。
 
+## 记忆系统与人格
+
+- 服务列表里的 **RAG Server** 进程就是 Memory Server：它独占 `thingking/memory_data/memory.db`（SQLite，唯一事实源）和 `thingking/memory_data/index/`（Chroma 向量索引，可随时从 SQLite 重建）。其他进程只通过 `5560` 端口的客户端读写。
+- 本机对话与 NapCat 消息统一成同一种会话信封。本机和 `ADMIN_QQ_LIST`（或环境变量 `BINES_OWNER_QQ_IDS`）里的 QQ 私聊共享管理员（owner）记忆和关系状态；其他私聊、每个群聊各自独立，群聊永远看不到管理员的私人记忆。
+- 情节摘要、长期事实提取和每日日记由 Thinking 里的整合任务完成，任务状态记在 SQLite 中，失败会自动重试。
+- 人格只在 `thingking/persona/persona.yaml` 中维护，修改后运行 `python thingking/persona/render_doc.py` 更新 `PERSONA.md`。
+- 维护命令（先在管理页停止 RAG Server、RAG Web、Thinking、Bored Detector，用 `thingking/thinking_venv` 运行）：`python thingking/memory_admin.py stats | verify | rebuild-index`。旧版记忆文件已迁移，只读备份在 `thingking/memory_data/legacy_backup/`，需要回滚时用 `memory_admin.py restore-legacy <备份目录>`。
+- 测试：`cd thingking/tests` 后运行 `..\thinking_venv\Scripts\python.exe -m unittest`。
+
 ## Python 环境
 
 管理器通过 `thingking/thinking_venv` 启动。各服务沿用自己的依赖环境：
@@ -61,7 +70,7 @@ python start_modules.py --console
 - `5550`：PUB/SUB 总线发布入口
 - `5551`：PUB/SUB 总线订阅出口
 - `5557`：Visual 请求响应
-- `5560`：RAG Server 请求响应
+- `5560`：Memory Server（RAG Server）请求响应
 - `5570`：模块就绪通知
 - `5571`：Classification 到 Thinking 的启动握手
 - `9880`：GPT-SoVITS TTS HTTP 接口（由 `BINES_TTS_URL` 决定）
