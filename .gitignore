@@ -58,6 +58,7 @@ test/
 
 memory_data/
 tests/
+!thingking/tests/
 # Local config backup may contain credentials
 config.py.bak
 thingking/models/

@@ -1,51 +1,40 @@
-"""Compatibility memory RPC for full desktop mode; SQLite lives in both processes."""
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""Memory Server process entry (registered as "RAG Server" in process_registry).
+
+Owns ``memory_data/memory.db`` (SQLite source of truth) and ``memory_data/index`` (Chroma, rebuildable).
+"""
+import logging
+import os
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
-from rag_memory import RAGMemory
-from config import ZMQ_HOST, ZMQ_PORTS
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(CURRENT_DIR)
+SRC_DIR = os.path.join(CURRENT_DIR, "src")
+for path in (ROOT_DIR, SRC_DIR):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
-
-class RAGServer:
-    def __init__(self):
-        self.memory = RAGMemory()
-
-    def handle_request(self, request):
-        method = request.get("method", "")
-        allowed = {
-            "get_relevant_context", "get_stats", "collection_get", "collection_count",
-            "collection_delete", "similarity_search_with_score", "add_raw_conversation",
-            "add_episode_summary", "add_to_summary_buffer", "add_to_diary",
-            "update_memory", "garbage_collect",
-        }
-        if method not in allowed:
-            return {"ok": False, "error": "unsupported memory method"}
-        try:
-            return {"ok": True, "result": getattr(self.memory, method)(**request.get("params", {}))}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+from config import ZMQ_PORTS  # noqa: E402
+from memory.server import serve  # noqa: E402
 
 
-def main():
-    import zmq
-    from common.module_ready import notify_module_ready
-    server = RAGServer()
-    context = zmq.Context()
-    socket = context.socket(zmq.REP)
-    socket.bind(f"tcp://{ZMQ_HOST}:{ZMQ_PORTS['RAG_SERVER_REQREP']}")
-    notify_module_ready("RAG Server")
-    print("共享 SQLite 记忆 RPC 已就绪", flush=True)
+def _notify_ready() -> None:
+    from common.service_ready import mark_ready
+    mark_ready("RAG Server")
     try:
-        while True:
-            socket.send_json(server.handle_request(socket.recv_json()))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        socket.close(linger=0)
-        context.term()
+        from common.module_ready import notify_module_ready
+
+        notify_module_ready("RAG Server")
+    except Exception as exc:
+        print(f"[Memory Server] 就绪上报失败: {exc}", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    if sys.platform.startswith("win"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError):
+            pass
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
+    serve(ZMQ_PORTS["RAG_SERVER_REQREP"], on_ready=_notify_ready)

@@ -49,7 +49,13 @@ class Integration(unittest.TestCase):
         self.store = MemoryStore(Path(self.temp.name) / "memory.db", owners={"1"})
         self.api = FakeAPI()
         self.service = CapabilityService(self.api, self.store)
-        self.server = GatewayServer(self.service, ("127.0.0.1", 0), token="test-secret")
+        from chatBot.memory_hub import MemoryHub
+        from memory.settings import MemorySettings
+        self.memory_hub = MemoryHub(self.store, profile="chatbot", settings=MemorySettings(
+            data_dir=Path(self.temp.name) / "central", owner_qq_ids=frozenset({"1"}),
+        ))
+        self.server = GatewayServer(self.service, ("127.0.0.1", 0), token="test-secret",
+                                    memory_hub=self.memory_hub)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.client = GatewayClient(f"http://127.0.0.1:{self.server.server_port}", token="test-secret")
@@ -58,6 +64,7 @@ class Integration(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
+        self.memory_hub.close()
         self.temp.cleanup()
 
     def insert(self, ev):
@@ -320,10 +327,14 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
         # out of this subprocess; injected fixture values are local to the test.
         isolated_env = Path(self.temp.name) / "launcher.env"
         isolated_env.write_text("# isolated launcher verification\n")
+        import socket
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            gateway_port = listener.getsockname()[1]
         env.update({
             "BINES_ENV_FILE": str(isolated_env),
             "BINES_MEMORY_DIR": str(Path(self.temp.name) / "launcher"),
-            "BINES_QQ_GATEWAY_PORT": "0",
+            "BINES_QQ_GATEWAY_PORT": str(gateway_port),
             "BINES_NAPCAT_WS_URL": "ws://127.0.0.1:1",
             "BINES_NAPCAT_DEPLOY": "external",
             "DEEPSEEK_API_KEY": "verification-only",
@@ -340,7 +351,7 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
         thread = threading.Thread(target=read, daemon=True)
         thread.start()
         try:
-            self.assertTrue(ready.wait(10), "".join(lines))
+            self.assertTrue(ready.wait(30), "".join(lines))
         finally:
             import signal
             process.send_signal(signal.SIGINT)

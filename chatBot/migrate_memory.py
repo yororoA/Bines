@@ -47,7 +47,11 @@ def migrate(source, store=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="迁移旧主人记忆到共享 SQLite（保留原文件，不导入未确认身份的 QQ buffer）")
+    parser = argparse.ArgumentParser(description="导入新版 MemoryService，保留源文件并使用轻量词面索引")
     parser.add_argument("--source", type=Path, default=ROOT / "thingking" / "src")
     options = parser.parse_args()
-    print(f"已导入 {migrate(options.source)} 条记忆；重复执行不会重复写入。")
+    from thingking.memory_admin import cmd_migrate
+    from types import SimpleNamespace
+    raise SystemExit(cmd_migrate(SimpleNamespace(
+        source=options.source, keep_originals=True, lexical=True,
+    )))

@@ -16,7 +16,7 @@ python bines.py
 
 停止终端或按 Ctrl+C 会逆序停止本次管理的服务，并停止本次新启动的 NapCat 容器，保留数据；已经在外部运行的容器不受影响。单独在管理页启动 Thinking 会自动补启其依赖，停止前置服务会先停止依赖它的服务。状态显示“启动中 / 已就绪 / 依赖阻塞 / 失败”，失败原因和日志保留。
 
-RAG 检索已嵌入共享 SQLite，**RAG Server 不再常驻启动**；RAG Web 为按需记忆管理页面；唱歌流水线收到唱歌请求时才运行，无需独立服务。
+完整模式自动启动 **RAG Server（Memory Server）**，统一持有 SQLite 和 Chroma 索引；纯 QQ 模式在网关中运行轻量记忆服务。RAG Web 为完整模式按需启动的记忆管理页面；唱歌流水线收到唱歌请求时才运行。
 
 ## QQ / 纯 ChatBot
 
@@ -32,9 +32,9 @@ python -m pip install -r requirements-chatbot.txt
 python bines.py --profile chatbot
 ```
 
-此模式只运行 ChatBot 网关和 QQ Thinking 两个 Python 进程，NapCat 由 Docker 自动管理。记忆直接使用共享 SQLite，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。首次需在 `http://127.0.0.1:6099` WebUI 扫码，令牌位于 `deploy/napcat/.env`；已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
+此模式只运行 ChatBot 网关和 QQ Thinking 两个 Python 进程，NapCat 由 Docker 自动管理。网关内的 MemoryService 使用 SQLite 和词面检索，不下载嵌入模型，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。QQ Thinking 通过鉴权 HTTP 读写记忆并在后台生成摘要、长期事实和日记。首次需在 `http://127.0.0.1:6099` WebUI 扫码，令牌位于 `deploy/napcat/.env`；已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
 
-旧主人 JSON 记忆可无损导入，原文件保留，重复执行不会重复写入：
+停止服务后，旧 JSON 和 Chroma 记忆可导入新版库；原文件保留，重复执行不会重复写入：
 
 ```bash
 python -m chatBot.migrate_memory
@@ -67,16 +67,19 @@ NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网
 
 ## 启动顺序
 
-服务定义集中在根目录 `process_registry.py`。Web 管理器按列表顺序启动：
+服务定义集中在根目录 `process_registry.py`。管理器按依赖启动：
 
 ```mermaid
 flowchart TD
     A[统一启动器] --> Q[NapCat Docker → ChatBot 网关 → QQ Thinking]
     A --> C[ZMQ Bus]
     C --> D[Classification / Display / Speaking / Visual / Hearing]
+    A --> M[完整模式 Memory Server]
+    M --> Q
+    M --> T
     D --> T[桌面 Thinking]
     T --> B[Bored Detector]
-    A -.按需.-> R[RAG Web 记忆管理]
+    M -.按需.-> R[RAG Web 记忆管理]
 ```
 
 依赖由 `process_registry.py` 定义，执行与就绪检查由 `service_supervisor.py` 统一负责。模块标记只对本次启动 token 有效，避免把旧状态当成就绪。QQ 链路独立启动，不等待 Visual/Hearing 模型。管理方式不再使用 Classification 的一次性启动消息，Thinking 重启不会卡在旧握手上。
@@ -87,7 +90,17 @@ flowchart TD
 python bines.py --console
 ```
 
-控制台与 Web 使用相同调度；Ctrl+C 会清理子进程。普通服务等待就绪 120 秒，Visual/Hearing 600 秒，可在 `.env` 用 `BINES_STARTUP_TIMEOUT` 覆盖。
+控制台与 Web 使用相同调度；Ctrl+C 会清理子进程。普通服务等待就绪 120 秒，Visual/Hearing/Memory Server 600 秒，可在 `.env` 用 `BINES_STARTUP_TIMEOUT` 覆盖。
+
+## 记忆系统与人格
+
+- 完整模式 **RAG Server** 独占 `thingking/memory_data/memory.db` 和 `index/`（可重建的 Chroma 索引），桌面客户端使用 `5560`；QQ 客户端经网关转发。纯 QQ 模式由网关独占同一新版记忆库，使用词面检索，切回完整模式后补建向量索引。
+- QQ 原始消息、事件队列和发送回执保存在独立的 `gateway.db`，提交成功后同步到记忆库。启动时自动识别旧 NapCat `memory.db` 的表结构并迁移到 `gateway.db`，不会覆盖新版库；同步可恢复且去重。
+- 本机与 `BINES_OWNER_QQ_IDS` 显式绑定的主人私聊共享 owner 记忆和状态；其他私聊按机器人账号与用户隔离，群聊按账号与群号隔离，个人状态再按发言人区分。群管理员角色不赋予主人身份。
+- 摘要、长期事实提取和每日日记由 QQ Thinking 的后台整合线程统一处理所有渠道，任务状态记在 SQLite，失败会重试。
+- 人格只在 `thingking/persona/persona.yaml` 中维护，修改后运行 `python thingking/persona/render_doc.py` 更新 `PERSONA.md`。
+- 维护命令：`python thingking/memory_admin.py stats | verify | rebuild-index`。离线迁移、校验或重建前停止 RAG Server、ChatBot、QQ Thinking 及其他记忆客户端。迁移快照放在 `legacy_backup/`；`restore-legacy <备份目录>` 可恢复旧文件。
+- 测试：`python -m unittest discover -s thingking/tests`；QQ 回归见上面的 verification 命令。
 
 ## Python 环境
 
@@ -96,7 +109,7 @@ python bines.py --console
 - `server/server_venv`：ZMQ Bus、Classification、Display、Speaking、ChatBot
 - `visual/envs/runtime_venv`：Visual
 - `hearing/envs/runtime_venv`：Hearing
-- `thingking/thinking_venv`：按需 RAG Web、Bored Detector、桌面 Thinking、QQ Thinking
+- `thingking/thinking_venv`：RAG Server、按需 RAG Web、Bored Detector、桌面 Thinking、QQ Thinking
 
 启动器不会创建虚拟环境或安装依赖。若模块日志显示解释器不存在或依赖导入失败，先检查对应环境和该模块的 requirements 文件。
 
@@ -113,7 +126,7 @@ python bines.py --console
 - `5550`：PUB/SUB 总线发布入口
 - `5551`：PUB/SUB 总线订阅出口
 - `5557`：Visual 请求响应
-- `5560`：保留的旧 RAG RPC（默认不启动）
+- `5560`：完整模式 Memory Server 请求响应
 - `5570 / 5571`：兼容旧直接启动的就绪/握手端口；统一启动器不使用
 - `9880`：GPT-SoVITS TTS HTTP 接口（由 `BINES_TTS_URL` 决定）
 

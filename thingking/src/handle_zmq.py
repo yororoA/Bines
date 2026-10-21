@@ -15,9 +15,8 @@ import logging
 import importlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from layered_memory import LayeredMemorySystem
 from thinking_model_helper import ThinkingModelHelper
-from agents import MainAgent, SummaryAgent, DynamicMemoryMaintainer
+from agents import MainAgent, DynamicMemoryMaintainer
 from skill_runner import SkillRunner, QQ_ALLOWED_ACTIONS
 from status_ws import ensure_status_stream_started
 from realtime_screen_bridge import (
@@ -86,6 +85,13 @@ from config import (
     MOMENTS_API_BASE_URL,
     TOGGLE_STATUS_TOKEN,
 )
+import persona_profile
+import prompt_builder
+from memory.channels import envelope_for_qq_log, envelope_for_turn, is_qq_source
+from memory.client import MemoryClient
+from memory.models import ROLE_OBSERVED
+from memory.settings import load_settings as load_memory_settings
+from memory.worker import wait_for_server
 # [工具迁移] relationship_state 的导入已移到 tools/memory_tool.py 中（延迟导入）
 
 # --- [修复补丁 1] 强制设置 Windows 控制台编码，防止 print 中文卡死 ---
@@ -201,9 +207,7 @@ qq_merge_coordinator = QQMergeCoordinator(
 # 初始化思考模式大模型助手
 thinking_model_helper = ThinkingModelHelper()
 
-# Legacy QQ buffer flow is retained below for reference, but no longer receives input.
-# QQ gateway + qq_thinking.py own all QQ events and shared SQLite persistence.
-
+# QQ gateway and qq_thinking.py own remote messages; desktop interrupts remain local.
 # --- 配置 ---
 # 主机与端口统一来自全局 config
 HOST = ZMQ_HOST
@@ -212,11 +216,12 @@ HOST = ZMQ_HOST
 ZMQ_PUB_TOPIC = "think"
 ZMQ_PUB_TEXT_TOPIC = "text"  # 文本直接发送到display
 
-# 分层记忆系统：收到 Classification「所有模块就绪」后再初始化，并执行上线摘要/日记等
-memory_system = None
-
 # 初始化 ZMQ 上下文
 context = zmq.Context()
+
+# 记忆统一由 Memory Server 持有；QQ Thinking 负责所有渠道的整合任务。
+MEMORY_SETTINGS = load_memory_settings()
+memory_client = MemoryClient(HOST, ZMQ_PORTS["RAG_SERVER_REQREP"], context)
 
 # PUB socket 由 Thinking 的监听线程持有；工作线程通过队列递交消息。
 _ZMQ_OUTBOUND_QUEUE = queue.Queue()
@@ -245,7 +250,6 @@ skill_runner = SkillRunner(
     qq_allowed_actions=QQ_ALLOWED_ACTIONS,
 )
 main_agent = MainAgent()
-summary_agent = SummaryAgent(skill_runner)
 main_agent.set_skill_instructions(skill_runner.instructions_for_source())
 register_runtime_dependencies(
     deps,
@@ -574,16 +578,25 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         global CURRENT_VISUAL_INFO
         CURRENT_VISUAL_INFO = img_descr if img_descr else "当前眼前一片漆黑，什么也看不见。"
 
-        # --- 日期处理与抱怨逻辑 (完全保留原代码逻辑) ---
         current_date_obj = datetime.datetime.now()
-        # [修改] 增加时分秒
-        current_date_str = current_date_obj.strftime("%Y/%m/%d %H:%M")
-        
-        formatted_user_input = f"[{current_date_str}]: [{user_input}]"
-        
-        time_gap_instruction = build_time_gap_instruction(memory_system, user_input, current_date_obj)
-        if not isinstance(time_gap_instruction, str):
-            time_gap_instruction = ""
+        formatted_user_input = prompt_builder.format_current_input(user_input, current_date_obj)
+
+        # 本机与 NapCat 消息统一成同一种会话信封；作用域由 Memory Server 按身份映射判定。
+        qq_ctx = (extra_data.get("qq_context") or extra_data) if (is_qq_source(source) and extra_data) else None
+        memory_text = prompt_builder.strip_qq_prefix(user_input) if qq_ctx else user_input
+        envelope = envelope_for_turn(source, extra_data, memory_text, owner_name=MEMORY_SETTINGS.owner_name).to_dict()
+        try:
+            memory_context = memory_client.build_context(envelope, query=memory_text)
+        except Exception as mem_err:
+            print(f"[Thinking] 记忆上下文获取失败，本轮仅使用人格与场景: {mem_err}", flush=True)
+            memory_context = prompt_builder.empty_context(envelope)
+        scene = prompt_builder.scene_for(memory_context.get("envelope") or envelope)
+
+        time_gap_instruction = ""
+        if scene == prompt_builder.SCENE_LOCAL:
+            time_gap_instruction = build_time_gap_instruction(
+                memory_context.get("last_user_ts"), user_input, current_date_obj
+            )
 
         # 【修复】检查用户是否明确拒绝屏幕监控
         global SCREEN_MONITOR_USER_REJECTED, SCREEN_MONITOR_REJECT_EXPIRE_TIME
@@ -604,19 +617,14 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         if recovered:
             print(f"[Screen Monitor] 拒绝状态已过期，恢复屏幕监控", flush=True)
         
-        # 获取上下文（不擅长/拒绝逻辑已移至 MainAgent.get_system_prompt，由模型按语义判断）
-        # [修改] 传递 QQ 上下文数据以拉取相关历史
-        qq_ctx = None
-        if source == "QQ" and extra_data:
-             qq_ctx = extra_data.get("qq_context") or extra_data
-        
-        context_messages = memory_system.get_full_context_messages(user_input, qq_context_data=qq_ctx)
-        
+        # 人格、场景约束（QQ 工具白名单、隐私、简洁）与作用域内记忆统一由 prompt_builder 组装。
+        context_messages = prompt_builder.build_conversation_messages(memory_context)
+
         if time_gap_instruction:
             context_messages.append({"role": "system", "content": time_gap_instruction})
         
-        # [新增] QQ 图片消息处理：分析图片并将描述注入上下文
-        if source == "QQ" and qq_ctx:
+        # QQ 图片消息处理：分析图片并将描述注入上下文
+        if qq_ctx:
             qq_image_urls = qq_ctx.get("image_urls", [])
             if qq_image_urls:
                 print(f"[Thinking] QQ 消息包含 {len(qq_image_urls)} 张图片，正在分析...", flush=True)
@@ -630,28 +638,6 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
                         print(f"[Thinking] 图片分析完成，已注入上下文", flush=True)
                 except Exception as img_err:
                     print(f"[Thinking] 图片分析失败: {img_err}", flush=True)
-            
-        # [修改] 全局回复格式要求：始终使用双空格
-        fmt_instruction = "\n【回复格式要求】请使用**双空格**（  ）作为句子分隔符（不要使用单空格），以便语音合成模块正确断句。"
-        
-        # [修改] 如果是 QQ 消息，注入简洁要求 + QQ 工具约束
-        if source == "QQ":
-            # 检查管理员权限
-            if qq_ctx and qq_ctx.get("is_admin"):
-                 context_messages.append({"role": "system", "content": "【系统提示】此消息来自管理员，请高度重视并优先响应。"})
-            
-            # QQ 技能约束：通过 SkillRunner 白名单限制为远程消息允许的动作。
-            context_messages.append({"role": "system", "content": (
-                "【QQ消息工具约束】当前消息来自QQ远程用户，你无法通过屏幕或摄像头看到对方。\n"
-                "- 当前轮只允许使用技能清单中标记的 QQ 消息、网页搜索、时间与动态动作。\n"
-                "- 禁止调用视觉、屏幕和本地桌面操作动作。\n"
-                "- 如果请求不需要技能即可回答，请直接回复。"
-            )})
-            
-            # QQ回复格式要求
-            fmt_instruction += "\n鉴于QQ聊天场景，回复必须**极度简洁**，废话少说，直击重点。"
-        
-        context_messages.append({"role": "system", "content": fmt_instruction})
 
         # 实时屏幕分析：若启用则把最新分析作为系统消息注入，与用户输入一起发给主模型
         is_realtime_screen_active = False
@@ -696,22 +682,23 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         exited_due_to_interrupt = stream_result.get("exited_due_to_interrupt", False)
 
         to_save = full_raw_response or ""
-        if not _is_only_action_or_empty(to_save):
-            if source not in ["QQ", "qq"]:
-                memory_system.add_interaction(formatted_user_input, to_save)
-            else:
-                print(f"[Thinking] QQ 消息不写入主短期记忆 (已由 QQ Buffer 管理)", flush=True)
 
         # [QQ回复] 独立于 _is_only_action_or_empty 判断，确保 QQ 消息始终被发送
         # 但如果是被打断的截断回复，则不发送（避免发送不完整的半句话）
-        handle_qq_reply_if_needed(
+        sent_qq_reply = handle_qq_reply_if_needed(
             source=source,
             extra_data=extra_data,
             to_save=to_save,
             exited_due_to_interrupt=exited_due_to_interrupt,
             send_qq_reply_func=send_qq_reply,
-            get_qq_buffer_manager_func=get_qq_buffer_manager,
         )
+
+        # 所有渠道统一写入记忆；QQ 只记录实际发出去的回复。
+        assistant_memory = sent_qq_reply if qq_ctx else ("" if _is_only_action_or_empty(to_save) else to_save)
+        try:
+            memory_client.record_turn(envelope, user_text=memory_text, assistant_text=assistant_memory)
+        except Exception as mem_err:
+            print(f"[Thinking] 写入记忆失败: {mem_err}", flush=True)
 
         origin_for_display = "" if _is_only_action_or_empty(to_save) else to_save
         zmq_send("", lang="zh", cough="end", origin=origin_for_display, enable_audio=enable_audio)
@@ -833,13 +820,20 @@ def screen_monitor_thread():
             SCREEN_MONITOR_WAKE_EVENT.wait(timeout=5)
 
 
-# Global QQ Buffer Manager
-_qq_buffer_manager_instance = None
+def _record_qq_background_message(data, executor):
+    """未@机器人的群消息：作为旁听消息写入该群会话（只在该群作用域内可见）。"""
+    envelope = envelope_for_qq_log(data).to_dict()
+    content = envelope.get("content") or ""
 
-def get_qq_buffer_manager():
-    raise RuntimeError("旧 QQ Buffer 已停用；请使用共享 MemoryStore")
-    # 旧入口保留说明：原实现创建 RAGServerClient + QQBufferManager，
-    # 将 QQ 消息汇入桌面上下文；现在由独立网关先写 MemoryStore。
+    def _record():
+        try:
+            memory_client.record_message(envelope, ROLE_OBSERVED, content)
+        except Exception as e:
+            print(f"[Thinking] 记录群聊旁听消息失败: {e}", flush=True)
+
+    if content.strip():
+        executor.submit(_record)
+
 
 def start_zmq_listener():
     global INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT, _EXECUTOR_FOR_INTERRUPT
@@ -851,8 +845,6 @@ def start_zmq_listener():
         monitor_thread = threading.Thread(target=screen_monitor_thread, daemon=True)
         monitor_thread.start()
         logger.info(f"[Screen Monitor] 屏幕监控已启用，监控间隔: {SCREEN_MONITOR_INTERVAL}秒")
-    
-    # RAG GC 与日记归纳由 LayeredMemorySystem.start_maintenance_services() 在初始化时启动，此处不再重复
     
     # 【新增】系统启动完成后，向主模型发送用户上线的系统提示
     def send_user_online_notification():
@@ -991,34 +983,8 @@ def start_zmq_listener():
                     data = json.loads(msg_bytes.decode('utf-8'))
                     
                     if topic_str == "qq_log":
-                        # 处理 QQ 背景消息记录 (存储到 RAG Buffer)
                         try:
-                            content = data.get("content", "")
-                            meta = {
-                                "timestamp": data.get("timestamp"),
-                                "sender": data.get("sender"),
-                                "group_id": data.get("group_id"),
-                                "user_id": data.get("user_id"),
-                                "is_group": data.get("is_group", False)
-                            }
-                            
-                            # 获取或初始化 Buffer Manager
-                            buf_mgr = get_qq_buffer_manager()
-                            
-                            should_process = buf_mgr.add_message(content, meta)
-                            
-                            if should_process:
-                                print(f"[Thinking] QQ Buffer full, triggering processing...", flush=True)
-                                
-                                # 在后台线程执行总结和入库，避免阻塞主循环
-                                def _run_buffer_process():
-                                    try:
-                                        buf_mgr.process_buffer()
-                                    except Exception as e:
-                                        print(f"[Thinking] Buffer processing failed: {e}", flush=True)
-                                        
-                                executor.submit(_run_buffer_process)
-
+                            _record_qq_background_message(data, executor)
                         except Exception as e:
                             print(f"[Thinking] Error processing qq_log: {e}", flush=True)
                         continue
@@ -1057,33 +1023,6 @@ def start_zmq_listener():
                     qq_context = data.get("qq_context", {})
 
                     if user_input:
-                        # [新增逻辑] 如果是 QQ 消息，无论是否主动交互，都存入 Buffer 以便 RAG 检索
-                        if source == "QQ":
-                            try:
-                                qq_ctx = data.get("qq_context") or {}
-                                # 构造 meta 信息
-                                meta = {
-                                    "timestamp": time.time(), # 或从 qq_ctx 获取
-                                    "sender": qq_ctx.get("sender", "User"),
-                                    "group_id": qq_ctx.get("group_id"),
-                                    "user_id": qq_ctx.get("user_id"),
-                                    # 如果有 group_id 则视为群聊，否则私聊
-                                    "is_group": bool(qq_ctx.get("group_id"))
-                                }
-                                # 调用 buffer manager 存储
-                                buf_mgr = get_qq_buffer_manager()
-                                # 注意：这里只 add 不 process，避免打断对话流，让后台线程或满阈值时处理
-                                buf_mgr.add_message(user_input, meta)
-                                print(f"[Thinking] 已将主动 QQ 消息存入 Buffer (Private/Group)", flush=True)
-                            except Exception as e:
-                                print(f"[Thinking] 旁路记录 QQ 消息失败: {e}", flush=True)
-
-                        # [QQ消息处理] 如果是QQ消息，在 user_input 前附加来源信息，以便模型感知
-                        if source == "QQ":
-                            # 如果 classification server 已经构造了带 [QQ] 的 input_text，这里其实可能不需要再构造一遍
-                            # 但如果有 qq_context，我们需要保留并在 process_message 中使用它来回复
-                            pass
-
                         # Reset idle timer
                         last_interaction_time = time.time()
                         has_triggered_idle = False
@@ -1237,16 +1176,13 @@ if __name__ == "__main__":
             # 未使用 Classification 启动握手时，同样建立状态 SSE 连接
             ensure_status_stream_started(MOMENTS_API_BASE_URL, TOGGLE_STATUS_TOKEN)
         
-        # 正式启动：初始化记忆系统（触发上线摘要/日记等），注册依赖，再启动监听
-        # 在 __main__ 顶层赋值即更新模块级变量，无需 global
-        memory_system = LayeredMemorySystem()
-        deps.register_memory_system(memory_system)
-        memory_system.start_maintenance_services()  # RAG GC + 日记归纳后台线程
-        # 摘要写入 Buffer RAG 后，通过同一模型配置的本地记忆技能更新状态。
-        memory_maintainer = DynamicMemoryMaintainer(skill_runner)
-        memory_system.set_dynamic_memory_updater(memory_maintainer)
-        
-        print("[Thinking] ✓ Shared memory initialized", flush=True)
+        # 正式启动：确认 Memory Server 可用，注册依赖，再启动监听。
+        if not wait_for_server(memory_client, timeout_seconds=120):
+            print("[Thinking] ⚠ Memory Server 暂不可用：对话可继续，但记忆读写会失败直到其恢复", flush=True)
+        deps.register_memory_client(memory_client)
+        # The QQ Thinking worker consolidates all channels in both runtime profiles.
+
+        print("[Thinking] ✓ Memory client registered; QQ Thinking owns consolidation", flush=True)
         print("[Thinking] ✓ Tools registered successfully (from tools package)", flush=True)
         print("[Thinking] ✓ PUB/SUB sockets connected to local bus", flush=True)
         print("[Thinking] Starting ZMQ listener...", flush=True)

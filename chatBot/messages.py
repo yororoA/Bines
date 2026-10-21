@@ -101,6 +101,8 @@ class Identity:
 
     @property
     def conversation(self):
+        if self.local:
+            return "local"
         return f"qq:{self.account}:{'g:'+self.group if self.group else 'p'}:u:{self.user}"
 
     @property

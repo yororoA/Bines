@@ -10,6 +10,7 @@ THINKING_STARTUP_DEPENDENCIES = frozenset({
     "Speaking",
     "Visual",
     "Hearing",
+    "RAG Server",
 })
 
 
@@ -137,16 +138,15 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
     ]
     if profile == "chatbot":
         rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking"}]
-    else:
-        # SQLite recall is embedded; legacy RPC and the memory UI are optional.
-        rows = [row for row in rows if row["name"] != "RAG Server"]
     dependencies = {
         "Classification": ["ZMQ Bus"],
         "Display": ["ZMQ Bus"],
         "Speaking": ["ZMQ Bus"] + (["GPT-SoVITS"] if tts_service else []),
         "Visual": ["ZMQ Bus"],
         "Hearing": ["ZMQ Bus"],
-        "Thinking": ["Classification", "Display", "Speaking", "Visual", "Hearing"],
+        "Thinking": ["Classification", "Display", "Speaking", "Visual", "Hearing", "RAG Server"],
+        "ChatBot": ["RAG Server"] if profile == "full" else [],
+        "RAG Web": ["RAG Server"],
         "Bored Detector": ["Thinking"],
         "QQ Thinking": ["ChatBot"],
         "Realtime Screen": ["Thinking"],
@@ -162,7 +162,7 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
             ).get("enabled", False))
         row["optional"] = name in {"RAG Web", "Bored Detector", "Realtime Screen"}
         row["readiness"] = "http" if name in {"RAG Web", "GPT-SoVITS"} else "marker"
-        row["ready_timeout"] = 600 if name in {"Visual", "Hearing"} else 120
+        row["ready_timeout"] = 600 if name in {"Visual", "Hearing", "RAG Server"} else 120
         if name == "RAG Web":
             row["ready_url"] = f"http://127.0.0.1:{HTTP_PORTS['RAG_MEMORY']}/"
         if name == "GPT-SoVITS":

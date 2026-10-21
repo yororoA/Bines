@@ -5,15 +5,38 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from chatBot.config import DATA_DIR, OWNER_QQ_IDS
 from chatBot.messages import Identity, readable
 
 
+def prepare_gateway_database(data_dir):
+    """Move the former NapCat database before the new Memory Server opens memory.db."""
+    directory = Path(data_dir)
+    legacy, target = directory / "memory.db", directory / "gateway.db"
+    if not legacy.exists():
+        return target
+    with sqlite3.connect(str(legacy), timeout=15) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+        if "conversation" not in columns or "external_id" not in columns:
+            return target  # This is already a MemoryRepository database.
+        if target.exists():
+            raise RuntimeError("旧 memory.db 和 gateway.db 同时存在，请先合并旧网关数据")
+        checkpoint = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint and checkpoint[0]:
+            raise RuntimeError("旧 QQ 数据库仍在使用，请停止原服务后再启动")
+    legacy.rename(target)
+    for suffix in ("-wal", "-shm"):
+        source = Path(str(legacy) + suffix)
+        if source.exists():
+            source.rename(Path(str(target) + suffix))
+    return target
+
+
 class MemoryStore:
     def __init__(self, path=None, owners=None):
-        self.path = path or DATA_DIR / "memory.db"
+        self.path = path or prepare_gateway_database(DATA_DIR)
         self.owners = OWNER_QQ_IDS if owners is None else frozenset(map(str, owners))
-        from pathlib import Path
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.executescript("""
@@ -49,6 +72,9 @@ class MemoryStore:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(events)")}
             if "batch" not in columns:
                 db.execute("ALTER TABLE events ADD COLUMN batch TEXT")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
+            if "memory_synced" not in columns:
+                db.execute("ALTER TABLE messages ADD COLUMN memory_synced INTEGER DEFAULT 0")
 
     @contextmanager
     def connection(self):
@@ -96,7 +122,7 @@ class MemoryStore:
                 group = str(event.get("group_id") or "")
                 user = str(event.get("user_id") or "")
                 external = f"{identity.account}:{group or 'p:'+user}:{event.get('message_id')}"
-                db.execute("UPDATE messages SET recalled=1,content='[消息已撤回]',raw=NULL WHERE external_id=?", (external,))
+                db.execute("UPDATE messages SET recalled=1,content='[消息已撤回]',raw=NULL,memory_synced=0 WHERE external_id=?", (external,))
         return True
 
     def claim(self, worker, debounce=1.5, max_wait=5, limit=12, lease=600):

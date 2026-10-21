@@ -8,8 +8,9 @@ from chatBot.messages import LOCAL_IDENTITY
 
 class GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
-    def __init__(self, service, address=None, token=None):
+    def __init__(self, service, address=None, token=None, memory_hub=None):
         self.service = service
+        self.memory_hub = memory_hub
         self.token = token or gateway_token()
         super().__init__(address or (GATEWAY_HOST, GATEWAY_PORT), GatewayHandler)
 
@@ -37,6 +38,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             service = self.server.service
             if self.path == "/health":
                 result = {"connected": service.client.is_connected}
+            elif self.path == "/memory":
+                if self.server.memory_hub is None:
+                    raise RuntimeError("Memory hub unavailable")
+                result = self.server.memory_hub.call(identity, data["method"], data.get("params", {}))
             elif self.path == "/discover":
                 result = service.catalog.discover(identity, data.get("query", ""), data.get("action"))
             elif self.path == "/catalog":
@@ -74,6 +79,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.respond(403, {"error": str(exc)})
         except (ValueError, TypeError, KeyError) as exc:
             self.respond(400, {"error": str(exc)})
+        except RuntimeError as exc:
+            self.respond(409 if "StateConflict" in str(exc) else 503, {"error": str(exc)})
         except Exception:
             self.respond(503, {"error": "NapCat 能力入口暂不可用"})
 
