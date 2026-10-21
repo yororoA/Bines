@@ -126,14 +126,34 @@ class Installer:
         self.options = options
         self.root = Path(root)
         self.selected = selected_environments(options.profile, options.only)
-        self.log_dir = Path(tempfile.mkdtemp(prefix="bines-install-")) if not options.dry_run else None
+        self.cache_root = (Path(options.cache_dir).expanduser().resolve()
+                           if getattr(options, "cache_dir", None)
+                           else self.root / ".tools" / "cache")
+        if not options.dry_run:
+            self.cache_root.mkdir(parents=True, exist_ok=True)
+            logs = self.cache_root / "logs"
+            logs.mkdir(parents=True, exist_ok=True)
+            self.log_dir = Path(tempfile.mkdtemp(prefix="install-", dir=logs))
+        else:
+            self.log_dir = None
         self.results = {}
         self.docker_install_error = None
         self.command_number = 0
         self.env = clean_environment()
         self.env["UV_PYTHON_INSTALL_DIR"] = str(self.root / ".tools" / "python")
-        if self.log_dir:
-            self.env["UV_CACHE_DIR"] = str(self.log_dir / "uv-cache")
+        # Keep pip/uv caches, build temp files and model downloads out of the system
+        # drive: Windows users would otherwise get several GB in %LOCALAPPDATA%.
+        if not options.dry_run:
+            for directory in ("pip", "uv", "hf", "tmp"):
+                (self.cache_root / directory).mkdir(parents=True, exist_ok=True)
+        self.env.update(
+            PIP_CACHE_DIR=str(self.cache_root / "pip"),
+            UV_CACHE_DIR=str(self.cache_root / "uv"),
+            HF_HOME=str(self.cache_root / "hf"),
+            TMPDIR=str(self.cache_root / "tmp"),
+            TEMP=str(self.cache_root / "tmp"),
+            TMP=str(self.cache_root / "tmp"),
+        )
         self.device = self.select_device(options.device)
         self.python = None
         self.docker_build_error = None
@@ -385,6 +405,8 @@ class Installer:
             winget = shutil.which("winget")
             if not winget:
                 raise InstallError("Windows 自动安装 Docker Desktop 需要 winget")
+            print("  Docker Desktop 安装到 C:\\Program Files\\Docker，镜像数据也在 C 盘；"
+                  "不想占用 C 盘可加 --skip-docker，改用已有的 Docker 或外部 NapCat。", flush=True)
             self.run(
                 [winget, "install", "--id", "Docker.DockerDesktop", "--exact", "--silent",
                  "--accept-source-agreements", "--accept-package-agreements"],
@@ -614,6 +636,7 @@ class Installer:
                 print(f"  {name:10} → {ENVIRONMENTS[name]} · requirements/{name}.txt")
             if not self.options.skip_docker:
                 print("  docker     → 缺失时自动安装 Docker Desktop（首次需确认协议）")
+            print(f"  cache      → {self.cache_root}")
             print("仅预览；未下载或修改文件。Python 使用 64 位 3.11/3.12。")
             return 0
         print(f"详细日志：{self.log_dir}", flush=True)
@@ -672,6 +695,11 @@ def main(argv=None):
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="默认跨平台 CPU；cuda 需要 NVIDIA CUDA 12.8 兼容驱动")
     parser.add_argument("--system", action="store_true", help="额外通过已有 brew/apt/winget 安装系统音视频依赖")
     parser.add_argument("--skip-docker", action="store_true", help="不自动安装 Docker Desktop")
+    parser.add_argument(
+        "--cache-dir",
+        default=os.environ.get("BINES_CACHE_DIR"),
+        help="pip/uv 缓存、安装日志和临时文件目录；默认项目内 .tools/cache，避免占用 C 盘",
+    )
     parser.add_argument("--docker-download-timeout", type=int, default=1800,
                         help="Docker Desktop 下载最长等待秒数，默认 1800")
     parser.add_argument(

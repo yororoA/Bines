@@ -39,6 +39,9 @@ python install.py --system
 # 不安装 Docker Desktop（使用外部 NapCat 或稍后自行安装）
 python install.py --skip-docker
 
+# 缓存和安装日志目录；默认项目内 .tools/cache，不写系统盘
+python install.py --cache-dir D:\BinesCache
+
 # 完整安装时同时构建 Docker thinking 镜像（体积较大，供 full 模式使用）
 python install.py --docker-full
 
@@ -59,13 +62,15 @@ python install.py --profile chatbot --check
 | hearing | `hearing/envs/runtime_venv` | FunASR、PyAudio、声纹、Torch |
 | singing | `singing/singing_venv` | 人声分离、去混响、混音 |
 
-统一使用 `install.py`；macOS 和 Windows 双击入口也调用它。清单集中在 `requirements/`，环境路径集中在 `runtime_environments.py`，安装器和启动器共同使用。旧 UTF-16 requirements/venv 快照保留备查，不作为新安装源。完整模式的 Memory Server 安装 Chroma、LangChain HuggingFace 和嵌入模型依赖；纯 QQ 模式在网关中使用 SQLite 与词面检索，只安装 launcher，同时支持新版人格、摘要、长期事实和日记。旧未启用的手势识别、物体检测和 Selenium 浏览器实现不在默认安装范围内。
+统一使用 `install.py`；macOS 和 Windows 双击入口也调用它。清单集中在 `requirements/`，环境路径集中在 `runtime_environments.py`，安装器和启动器共同使用。旧 UTF-16 requirements/venv 快照保留备查，不作为新安装源。Memory Server 由 thinking 环境安装 Chroma、LangChain HuggingFace 和嵌入模型依赖；完整模式与纯 QQ 模式都会启动它并提供向量 RAG，纯 QQ 只额外安装 launcher，同时支持新版人格、摘要、长期事实和日记。旧未启用的手势识别、物体检测和 Selenium 浏览器实现不在默认安装范围内。
+
+Windows 上 pip/uv 默认把数 GB 缓存写到 `%LOCALAPPDATA%` 和 `%TEMP%`。安装器现在默认把 pip 缓存、uv 缓存、构建临时文件和 HuggingFace 模型都放在项目目录 `.tools/cache`，也可用 `--cache-dir` 或环境变量 `BINES_CACHE_DIR` 指到其他盘。之前版本留下的 `%LOCALAPPDATA%\pip\Cache`、`%LOCALAPPDATA%\uv\cache` 和 `%TEMP%\bines-install-*` 可以手动删除。Docker Desktop 本身由 winget 安装到 `C:\Program Files\Docker`，镜像与 WSL 虚拟磁盘也默认在 C 盘；不想占用 C 盘时可用 `--skip-docker`，改用已有 Docker 或外部 NapCat。
 
 ## 系统依赖
 
 完整环境需要 Python wheel 之外的系统库。默认只安装 Python 依赖，系统缺失项会单独列出；`--system` 会使用已安装的 Homebrew、apt 或 winget，安装器不自动安装这些包管理器。
 
-Docker Desktop 单独处理：macOS 和 Windows 缺少 Docker 时默认自动安装。macOS 从 Docker 官方地址下载约 600 MB 的对应架构 DMG，校验应用签名后弹出一次系统管理员授权，安装器不会代替用户接受 Docker 协议；Docker Desktop 随后自动打开，首次需在其窗口阅读并接受协议。Windows 通过 winget 安装。自动安装失败不会中断 Python 依赖，可重新运行续传，或使用 `--skip-docker`。Linux 不自动修改系统软件仓库。
+Docker Desktop 单独处理：macOS 和 Windows 缺少 Docker 时默认自动安装。macOS 从 Docker 官方地址下载约 600 MB 的对应架构 DMG，校验应用签名后弹出一次系统管理员授权，安装器不会代替用户接受 Docker 协议；Docker Desktop 随后自动打开，首次需在其窗口阅读并接受协议。Windows 通过 winget 安装到 `C:\Program Files\Docker`，镜像与 WSL 磁盘也在 C 盘，介意时加 `--skip-docker` 使用已有 Docker 或外部 NapCat。自动安装失败不会中断 Python 依赖，可重新运行续传，或使用 `--skip-docker`。Linux 不自动修改系统软件仓库。
 
 - macOS：先安装 Xcode Command Line Tools（`xcode-select --install`），并通过 Homebrew 准备 `ffmpeg portaudio pkg-config tesseract tesseract-lang cmake libsamplerate`。也可使用 `--system` 安装这些 Homebrew 包。
 - Debian/Ubuntu：准备 `build-essential pkg-config cmake portaudio19-dev libsamplerate0-dev libsndfile1 ffmpeg tesseract-ocr tesseract-ocr-chi-sim libgl1 libxcb-cursor0`。`--system` 在交互终端使用 sudo，仅系统包安装提权，Python 环境仍由当前用户创建。
