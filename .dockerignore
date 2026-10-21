@@ -1,0 +1,15 @@
+**/*_venv/
+**/envs/
+.venv/
+.tools/
+**/__pycache__/
+*.pyc
+thingking/memory_data/
+deploy/napcat/data/
+deploy/napcat/.env
+.env
+.git/
+node_modules/
+static/
+*.zip
+*.dmg

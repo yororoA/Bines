@@ -13,7 +13,7 @@ ENVIRONMENTS = {
     "singing": "singing/singing_venv",
 }
 SERVICE_ENVIRONMENTS = {
-    "ChatBot": "launcher", "QQ Thinking": "launcher",
+    "ChatBot": "launcher", "QQ Thinking": "launcher", "Memory Worker": "launcher",
     "ZMQ Bus": "server", "Classification": "server", "Display": "server", "Speaking": "server",
     "Thinking": "thinking", "Bored Detector": "thinking", "RAG Server": "thinking",
     "RAG Web": "thinking", "Realtime Screen": "thinking",

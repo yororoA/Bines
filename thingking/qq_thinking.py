@@ -17,7 +17,6 @@ from tools.context import ToolContext, tool_context
 from tools import TOOLS_REGISTRY
 from skill_runner import SkillRunner, QQ_ALLOWED_ACTIONS
 from chatBot.memory_hub import GatewayMemoryClient, identity_envelope
-from memory.worker import MemoryWorker
 import persona_profile
 import prompt_builder
 
@@ -34,7 +33,6 @@ class QQThinking:
         self.client = client or GatewayClient()
         self.model_factory = model_factory
         self.memory = memory_client or GatewayMemoryClient(self.client)
-        self.memory_worker = None
         self._model_ready = set()
         self._model_lock = threading.Lock()
         self.stop = threading.Event()
@@ -257,19 +255,7 @@ class QQThinking:
             raise RuntimeError("QQ 记忆网关未就绪")
         from tools.dependencies import deps
         deps.register_memory_client(self.memory)
-        from thinking_model_helper import ThinkingModelHelper
-        from agents import DynamicMemoryMaintainer
-        maintenance_model = self.model_factory() if self.model_factory else ThinkingModelHelper()
-        maintainer = DynamicMemoryMaintainer(self.runner, self.memory)
-        self.memory_worker = MemoryWorker(
-            self.memory,
-            complete_text=lambda messages: maintenance_model.complete_text(
-                messages, temperature=0.3, max_tokens=1500,
-            ),
-            diary_system_prompt=persona_profile.diary_system_prompt,
-            on_owner_summary=maintainer.update_from_summary,
-        )
-        self.memory_worker.start()
+        # Summaries, facts and diaries are owned by the standalone Memory Worker.
         threads = [threading.Thread(target=self.worker, name=f"qq-thinking-{index}") for index in range(WORKERS)]
         for thread in threads:
             thread.start()
@@ -281,7 +267,6 @@ class QQThinking:
             self.stop.set()
         finally:
             self.stop.set()
-            self.memory_worker.stop()
             for thread in threads:
                 thread.join(timeout=5)
 

@@ -135,6 +135,10 @@ class MemoryWorker:
         self._thread = threading.Thread(target=self._loop, name="MemoryWorker", daemon=True)
         self._thread.start()
 
+    @property
+    def alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
     def stop(self) -> None:
         self._stop.set()
 

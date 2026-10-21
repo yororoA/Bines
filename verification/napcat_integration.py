@@ -289,8 +289,9 @@ class Integration(unittest.TestCase):
 import sys
 from process_registry import get_processes
 from tools import TOOLS_REGISTRY
-assert [p['name'] for p in get_processes(profile='chatbot')] == ['ChatBot','QQ Thinking']
+assert [p['name'] for p in get_processes(profile='chatbot')] == ['ChatBot','QQ Thinking','Memory Worker']
 assert 'Thinking' in [p['name'] for p in get_processes(profile='full')]
+assert 'Memory Worker' in [p['name'] for p in get_processes(profile='full')]
 assert all(p['interpreter'] for p in get_processes(profile='full'))
 assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyautogui'])
 """
@@ -402,7 +403,9 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
         def read():
             for line in process.stdout:
                 lines.append(line)
-                if ("ChatBot · 已就绪" in "".join(lines) and "QQ Thinking · 已就绪" in "".join(lines)):
+                if ("ChatBot · 已就绪" in "".join(lines)
+                        and "QQ Thinking · 已就绪" in "".join(lines)
+                        and "Memory Worker · 已就绪" in "".join(lines)):
                     ready.set()
         thread = threading.Thread(target=read, daemon=True)
         thread.start()

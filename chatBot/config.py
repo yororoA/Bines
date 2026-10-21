@@ -15,9 +15,9 @@ OWNER_QQ_IDS = frozenset(filter(None, (
 )))
 # Legacy import compatibility. Group administrators never imply Bines ownership.
 ADMIN_QQ_LIST = list(OWNER_QQ_IDS)
-GATEWAY_HOST = "127.0.0.1"
+GATEWAY_HOST = os.environ.get("BINES_QQ_GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.environ.get("BINES_QQ_GATEWAY_PORT", "6102"))
-GATEWAY_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}"
+GATEWAY_URL = os.environ.get("BINES_QQ_GATEWAY_URL", f"http://127.0.0.1:{GATEWAY_PORT}")
 WEBUI_URL = os.environ.get("BINES_NAPCAT_WEBUI_URL", "http://127.0.0.1:6099")
 WEBUI_TOKEN = os.environ.get("BINES_NAPCAT_WEBUI_TOKEN", "")
 DEBOUNCE = float(os.environ.get("BINES_QQ_DEBOUNCE", "1.5"))

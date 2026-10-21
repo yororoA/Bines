@@ -168,12 +168,13 @@ class MemoryMergeIntegration(unittest.TestCase):
         self.assertEqual(repo.get_state("owner")["data"], {"important_thing": "新版数据"})
         repo.close()
 
-    def test_profile_dependencies_keep_two_python_processes(self):
+    def test_profile_dependencies_keep_three_python_processes(self):
         from process_registry import get_processes
         light = get_processes(profile="chatbot")
         full = {row["name"]: row for row in get_processes(profile="full")}
-        self.assertEqual([row["name"] for row in light], ["ChatBot", "QQ Thinking"])
+        self.assertEqual([row["name"] for row in light], ["ChatBot", "QQ Thinking", "Memory Worker"])
         self.assertEqual(light[0]["depends_on"], [])
+        self.assertEqual(full["Memory Worker"]["depends_on"], ["ChatBot"])
         for name in ("ChatBot", "Thinking", "RAG Web"):
             self.assertIn("RAG Server", full[name]["depends_on"])
 

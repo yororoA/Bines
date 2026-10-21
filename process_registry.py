@@ -131,6 +131,13 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
             "cwd": root,
         },
         {
+            "name": "Memory Worker",
+            "script": os.path.join(root, "thingking", "consolidation_worker.py"),
+            "interpreter": sys.executable,
+            "cwd": root,
+            "ports": [],
+        },
+        {
             "name": "Realtime Screen",
             "script": os.path.join(root, "realtime_screen_analysis_standalone.py"),
             "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
@@ -138,7 +145,7 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
         },
     ]
     if profile == "chatbot":
-        rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking"}]
+        rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking", "Memory Worker"}]
     dependencies = {
         "Classification": ["ZMQ Bus"],
         "Display": ["ZMQ Bus"],
@@ -150,6 +157,7 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
         "RAG Web": ["RAG Server"],
         "Bored Detector": ["Thinking"],
         "QQ Thinking": ["ChatBot"],
+        "Memory Worker": ["ChatBot"],
         "Realtime Screen": ["Thinking"],
     }
     for row in rows:
@@ -161,7 +169,7 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
             row["autostart"] = bool(load_realtime_screen_config(
                 ROOT_DIR / "server" / "realtime_screen_config.json"
             ).get("enabled", False))
-        row["optional"] = name in {"RAG Web", "Bored Detector", "Realtime Screen"}
+        row["optional"] = name in {"RAG Web", "Bored Detector", "Realtime Screen", "Memory Worker"}
         row["readiness"] = "http" if name in {"RAG Web", "GPT-SoVITS"} else "marker"
         row["ready_timeout"] = 600 if name in {"Visual", "Hearing", "RAG Server"} else 120
         if name == "RAG Web":

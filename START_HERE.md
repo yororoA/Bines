@@ -38,7 +38,7 @@ python install.py --profile chatbot
 python bines.py --profile chatbot
 ```
 
-此模式只运行 ChatBot 网关和 QQ Thinking 两个 Python 进程，NapCat 由 Docker 自动管理。网关内的 MemoryService 使用 SQLite 和词面检索，不下载嵌入模型，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。QQ Thinking 通过鉴权 HTTP 读写记忆并在后台生成摘要、长期事实和日记。首次登录二维码打印在 `python3 napcat.py logs` 的容器日志中；`http://127.0.0.1:6099` 是需要 WebUI token 的管理页，可用 `python3 napcat.py webui` 自动携带 token 打开。令牌位于 `deploy/napcat/.env`，已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
+此模式只运行 ChatBot 网关、QQ Thinking 和独立 Memory Worker 三个 Python 进程，NapCat 由 Docker 自动管理。网关内的 MemoryService 使用 SQLite 和词面检索，不下载嵌入模型，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。QQ Thinking 通过鉴权 HTTP 读写记忆；Memory Worker 独立负责摘要、长期事实和日记，避免占用对话进程。首次登录二维码打印在 `python3 napcat.py logs` 的容器日志中；`http://127.0.0.1:6099` 是需要 WebUI token 的管理页，可用 `python3 napcat.py webui` 自动携带 token 打开。令牌位于 `deploy/napcat/.env`，已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
 
 停止服务后，旧 JSON 和 Chroma 记忆可导入新版库；原文件保留，重复执行不会重复写入：
 
@@ -78,6 +78,7 @@ NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网
 ```mermaid
 flowchart TD
     A[统一启动器] --> Q[NapCat Docker → ChatBot 网关 → QQ Thinking]
+    Q --> W[Memory Worker：摘要 / 事实 / 日记]
     A --> C[ZMQ Bus]
     C --> D[Classification / Display / Speaking / Visual / Hearing]
     A --> M[完整模式 Memory Server]
@@ -103,7 +104,7 @@ python bines.py --console
 - 完整模式 **RAG Server** 独占 `thingking/memory_data/memory.db` 和 `index/`（可重建的 Chroma 索引），桌面客户端使用 `5560`；QQ 客户端经网关转发。纯 QQ 模式由网关独占同一新版记忆库，使用词面检索，切回完整模式后补建向量索引。
 - QQ 原始消息、事件队列和发送回执保存在独立的 `gateway.db`，提交成功后同步到记忆库。启动时自动识别旧 NapCat `memory.db` 的表结构并迁移到 `gateway.db`，不会覆盖新版库；同步可恢复且去重。
 - 本机与 `BINES_OWNER_QQ_IDS` 显式绑定的主人私聊共享 owner 记忆和状态；其他私聊按机器人账号与用户隔离，群聊按账号与群号隔离，个人状态再按发言人区分。群管理员角色不赋予主人身份。
-- 摘要、长期事实提取和每日日记由 QQ Thinking 的后台整合线程统一处理所有渠道，任务状态记在 SQLite，失败会重试。
+- 摘要、长期事实提取和每日日记由独立 Memory Worker 统一处理所有渠道，任务状态记在 SQLite，失败会重试。它通过 ChatBot 网关访问记忆，QQ Thinking 只负责对话与工具。
 - 人格只在 `thingking/persona/persona.yaml` 中维护，修改后运行 `python thingking/persona/render_doc.py` 更新 `PERSONA.md`。
 - 维护命令：`python thingking/memory_admin.py stats | verify | rebuild-index`。离线迁移、校验或重建前停止 RAG Server、ChatBot、QQ Thinking 及其他记忆客户端。迁移快照放在 `legacy_backup/`；`restore-legacy <备份目录>` 可恢复旧文件。
 - 测试：`python -m unittest discover -s thingking/tests`；QQ 回归见上面的 verification 命令。
@@ -112,7 +113,7 @@ python bines.py --console
 
 安装器与启动器共用 `runtime_environments.py` 中的环境路径；`python bines.py` 自动进入 `.venv`：
 
-- `.venv`：管理器、ChatBot、QQ Thinking（纯 QQ 安装只创建这一组）
+- `.venv`：管理器、ChatBot、QQ Thinking、Memory Worker（纯 QQ 安装只创建这一组）
 - `server/server_venv`：ZMQ Bus、Classification、Display、Speaking
 - `visual/envs/runtime_venv`：Visual
 - `hearing/envs/runtime_venv`：Hearing
