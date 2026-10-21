@@ -243,7 +243,10 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
                 return {"Credential": "credential"}
             return {"new_napcat_extension": {"description": "new feature", "payload": {"type": "object"}}}
         catalog._request = request
-        self.assertEqual(catalog.discover(LOCAL_IDENTITY)[0]["action"], "new_napcat_extension")
+        exposed = {entry["action"] for entry in catalog.discover(LOCAL_IDENTITY)}
+        self.assertIn("new_napcat_extension", exposed)
+        self.assertIn("send_group_msg", exposed)
+        self.assertTrue(catalog.discover(LOCAL_IDENTITY, action="new_napcat_extension")["runtime_supported"])
         self.assertEqual(seen[0][1]["hash"], hashlib.sha256(b"secret.napcat").hexdigest())
 
     def test_mcp_stdio_protocol(self):
@@ -322,15 +325,17 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
             "BINES_MEMORY_DIR": str(Path(self.temp.name) / "launcher"),
             "BINES_QQ_GATEWAY_PORT": "0",
             "BINES_NAPCAT_WS_URL": "ws://127.0.0.1:1",
+            "BINES_NAPCAT_DEPLOY": "external",
             "DEEPSEEK_API_KEY": "verification-only",
         })
-        process = subprocess.Popen([sys.executable, "-u", str(ROOT / "start_modules.py"), "--profile", "chatbot"],
+        process = subprocess.Popen([sys.executable, "-u", str(ROOT / "start_modules.py"),
+                                    "--profile", "chatbot", "--external-napcat"],
                                    cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         lines, ready = [], threading.Event()
         def read():
             for line in process.stdout:
                 lines.append(line)
-                if any("gateway ready" in item for item in lines) and any("QQ Thinking ready" in item for item in lines):
+                if ("ChatBot · 已就绪" in "".join(lines) and "QQ Thinking · 已就绪" in "".join(lines)):
                     ready.set()
         thread = threading.Thread(target=read, daemon=True)
         thread.start()

@@ -9,7 +9,6 @@ THINKING_STARTUP_DEPENDENCIES = frozenset({
     "Display",
     "Speaking",
     "Visual",
-    "RAG Server",
     "Hearing",
 })
 
@@ -46,6 +45,8 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
     if profile not in {"full", "chatbot"}:
         raise ValueError("BINES_PROFILE 必须为 full 或 chatbot")
     tts_service = _gpt_sovits_process()
+    if GPT_SOVITS_DIR and not tts_service and profile == "full":
+        raise ValueError("GPT_SOVITS_DIR 缺少 runtime/python.exe 或 api_v2.py")
     rows = [*([tts_service] if tts_service else []),
         {
             "name": "ZMQ Bus",
@@ -59,7 +60,8 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
             "script": os.path.join(root, "server", "classification_server.py"),
             "interpreter": os.path.join(root, "server", "server_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "server"),
-            "ports": [ZMQ_PORTS["MODULE_READY_REP"]],
+            # Managed startup uses readiness markers instead of the legacy RPC.
+            "ports": [],
         },
         {
             "name": "Display",
@@ -111,7 +113,7 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
             "script": os.path.join(root, "thingking", "src", "handle_zmq.py"),
             "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "thingking", "src"),
-            "ports": [ZMQ_PORTS["START_THINKING_REP"]],
+            "ports": [],
         },
         {
             "name": "ChatBot",
@@ -126,11 +128,49 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
             "interpreter": sys.executable,
             "cwd": root,
         },
+        {
+            "name": "Realtime Screen",
+            "script": os.path.join(root, "realtime_screen_analysis_standalone.py"),
+            "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
+            "cwd": root,
+        },
     ]
     if profile == "chatbot":
         rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking"}]
+    else:
+        # SQLite recall is embedded; legacy RPC and the memory UI are optional.
+        rows = [row for row in rows if row["name"] != "RAG Server"]
+    dependencies = {
+        "Classification": ["ZMQ Bus"],
+        "Display": ["ZMQ Bus"],
+        "Speaking": ["ZMQ Bus"] + (["GPT-SoVITS"] if tts_service else []),
+        "Visual": ["ZMQ Bus"],
+        "Hearing": ["ZMQ Bus"],
+        "Thinking": ["Classification", "Display", "Speaking", "Visual", "Hearing"],
+        "Bored Detector": ["Thinking"],
+        "QQ Thinking": ["ChatBot"],
+        "Realtime Screen": ["Thinking"],
+    }
     for row in rows:
+        name = row["name"]
+        row["depends_on"] = dependencies.get(name, [])
+        row["autostart"] = name != "RAG Web"
+        if name == "Realtime Screen":
+            from realtime_screen_config import load_realtime_screen_config
+            row["autostart"] = bool(load_realtime_screen_config(
+                ROOT_DIR / "server" / "realtime_screen_config.json"
+            ).get("enabled", False))
+        row["optional"] = name in {"RAG Web", "Bored Detector", "Realtime Screen"}
+        row["readiness"] = "http" if name in {"RAG Web", "GPT-SoVITS"} else "marker"
+        row["ready_timeout"] = 600 if name in {"Visual", "Hearing"} else 120
+        if name == "RAG Web":
+            row["ready_url"] = f"http://127.0.0.1:{HTTP_PORTS['RAG_MEMORY']}/"
+        if name == "GPT-SoVITS":
+            row["ready_url"] = TTS_HTTP_BASE_URL.rstrip("/") + "/openapi.json"
         interpreter = row["interpreter"]
+        if name == "QQ Thinking":
+            interpreter = os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe")
+            row["interpreter"] = interpreter
         if not os.path.isfile(interpreter):
             unix = str(interpreter).replace(os.path.join("Scripts", "python.exe"), os.path.join("bin", "python"))
             shared = os.path.join(root, ".venv", "Scripts" if os.name == "nt" else "bin",

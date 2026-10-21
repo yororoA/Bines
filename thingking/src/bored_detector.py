@@ -471,6 +471,8 @@ def check_bored():
 
 def main():
     """主循环：每 10 秒更新无聊值，达 100 且过冷却后经 LLM 确认触发。"""
+    from common.service_ready import mark_ready
+    mark_ready("Bored Detector")
     global next_allowed_trigger_time, last_check_time
     print("[Bored Detector] Process Started (无聊值 0-100 + mtime 缓存 + 生物钟).", flush=True)
     print(f"[Bored Detector] DeepSeek model: {MODEL}", flush=True)

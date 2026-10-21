@@ -12,7 +12,7 @@ CALL_END = "[[/SKILL_CALL]]"
 
 QQ_ALLOWED_ACTIONS = {
     "get_time", "send_qq_group_msg", "send_qq_private_msg",
-    "napcat_call", "napcat_discover", "napcat_send", "napcat_forward",
+    "napcat_call", "napcat_discover", "napcat_catalog", "napcat_send", "napcat_forward",
     "napcat_events", "update_status", "browser_search", "web_fetch",
 }
 QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | {
@@ -197,6 +197,11 @@ class SkillRunner:
             if not actions:
                 continue
             sections.append(f"### {name}: {skill['description']}\n{skill['instructions']}")
+            if name == "napcat" and "napcat_call" in enabled:
+                from chatBot.catalog import model_api_index
+                from chatBot.capabilities import SCOPED
+                from tools.context import CURRENT_CONTEXT
+                sections.append(model_api_index(CURRENT_CONTEXT.get().identity.privileged, SCOPED))
             for action in actions:
                 sections.append(f"Action `{action}` — {self._action_description(action)}")
         return (

@@ -14,12 +14,20 @@ DEPLOY = ROOT / "deploy" / "napcat"
 
 
 def write_secret(path, value):
-    with path.open("w") as stream:
-        path.chmod(0o600)
+    # The supervisor may load .env in several child startups simultaneously.
+    # Atomic replacement prevents readers from seeing a partially written file.
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
         stream.write(value)
+    try:
+        temporary.chmod(0o600)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def initialize():
+def initialize(settings_path=None):
     load_env()
     data = DEPLOY / "data"
     for folder in ("qq", "config", "plugins", "media", "media/public"):
@@ -28,7 +36,8 @@ def initialize():
     env_path = DEPLOY / ".env"
     if env_path.exists():
         values = read_env(env_path)
-    root_values = read_env(ROOT / ".env")
+    settings_path = Path(settings_path) if settings_path else ROOT / ".env"
+    root_values = read_env(settings_path)
     values.setdefault("NAPCAT_ACCOUNT", root_values.get("BINES_BOT_QQ_ID", os.environ.get("BINES_BOT_QQ_ID", "")))
     values.setdefault("NAPCAT_WS_TOKEN", root_values.get("BINES_NAPCAT_ACCESS_TOKEN") or secrets.token_urlsafe(32))
     values.setdefault("NAPCAT_WEBUI_TOKEN", root_values.get("BINES_NAPCAT_WEBUI_TOKEN") or secrets.token_urlsafe(32))
@@ -58,7 +67,7 @@ def initialize():
     webui = data / "config" / "webui.json"
     if not webui.exists():
         write_secret(webui, json.dumps({"host": "0.0.0.0", "port": 6099, "token": values["NAPCAT_WEBUI_TOKEN"]}, indent=2))
-    env = ROOT / ".env"
+    env = settings_path
     text = env.read_text() if env.exists() else ""
     additions = {
         "BINES_NAPCAT_WS_URL": f"ws://127.0.0.1:{values['NAPCAT_WS_PORT']}",

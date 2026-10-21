@@ -1,11 +1,13 @@
 ---
 name: napcat
 description: 发现并调用 NapCat 全部 OneBot 与扩展能力，包括多媒体、历史、群管理、文件、转发、账号和通知请求处理。
-actions: napcat_discover, napcat_call, napcat_operation, napcat_events, napcat_send, napcat_forward
+actions: napcat_discover, napcat_catalog, napcat_call, napcat_operation, napcat_events, napcat_send, napcat_forward
 ---
 # NapCat
 
-先用 napcat_discover(query="关键词") 搜索能力，再用 napcat_discover(action="动作名") 读取当前 NapCat 版本的 payload schema 和例子，最后 napcat_call(action="动作名", params={...})。
+本机和主人私聊的提示词包含完整官方 API 索引。先用 napcat_catalog() 查询文档数量、身份权限、NapCat 连接及运行时目录差异，再用 napcat_discover(query="关键词") 搜索能力，napcat_discover(action="动作名") 读取 payload schema、例子和响应结构，最后 napcat_call(action="动作名", params={...})。
+
+目录优先合并运行中的 WebUI schema，并保留随项目附带的 NapCatDocs 版本文档。未配置 WebUI token 或服务离线时，全部文档 API 仍可查询，不需要凭空猜测动作和字段。每个条目会返回 schema_source 和 runtime_supported；null 表示未确认，false 表示运行时未发现，不得声称已支持或已执行。新增运行时 API 通过 napcat_discover() 发现；无参数 schema 的动作会保留提示。
 
 通用入口接受运行中 NapCat 支持的所有 action，不依赖人工维护的 Python 包装方法。消息可用原生 OneBot 段数组；媒体文件使用 Docker 共享媒体目录 /bines-media 或 NapCat 支持的 URL、base64 格式。
 

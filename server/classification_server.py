@@ -254,9 +254,12 @@ def classification_loop(stop_event=None):
             traceback.print_exc()
 
 if __name__ == "__main__":
-    t_collector = threading.Thread(target=module_ready_collector, daemon=False)
-    t_collector.start()
-    print("[Classification] 模块就绪收集线程已启动，等待 Display/Speaking/Visual/RAG Server/Hearing 就绪后通知 Thinking", flush=True)
+    from common.service_ready import managed, mark_ready
+    if not managed():
+        t_collector = threading.Thread(target=module_ready_collector, daemon=False)
+        t_collector.start()
+        print("[Classification] 等待桌面模块就绪", flush=True)
     t_vis = threading.Thread(target=visual_listener, daemon=True)
     t_vis.start()
+    mark_ready("Classification")
     classification_loop()

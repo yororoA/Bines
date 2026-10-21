@@ -2,23 +2,37 @@
 
 当前运行链路使用根目录的 Python 代码。
 
+## 一个启动入口
+
+配置好根目录 `.env` 并安装相应 Python 依赖后，日常只需要：
+
+```bash
+python bines.py
+```
+
+默认运行 `.env` 中 `BINES_PROFILE` 选定的模式（未配置为 full）。完整模式自动打开管理页并启动服务；纯 QQ 使用 `python bines.py --profile chatbot`，需要管理页时加 `--web`。macOS 可双击 `start_bines.command`，Windows 可双击 `start_web_manager.bat`。
+
+启动器自动检查/启动本机 Docker NapCat、补全连接配置、调度前置依赖，并等待每个模块真实上报就绪；首次 QQ 登录仍需要 WebUI 扫码。已有 NapCat 可设置 `BINES_NAPCAT_DEPLOY=external`，或使用 `--external-napcat`。仅打开管理器、不自动启动服务使用 `--manager-only`。
+
+停止终端或按 Ctrl+C 会逆序停止本次管理的服务，并停止本次新启动的 NapCat 容器，保留数据；已经在外部运行的容器不受影响。单独在管理页启动 Thinking 会自动补启其依赖，停止前置服务会先停止依赖它的服务。状态显示“启动中 / 已就绪 / 依赖阻塞 / 失败”，失败原因和日志保留。
+
+RAG 检索已嵌入共享 SQLite，**RAG Server 不再常驻启动**；RAG Web 为按需记忆管理页面；唱歌流水线收到唱歌请求时才运行，无需独立服务。
+
 ## QQ / 纯 ChatBot
 
 NapCat 由 Docker 隔离运行。首次启动：
 
 ```bash
 python -m pip install -r requirements-chatbot.txt
-python napcat.py up
-python napcat.py webui
 ```
 
-首次需在 WebUI 扫码，令牌位于 `deploy/napcat/.env`；初始化命令会生成随机令牌与持久化目录，并把连接配置补入根 `.env`。已有配置不会被覆盖。设置 `.env` 中的 `DEEPSEEK_API_KEY` 和 `BINES_OWNER_QQ_IDS=主人QQ号`，再启动：
+设置 `.env` 中的 `DEEPSEEK_API_KEY` 和 `BINES_OWNER_QQ_IDS=主人QQ号`，再启动：
 
 ```bash
-python start_modules.py --profile chatbot
+python bines.py --profile chatbot
 ```
 
-此模式只运行 ChatBot 网关和 QQ Thinking，记忆直接使用共享 SQLite，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。Ctrl+C 会结束两个进程。完整桌面模式使用 `python start_modules.py --profile full`，Web 管理器保留原入口。
+此模式只运行 ChatBot 网关和 QQ Thinking 两个 Python 进程，NapCat 由 Docker 自动管理。记忆直接使用共享 SQLite，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。首次需在 `http://127.0.0.1:6099` WebUI 扫码，令牌位于 `deploy/napcat/.env`；已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
 
 旧主人 JSON 记忆可无损导入，原文件保留，重复执行不会重复写入：
 
@@ -30,20 +44,24 @@ python -m chatBot.migrate_memory
 
 `python napcat.py status|logs|down|update` 管理容器；`down` 保留数据。媒体宿主目录 `deploy/napcat/data/media` 在容器中为 `/bines-media`。完整能力使用 `napcat_discover` + `napcat_call`，支持所有运行中 NapCat action；`napcat_events` 查看请求原始 flag，`napcat_operation` 查询发送回执。结果不确定的写操作不自动重发。
 
+全部 API 暴露检查：本机与主人私聊的技能提示词包含 NapCatDocs 4.18.38 的 **178 个 API 索引**；`napcat_discover()` 返回完整目录，指定 `action` 返回参数和响应 schema。项目附带完整官方文档，即使缺少 WebUI token 也可以查询。`napcat_catalog()` 返回文档数量、当前身份允许数量、连接状态和运行时目录差异；`runtime_supported=null` 表示未确认，不能当作 QQ 已支持。配置 WebUI token 后自动合并运行时新增接口。普通 QQ 会话继续限制为当前会话的 14 个 API。
+
+NapCat MCP 列出 **178 个独立 API 工具及 4 个通用工具**，每个独立工具的 `params` 为该 API 的参数 schema；以点号开头的 API 自动映射为合法 MCP 工具名，原始 action 保存在工具 `_meta.napcat_action`。官方目录可使用 `python -m chatBot.update_catalog 版本号` 更新，生成来源与内容哈希 manifest。更新后重启进程使模型索引和目录缓存生效。
+
 常用消息使用 `napcat_send`：支持私聊、群聊、`reply_to` 引用回复，以及 `text`、`image`、`face`、`mface` 消息段。图文要放在同一个消息段数组中一次发送，成功返回一个 message_id；自定义图片表情使用 `image.data.sub_type=1`。多选消息使用 `napcat_forward(message_ids=[...])` 按列表顺序合并转发，成功后不会再自动补发重复文字。
 
 普通用户可发送当前会话的图片、base64 图片或 `deploy/napcat/data/media/public/` 公开素材（容器路径 `/bines-media/public/`）；只能引用和转发当前会话中未撤回的消息。本机与主人私聊可按请求跨会话发送。上述参数已对照 [NapCatDocs 4.18.38](https://github.com/NapNeko/NapCatDocs/blob/main/src/api/4.18.38/openapi.json) 和 NapCat 消息处理源码核验；接口可调用不代表每个 QQ 账号、客户端或所有 API 已完成实机验证。
 
 NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网关。其他 MCP 将 `mcp.servers.example.json` 复制为 `mcp.servers.json`，启用相应配置，再用 `mcp_discover/mcp_call` 发现和调用。只有本机与主人私聊可调用外部 MCP。Ark 现有适配继续保留。
 
-协议模拟回归（不连接真实 QQ）：`python -m unittest verification.napcat_integration -v`。当前开发机未安装 Docker、未登录 QQ，真实部署与 QQ API 尚需实机核验。
+协议模拟回归（不连接真实 QQ）：`python -m unittest verification.napcat_integration verification.napcat_api_exposure -v`。暴露检查遍历全部 178 个 API，验证模型索引、Skill 调度、网关参数传递、MCP schema 和真实 stdio 客户端。该检查不证明 QQ 业务执行成功，真实部署与 QQ API 尚需实机核验。
 
 ## 日常启动
 
-1. 需要 QQ 功能时先执行 `python napcat.py up`。语音播报用的 GPT-SoVITS：在 `.env` 设置 `GPT_SOVITS_DIR`（整合包目录，需含 `runtime\python.exe` 和 `api_v2.py`）后，管理器会把它作为 **GPT-SoVITS** 服务随“启动所有服务”一起启动，端口取自 `BINES_TTS_URL`（默认 9880），模型权重沿用整合包里的 `GPT_SoVITS/configs/tts_infer.yaml`。未设置时需自行启动。
-2. 双击根目录的 `start_web_manager.bat`，等待终端提示管理页就绪。
-3. 打开 `http://127.0.0.1:5000`，点击“启动所有服务”。
-4. 需要管理记忆库时，服务列表中的 **RAG Web** 会随全部服务启动，可访问 `http://127.0.0.1:5001`。
+1. 运行 `python bines.py`，或双击本机启动脚本；服务会自动启动。
+2. 管理页 `http://127.0.0.1:5000` 展示依赖就绪状态与失败原因，无需记忆服务启动顺序。
+3. 需要管理记忆时，在服务列表中单独启动 **RAG Web**，访问 `http://127.0.0.1:5001`。
+4. 完整模式的本机 GPT-SoVITS 可通过 `.env` 的 `GPT_SOVITS_DIR` 自动启动；它缺失时不会被伪装成已配置服务。使用远程 TTS 时配置 `BINES_TTS_URL`。
 
 停止时在管理页点击“停止所有服务”，再关闭管理器。日志和服务状态都在管理页查看。
 
@@ -53,25 +71,23 @@ NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网
 
 ```mermaid
 flowchart TD
-    A[启动 start_web_manager.bat] --> B[模块管理器 :5000]
-    B --> C[ZMQ Bus :5550 / :5551]
-    C --> D[Classification 就绪协调]
-    D --> E[Display / Speaking / Visual / RAG Server / RAG Web / Hearing]
-    E --> F[Classification 收齐 5 个就绪消息]
-    F --> G[Bored Detector]
-    G --> H[Thinking 完成初始化并开始监听]
-    H --> I[ChatBot 网关 + QQ Thinking]
+    A[统一启动器] --> Q[NapCat Docker → ChatBot 网关 → QQ Thinking]
+    A --> C[ZMQ Bus]
+    C --> D[Classification / Display / Speaking / Visual / Hearing]
+    D --> T[桌面 Thinking]
+    T --> B[Bored Detector]
+    A -.按需.-> R[RAG Web 记忆管理]
 ```
 
-Thinking 会等 Display、Speaking、Visual、RAG Server 和 Hearing 上报就绪后才初始化记忆服务并正式监听。Hearing 首次运行可能下载 ASR 和标点模型；模型加载时间取决于网络与机器性能，等待期间日志不一定立即显示“监听麦克风”。
+依赖由 `process_registry.py` 定义，执行与就绪检查由 `service_supervisor.py` 统一负责。模块标记只对本次启动 token 有效，避免把旧状态当成就绪。QQ 链路独立启动，不等待 Visual/Hearing 模型。管理方式不再使用 Classification 的一次性启动消息，Thinking 重启不会卡在旧握手上。
 
 备用控制台模式：
 
 ```powershell
-python start_modules.py --console
+python bines.py --console
 ```
 
-控制台模式会为模块分别打开窗口；关闭启动器不会停止这些模块，需要逐个关闭服务窗口。
+控制台与 Web 使用相同调度；Ctrl+C 会清理子进程。普通服务等待就绪 120 秒，Visual/Hearing 600 秒，可在 `.env` 用 `BINES_STARTUP_TIMEOUT` 覆盖。
 
 ## Python 环境
 
@@ -80,7 +96,7 @@ python start_modules.py --console
 - `server/server_venv`：ZMQ Bus、Classification、Display、Speaking、ChatBot
 - `visual/envs/runtime_venv`：Visual
 - `hearing/envs/runtime_venv`：Hearing
-- `thingking/thinking_venv`：RAG Server、RAG Web、Bored Detector、Thinking
+- `thingking/thinking_venv`：按需 RAG Web、Bored Detector、桌面 Thinking、QQ Thinking
 
 启动器不会创建虚拟环境或安装依赖。若模块日志显示解释器不存在或依赖导入失败，先检查对应环境和该模块的 requirements 文件。
 
@@ -97,9 +113,8 @@ python start_modules.py --console
 - `5550`：PUB/SUB 总线发布入口
 - `5551`：PUB/SUB 总线订阅出口
 - `5557`：Visual 请求响应
-- `5560`：RAG Server 请求响应
-- `5570`：模块就绪通知
-- `5571`：Classification 到 Thinking 的启动握手
+- `5560`：保留的旧 RAG RPC（默认不启动）
+- `5570 / 5571`：兼容旧直接启动的就绪/握手端口；统一启动器不使用
 - `9880`：GPT-SoVITS TTS HTTP 接口（由 `BINES_TTS_URL` 决定）
 
 GPT-SoVITS 是外部服务；NapCat 由 `napcat.py` 管理 Docker 生命周期。NapCat 使用 `BINES_NAPCAT_WS_URL` 配置 WebSocket 地址，鉴权令牌从 `BINES_NAPCAT_ACCESS_TOKEN` 读取。网关默认 `6102`、WebUI 默认 `6099`。

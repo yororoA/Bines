@@ -29,6 +29,8 @@ class QQThinking:
         self.store = store or MemoryStore()
         self.client = client or GatewayClient()
         self.model_factory = model_factory
+        self._model_ready = set()
+        self._model_lock = threading.Lock()
         self.stop = threading.Event()
         self.runner = SkillRunner(TOOLS_REGISTRY, skills_dir=ROOT / "skills",
                                   enabled_actions_path=ROOT / "server" / "skill_actions.json",
@@ -199,6 +201,11 @@ class QQThinking:
         else:
             from thinking_model_helper import ThinkingModelHelper
             model = ThinkingModelHelper()
+        with self._model_lock:
+            self._model_ready.add(worker)
+            if len(self._model_ready) == WORKERS:
+                from common.service_ready import mark_ready
+                mark_ready("QQ Thinking", {"workers": WORKERS})
         while not self.stop.is_set():
             rows = self.store.claim(worker, DEBOUNCE, MAX_WAIT)
             if not rows:

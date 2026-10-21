@@ -12,7 +12,9 @@ async def main():
     from mcp.server.stdio import stdio_server
     from mcp.types import Tool, TextContent, ListToolsResult, CallToolResult
     from chatBot.gateway_client import GatewayClient
+    from chatBot.catalog import action_tool_specs, reference_catalog
     client = GatewayClient()
+    action_names = {}
 
     async def list_tools(ctx, params):
         base = [
@@ -26,18 +28,19 @@ async def main():
             Tool(name="napcat_operation", description="Inspect a write receipt; never replay uncertain writes",
                  inputSchema={"type": "object", "properties": {"operation_id": {"type": "string"}},
                               "required": ["operation_id"]}),
+            Tool(name="napcat_catalog", description="Report complete API coverage, permissions and runtime support",
+                 inputSchema={"type": "object", "properties": {}}),
         ]
         # Runtime actions also appear as individually typed MCP tools.
         try:
             catalog = await asyncio.to_thread(client.request, "/schemas", {})
-            if isinstance(catalog, dict) and not catalog.get("status"):
-                base.extend(Tool(name="napcat__"+action, description=entry.get("description", action),
-                                 inputSchema={"type": "object", "properties": {
-                                     "params": entry.get("payload") or {"type": "object"},
-                                     "operation_id": {"type": "string"}},
-                                     "required": ["params"]}) for action, entry in catalog.items())
+            if not isinstance(catalog, dict) or not catalog or any(not isinstance(entry, dict) for entry in catalog.values()):
+                raise ValueError("Invalid gateway catalog")
         except Exception:
-            pass
+            catalog = reference_catalog()
+        for specification in action_tool_specs(catalog):
+            action_names[specification["name"]] = specification["_meta"]["napcat_action"]
+            base.append(Tool(**specification))
         return ListToolsResult(tools=base)
 
     async def call_tool(ctx, params):
@@ -47,13 +50,21 @@ async def main():
                 result = await asyncio.to_thread(client.discover, **arguments)
             elif name == "napcat_operation":
                 result = await asyncio.to_thread(client.request, "/operation", arguments)
+            elif name == "napcat_catalog":
+                result = await asyncio.to_thread(client.request, "/catalog", {})
             elif name == "napcat_call":
                 from chatBot.capabilities import is_read
                 if not is_read(arguments["action"]) and not arguments.get("operation_id"):
                     raise ValueError("写操作必须提供稳定 operation_id")
                 result = await asyncio.to_thread(client.raw_api, **arguments)
             elif name.startswith("napcat__"):
-                action = name.removeprefix("napcat__")
+                if name not in action_names:
+                    # Allow direct tool calls before tools/list without decoding arbitrary names.
+                    for specification in action_tool_specs(reference_catalog()):
+                        action_names[specification["name"]] = specification["_meta"]["napcat_action"]
+                if name not in action_names:
+                    raise ValueError("Unknown NapCat tool; refresh tools/list")
+                action = action_names[name]
                 from chatBot.capabilities import is_read
                 if not is_read(action) and not arguments.get("operation_id"):
                     raise ValueError("写操作必须提供稳定 operation_id")

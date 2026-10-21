@@ -58,7 +58,8 @@ MCP 与文本 Skill 使用同一网关和权限判定，不分别维护功能白
 
 ## 实现与运维说明
 
-- `python napcat.py up` 初始化随机令牌并启动 Docker；`python start_modules.py --profile chatbot` 仅启动网关与 QQ Thinking。完整模式新增同一 QQ Thinking，不再经 Classification 转发 QQ。
+- 统一入口 `python bines.py --profile chatbot` 自动管理本机 Docker NapCat 并启动网关与 QQ Thinking；完整模式同时启动独立桌面链路。CLI/Web 共用依赖调度和真实就绪检查，不再经 Classification 一次性握手启动 Thinking。
+- RAG 检索嵌入共享 SQLite，RAG Server 默认不启动，RAG Web 按需启动；唱歌流水线按请求执行。记忆规则、窗口和当前限制见 [ChatBot 记忆说明](CHATBOT_MEMORY.md)。
 - SQLite 默认 `thingking/memory_data/memory.db`，通过 `BINES_MEMORY_DIR` 覆盖。记忆全文持久保留；近期上下文和较旧记忆检索均强制当前 scope。检索为轻量词面匹配，不声称向量语义检索。原先引用但缺失的 RAG 模块由本地 SQLite 适配恢复。
 - 群公开消息按群共享，个人状态按账号 / 群 / 用户隔离。主人权限仅在本机与显式绑定主人私聊开放，群内主人也遵守群公开范围。
 - 旧 JSON 用 `python -m chatBot.migrate_memory` 幂等导入主人 scope。原文件保留；旧 QQ buffer 缺少可靠账号/身份信息，不自动混入主人记忆。
@@ -85,3 +86,14 @@ MCP 与文本 Skill 使用同一网关和权限判定，不分别维护功能白
 普通 QQ 用户的媒体仅允许当前会话真实 image 资源、内联 base64、公开素材目录；不把任意本机文件路径开放给远程聊天。主人私聊/本机仍可使用 NapCat 原生媒体来源。一次图文发送不等同于保证所有 QQ 客户端使用完全相同排版，也不能指定 QQ 服务端时间戳。
 
 新增 6 项消息集成验证，与此前 15 项一起通过。此处是官方定义核验与本地协议模拟结果，未声称 178 个 API 都在真实 QQ 上验证成功。
+
+## 全 API 暴露核验
+
+2026-10-21 检查发现此前仍有暴露缺口：虽然 `napcat_call` 接受任意 action，但缺少 WebUI token 时目录不可发现，MCP 静默退化为通用工具；普通 QQ 来源另外限制为 14 个当前会话 API。此次补齐文档暴露，不扩大其他用户的账号权限。
+
+- `chatBot/api/napcat-4.18.38.openapi.json` 为官方原始文档的紧凑 JSON，178 个 API 路径完整保留；manifest 记录来源 URL、版本、源文件和项目文件哈希。`update_catalog.py` 提供可重复更新。
+- 本机/主人私聊模型提示词含 178/178 个名称与描述；完整参数按需经 `napcat_discover(action=...)` 返回。WebUI 未连接时目录仍存在；运行时返回的新接口合并进入目录。
+- 每个条目含 `schema_source`、`documented_version`、`runtime_supported`。`napcat_catalog` 显示文档/目录/身份可用数量，运行时缺失和新增动作。文档目录不冒充当前 QQ 已支持。
+- MCP 列出 178 个独立工具和 4 个通用工具；将 TypeBox/OpenAPI schema 引用转换为本地 `$defs`，以点号开头的接口转为合法工具名称，保留原始 action 映射。
+- `verification/napcat_api_exposure.py` 逐项验证全部官方 API 出现在 Bines 提示词、可查询参数并通过 Skill → 网关 → 模拟 NapCat。真实 stdio MCP 客户端验证完整列表及特殊名称调用，另外验证运行时新增、目录差异、认证失败后备和远程权限保持。
+- 全部暴露验证不发送真实 QQ 消息，不证明 178 个业务接口已实机成功；当前连接与版本支持通过 `napcat_catalog` 查询。

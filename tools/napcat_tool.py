@@ -43,8 +43,13 @@ def napcat_forward(message_ids: list, group_id: str = "", user_id: str = "",
 
 
 def napcat_discover(query: str = "", action: str | None = None):
-    """搜索 NapCat 能力；指定 action 返回参数 schema、示例与返回结构。"""
+    """搜索全部 NapCat 能力；返回参数 schema、来源及运行时支持确认状态。"""
     return GatewayClient().discover(query, action)
+
+
+def napcat_catalog():
+    """查询官方 API 数量、本身份可用数量、运行时版本目录差异与连接状态。"""
+    return GatewayClient().request("/catalog", {})
 
 
 def napcat_call(action: str, params: dict, operation_id: str | None = None, timeout: float = 30):

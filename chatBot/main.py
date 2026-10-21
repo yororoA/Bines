@@ -19,6 +19,8 @@ def main():
     client.connect()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    from common.service_ready import mark_ready
+    mark_ready("ChatBot", {"port": server.server_port})
     logging.info("ChatBot gateway ready · port %s", server.server_port)
     try:
         threading.Event().wait()

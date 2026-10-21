@@ -451,6 +451,8 @@ def run_loop():
                 PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
             except Exception:
                 pass
+            from common.service_ready import mark_ready
+            mark_ready("Realtime Screen")
         last_enabled = True
         interval = config["interval_sec"]
         min_change_ratio = config.get("min_change_ratio", 0.15)

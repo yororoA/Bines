@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from urllib.request import Request, build_opener, ProxyHandler
 from chatBot.config import WEBUI_URL, WEBUI_TOKEN, ROOT
 from chatBot.messages import segments, outgoing_segments, SEND_ACTIONS, FORWARD_ACTIONS, sent_message
+from chatBot.catalog import reference_catalog, with_runtime_schema, bundled_document
 
 # Safe conversation operations are explicit; new/unknown actions require local ownership.
 SCOPED = {
@@ -27,6 +28,8 @@ class SchemaCatalog:
     def __init__(self, url=WEBUI_URL, token=WEBUI_TOKEN):
         self.url, self.token = url.rstrip("/"), token
         self._schemas, self._expires = {}, 0
+        self._runtime = None
+        self._runtime_error = None
         self._lock = threading.Lock()
         self._opener = build_opener(ProxyHandler({}))
 
@@ -45,14 +48,44 @@ class SchemaCatalog:
         with self._lock:
             if self._schemas and time.monotonic() < self._expires and not refresh:
                 return self._schemas
+            self._schemas = {name: dict(entry) for name, entry in reference_catalog().items()}
+            self._runtime = None
+            self._runtime_error = None
             if not self.token:
-                raise RuntimeError("未配置 BINES_NAPCAT_WEBUI_TOKEN；仍可使用通用 action 调用")
-            auth = self._request("/api/auth/login", {"hash": hashlib.sha256((self.token+".napcat").encode()).hexdigest()})
-            data = self._request("/api/Debug/schemas", credential=auth["Credential"])
-            if not isinstance(data, dict):
-                raise RuntimeError("NapCat schema 格式无效")
-            self._schemas, self._expires = data, time.monotonic()+300
-            return data
+                self._runtime_error = "未配置 WebUI token，使用随项目附带的官方文档"
+            else:
+                try:
+                    auth = self._request("/api/auth/login", {"hash": hashlib.sha256((self.token+".napcat").encode()).hexdigest()})
+                    data = self._request("/api/Debug/schemas", credential=auth["Credential"])
+                    if not isinstance(data, dict) or not all(isinstance(entry, dict) for entry in data.values()):
+                        raise RuntimeError("NapCat schema 格式无效")
+                    merged = {name: {**entry, "runtime_supported": name in data}
+                              for name, entry in self._schemas.items()}
+                    for name, entry in data.items():
+                        merged[name] = with_runtime_schema(name, entry)
+                    self._schemas = merged
+                    self._runtime = set(data)
+                except Exception:
+                    # Do not silently erase the full API reference when WebUI is unavailable.
+                    self._runtime_error = "WebUI schema 查询失败，运行时支持未确认；使用官方文档"
+            self._expires = time.monotonic() + (300 if self._runtime is not None else 30)
+            return self._schemas
+
+    def status(self, identity):
+        schemas = self.schemas()
+        manifest, _ = bundled_document()
+        documented = set(reference_catalog())
+        allowed = set(schemas) if identity.privileged else set(schemas) & SCOPED
+        return {
+            "documented_version": manifest["version"], "source": manifest["source"],
+            "documented_actions": len(documented), "catalog_actions": len(schemas),
+            "allowed_actions": len(allowed), "all_actions_allowed": identity.privileged,
+            "runtime_verified": self._runtime is not None,
+            "runtime_actions": len(self._runtime) if self._runtime is not None else None,
+            "missing_in_runtime": sorted(documented - self._runtime) if self._runtime is not None and identity.privileged else None,
+            "runtime_only_actions": sorted(self._runtime - documented) if self._runtime is not None and identity.privileged else None,
+            "notice": self._runtime_error,
+        }
 
     def discover(self, identity, query="", action=None):
         schemas = self.schemas()
@@ -62,7 +95,8 @@ class SchemaCatalog:
                 raise PermissionError("当前身份无权发现该动作")
             return {"action": action, **allowed[action]}
         return [{"action": key, "description": value.get("description", ""),
-                 "tags": value.get("tags", [])}
+                 "tags": value.get("tags", []), "schema_source": value.get("schema_source"),
+                 "runtime_supported": value.get("runtime_supported")}
                 for key, value in allowed.items()
                 if query.lower() in (key+" "+str(value.get("description", ""))).lower()]
 

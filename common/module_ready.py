@@ -21,6 +21,10 @@ def notify_module_ready(module_name: str) -> None:
     向 Classification 上报本模块已彻底启动。
     调用一次即可；Classification 收集齐所有模块后会通知 Thinking 正式启动。
     """
+    from common.service_ready import managed, mark_ready
+    mark_ready(module_name)
+    if managed():
+        return  # The supervisor owns readiness; no one-shot Classification handshake.
     port = ZMQ_PORTS.get("MODULE_READY_REP")
     if port is None:
         print(f"[{module_name}] MODULE_READY_REP 未配置，跳过就绪上报", flush=True)

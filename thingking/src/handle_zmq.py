@@ -903,6 +903,8 @@ def start_zmq_listener():
     # 播放状态标志
     is_player_busy = False
     
+    from common.service_ready import mark_ready
+    mark_ready("Thinking")
     while True:
         try:
             # 平衡响应速度与 CPU 占用
@@ -1196,7 +1198,8 @@ if __name__ == "__main__":
         print("[Thinking] ========================================", flush=True)
         
         # 等待 Classification 通知「所有模块已就绪」后再正式启动（上线通知、摘要/日记、监听）
-        start_port = ZMQ_PORTS["START_THINKING_REP"]
+        from common.service_ready import managed, mark_ready
+        start_port = None if managed() else ZMQ_PORTS["START_THINKING_REP"]
         if start_port:
             start_rep = context.socket(zmq.REP)
             start_rep.setsockopt(zmq.LINGER, 2000)
@@ -1243,7 +1246,7 @@ if __name__ == "__main__":
         memory_maintainer = DynamicMemoryMaintainer(skill_runner)
         memory_system.set_dynamic_memory_updater(memory_maintainer)
         
-        print("[Thinking] ✓ Memory system initialized (上线摘要/日记已执行)", flush=True)
+        print("[Thinking] ✓ Shared memory initialized", flush=True)
         print("[Thinking] ✓ Tools registered successfully (from tools package)", flush=True)
         print("[Thinking] ✓ PUB/SUB sockets connected to local bus", flush=True)
         print("[Thinking] Starting ZMQ listener...", flush=True)

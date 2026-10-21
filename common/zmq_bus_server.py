@@ -27,6 +27,8 @@ def main() -> int:
             f"SUB egress={subscriber_endpoint()}",
             flush=True,
         )
+        from common.service_ready import mark_ready
+        mark_ready("ZMQ Bus")
         zmq.proxy(publishers, subscribers)
     except KeyboardInterrupt:
         print("[ZMQ Bus] stopping", flush=True)

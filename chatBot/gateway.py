@@ -39,6 +39,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 result = {"connected": service.client.is_connected}
             elif self.path == "/discover":
                 result = service.catalog.discover(identity, data.get("query", ""), data.get("action"))
+            elif self.path == "/catalog":
+                result = service.catalog.status(identity)
+                result["connected"] = service.client.is_connected
             elif self.path == "/schemas":
                 if not identity.privileged:
                     raise PermissionError("完整 schema 只允许本机或主人私聊")
