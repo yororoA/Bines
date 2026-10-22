@@ -85,7 +85,6 @@ from config import (
     MOMENTS_API_BASE_URL,
     TOGGLE_STATUS_TOKEN,
 )
-import persona_profile
 import prompt_builder
 from memory.channels import envelope_for_qq_log, envelope_for_turn, is_qq_source
 from memory.client import MemoryClient
@@ -658,7 +657,7 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
              current_content = f"{formatted_user_input}"
              
         messages = context_messages.copy()
-        messages.append({"role": "system", "content": persona_profile.style_guard()})
+        messages.append({"role": "system", "content": prompt_builder.conversation_style_guard(memory_context)})
         messages.append({"role": "user", "content": current_content})
 
         # 每条消息按来源刷新可用技能（QQ 来源仅暴露白名单动作）。

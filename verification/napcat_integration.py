@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
@@ -203,6 +204,30 @@ class Integration(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             bot.process(rows, Model())
         self.assertNotIn("'role': 'assistant'", str(self.store.context(self.store.identity(event("3")))))
+
+    def test_qq_final_guard_uses_only_current_relationship(self):
+        self.memory_hub._call("put_state", scope="owner", data={"relationship_score": 133})
+        for user, expected in (("1", "亲近"), ("2", None)):
+            with self.subTest(user=user):
+                self.insert(event(user, msg_id=90, text="这不夸我一下吗"))
+                rows = self.store.claim("worker", 0, 0)
+
+                class Model:
+                    def run_skill_protocol(inner, conversation, runner, **kwargs):
+                        self.assertEqual(conversation[-1]["role"], "user")
+                        guard = conversation[-2]["content"]
+                        self.assertIn("QQ 回复格式", guard)
+                        if expected:
+                            self.assertIn(f"本轮关系口吻：{expected}", guard)
+                            self.assertIn(f"本轮关系口吻：{expected}", conversation[0]["content"])
+                        else:
+                            self.assertNotIn("本轮关系口吻：非常亲密", guard)
+                        return "谢谢呀", [], []
+
+                with patch("prompt_builder.collapse_relationship_level", return_value="亲近") as collapse:
+                    QQThinking(self.store, self.client).process(rows, Model())
+                self.assertEqual(collapse.call_count, 1 if expected else 0)
+                self.store.finish([row["id"] for row in rows], "worker")
 
     def test_long_group_reply_is_split_into_short_messages(self):
         from chatBot.messages import split_qq_text

@@ -1,11 +1,13 @@
 """Assemble conversation prompts from the persona, a scene policy and the scoped memory context."""
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import persona_profile
+from relationship_state import collapse_relationship_level, compute_relationship_weights
 from memory.models import (
     CHANNEL_LOCAL,
     CHANNEL_QQ_GROUP,
@@ -36,7 +38,7 @@ _OPERATING_RULES = [
 
 _STATE_LABELS = (
     ("current_location", "所在位置"),
-    ("relationship_level", "与管理员的关系"),
+    ("relationship_level", "与当前对话者的关系"),
     ("relationship_score", "当前会话的好感度数值（范围 -200 到 200）"),
     ("active_quest", "正在进行的约定或任务"),
     ("important_thing", "最近的重要情况"),
@@ -89,6 +91,7 @@ def _scene_policy(envelope: Dict[str, Any], scene: str) -> str:
 def _state_block(state: Dict[str, Any]) -> str:
     if not state:
         return ""
+    state = {**state, "relationship_level": persona_profile.relationship_level(state)}
     lines = []
     npc = state.get("npc_state") or {}
     if npc.get("attire"):
@@ -100,6 +103,10 @@ def _state_block(state: Dict[str, Any]) -> str:
     for key, label in _STATE_LABELS:
         if state.get(key) is not None and state.get(key) != "":
             lines.append(f"- {label}：{state[key]}")
+    distribution = state.get("relationship_turn_distribution") or {}
+    if distribution:
+        weights = "、".join(f"{level} {weight:.2%}" for level, weight in distribution.items())
+        lines.append(f"- 好感状态权重：{weights}；本轮已随机坍塌，后续技能调用沿用本轮结果")
     if state.get("inventory"):
         lines.append(f"- 持有物品：{'；'.join(map(str, state['inventory']))}")
     highlights = state.get("memory_highlights") or []
@@ -195,13 +202,47 @@ def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str
     return messages
 
 
+def prepare_relationship_turn(context: Dict[str, Any]) -> None:
+    """Sample once per fresh conversation context, without writing memory state."""
+    state = context.get("state") or {}
+    if state.get("relationship_turn_level"):
+        return
+    score = state.get("relationship_score")
+    if score is None or isinstance(score, bool):
+        return
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(score):
+        return
+    weights = compute_relationship_weights(score)
+    context["state"] = {
+        **state,
+        "relationship_turn_level": collapse_relationship_level(weights),
+        "relationship_turn_distribution": weights,
+    }
+
+
+def conversation_style_guard(context: Dict[str, Any]) -> str:
+    """Keep the final voice reminder consistent with the scoped state and scene."""
+    prepare_relationship_turn(context)
+    scene = scene_for(context.get("envelope") or {})
+    state = context.get("state") or {}
+    if scene == SCENE_LOCAL:
+        return persona_profile.style_guard(state=state)
+    return persona_profile.qq_style_guard(state=state)
+
+
 def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]:
     """Messages to send before the current user input (which the caller appends)."""
+    prepare_relationship_turn(context)
     envelope = context.get("envelope") or {}
     scene = scene_for(envelope)
     system_sections = [
         persona_profile.character_prompt(),
         _scene_policy(envelope, scene),
+        persona_profile.relationship_guard(context.get("state") or {}),
         "--- 行为准则 ---\n" + "\n".join(f"{i}. {rule}" for i, rule in enumerate(_OPERATING_RULES, 1)),
         _state_block(context.get("state") or {}),
         _profile_block(context, scene),
@@ -211,8 +252,7 @@ def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]
     if recall:
         messages.append({"role": "system", "content": recall})
     messages.extend(_working_messages(context, scene))
-    guard = persona_profile.qq_style_guard() if scene != SCENE_LOCAL else persona_profile.style_guard()
-    messages.append({"role": "system", "content": guard})
+    messages.append({"role": "system", "content": conversation_style_guard(context)})
     return messages
 
 

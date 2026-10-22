@@ -18,7 +18,6 @@ from tools.context import ToolContext, tool_context
 from tools import TOOLS_REGISTRY
 from skill_runner import SkillRunner, QQ_ALLOWED_ACTIONS
 from chatBot.memory_hub import GatewayMemoryClient, identity_envelope
-import persona_profile
 import prompt_builder
 
 log = logging.getLogger("bines.qq.thinking")
@@ -202,7 +201,7 @@ class QQThinking:
             conversation = prompt_builder.build_conversation_messages(memory_context)
             conversation.extend([
                 {"role": "system", "content": prompt},
-                {"role": "system", "content": persona_profile.qq_style_guard()},
+                {"role": "system", "content": prompt_builder.conversation_style_guard(memory_context)},
                 {"role": "user", "content": f"请回复 QQ:{identity.user} 本轮消息：\n{request}"},
             ])
             text, _, _ = model.run_skill_protocol(conversation, self.runner, source="QQ")
