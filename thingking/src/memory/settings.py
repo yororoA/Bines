@@ -29,6 +29,8 @@ class MemorySettings:
     working_window: int = 30
     summarize_trigger: int = 40
     summarize_chunk: int = 30
+    summarize_idle_seconds: int = 1800
+    summarize_idle_min: int = 4
     recall_k: int = 5
     diary_k: int = 2
     profile_k: int = 8
@@ -36,6 +38,11 @@ class MemorySettings:
     job_lease_seconds: int = 300
     job_max_attempts: int = 5
     state_updates: bool = True
+    retrieval_candidates: int = 40
+    retrieval_rrf_constant: int = 60
+    retrieval_max_distance: float = 0.7
+    evidence_limit: int = 3
+    reranker_model: str = ""
 
     @property
     def db_path(self) -> Path:
@@ -59,4 +66,8 @@ def load_settings() -> MemorySettings:
         owner_qq_ids=_owner_qq_ids_from_env(),
         owner_name=os.environ.get("BINES_OWNER_NAME", "管理员"),
         state_updates=os.environ.get("BINES_MEMORY_STATE_UPDATES", "true").strip().lower() in {"true", "1", "yes", "on"},
+        retrieval_candidates=max(10, min(100, int(os.environ.get("BINES_MEMORY_CANDIDATES", "40")))),
+        reranker_model=os.environ.get("BINES_MEMORY_RERANKER", "").strip(),
+        summarize_idle_seconds=max(60, int(os.environ.get("BINES_MEMORY_IDLE_SUMMARY_SECONDS", "1800"))),
+        summarize_idle_min=max(2, min(40, int(os.environ.get("BINES_MEMORY_IDLE_SUMMARY_MIN", "4")))),
     )

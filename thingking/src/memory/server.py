@@ -17,6 +17,8 @@ RPC_METHODS = (
     "import_gateway_snapshot",
     "build_context",
     "get_state",
+    "state_history",
+    "facts",
     "put_state",
     "activity_snapshot",
     "claim_job",

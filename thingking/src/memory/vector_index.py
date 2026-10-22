@@ -32,6 +32,9 @@ class VectorIndex:
         self.embedder = embedder
         self._client = chromadb.PersistentClient(path=str(self.index_dir))
         self._collection = self._open()
+        self._keys = self._client.get_or_create_collection(
+            "memory_keys_v2", embedding_function=None, metadata={"hnsw:space": "cosine"},
+        )
 
     def _open(self):
         return self._client.get_or_create_collection(
@@ -65,6 +68,45 @@ class VectorIndex:
         except Exception:
             pass
         self._collection = self._open()
+        try:
+            self._client.delete_collection("memory_keys_v2")
+        except Exception:
+            pass
+        self._keys = self._client.get_or_create_collection(
+            "memory_keys_v2", embedding_function=None, metadata={"hnsw:space": "cosine"},
+        )
+
+    def upsert_keys(self, keys):
+        """每个原文片段/扩展键独立嵌入；旧整段索引保留供回退。"""
+        if not keys:
+            return []
+        embeddings = self.embedder.embed_documents([k["search_text"] for k in keys])
+        self._keys.upsert(
+            ids=[k["id"] for k in keys], embeddings=embeddings,
+            documents=[k["search_text"] for k in keys],
+            metadatas=[{"scope": k["scope"], "kind": k["kind"], "source_hash": k["source_hash"]} for k in keys],
+        )
+        return [k["id"] for k in keys]
+
+    def key_ids(self):
+        return self._keys.get(include=[])["ids"]
+
+    def delete_keys(self, ids):
+        if ids:
+            self._keys.delete(ids=ids)
+
+    def query_keys(self, text, scopes, kinds=None, n=40):
+        if not text.strip() or not scopes or self._keys.count() == 0:
+            return []
+        clauses = [{"scope": {"$in": list(scopes)}}]
+        if kinds:
+            clauses.append({"kind": {"$in": list(kinds)}})
+        result = self._keys.query(
+            query_embeddings=[self.embedder.embed_query(text)],
+            where=clauses[0] if len(clauses) == 1 else {"$and": clauses},
+            n_results=min(n, self._keys.count()), include=["distances"],
+        )
+        return list(zip(result["ids"][0], result["distances"][0]))
 
     def query(
         self,

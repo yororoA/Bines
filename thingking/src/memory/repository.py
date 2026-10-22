@@ -292,6 +292,16 @@ class MemoryRepository:
         )
         return [dict(r) for r in rows]
 
+    def idle_pending_conversations(self, before_ts: float, minimum: int) -> List[Dict[str, Any]]:
+        """Conversations with a small but idle tail; used to flush summaries without waiting for 40 messages."""
+        rows = self.conn.execute(
+            "SELECT conversation_id, scope, COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts "
+            "FROM messages WHERE episode_id IS NULL GROUP BY conversation_id, scope "
+            "HAVING COUNT(*) >= ? AND MAX(ts) <= ? ORDER BY MAX(ts)",
+            (int(minimum), float(before_ts)),
+        )
+        return [dict(r) for r in rows]
+
     def messages_in_range(self, conversation_id: str, from_id: int, to_id: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM messages WHERE conversation_id = ? AND id BETWEEN ? AND ? ORDER BY id",
@@ -506,7 +516,8 @@ class MemoryRepository:
             return {"data": {}, "version": 0, "updated_at": None}
         return {"data": json.loads(row["data"]), "version": int(row["version"]), "updated_at": row["updated_at"]}
 
-    def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None) -> int:
+    def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
+                  source_ref: Optional[str] = None, effective_at: Optional[float] = None) -> int:
         with self.transaction():
             current = self.get_state(scope)
             if expected_version is not None and current["version"] != expected_version:
@@ -518,6 +529,11 @@ class MemoryRepository:
                 "updated_at = excluded.updated_at",
                 (scope, json.dumps(data, ensure_ascii=False), version, self.clock()),
             )
+            # 时态历史是可选派生层；只有 MemoryService 挂载 TemporalStore 后才记录。
+            temporal = getattr(self, "temporal", None)
+            if temporal is not None:
+                temporal.snapshot_state(scope, version, data, self.clock(),
+                                        effective_at=effective_at, source_ref=source_ref)
         return version
 
     # ---------- jobs ----------

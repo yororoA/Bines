@@ -289,6 +289,11 @@
       "name": "update_status",
       "description": "更新动态状态记忆：地点、好感度、物品、任务、用户状态、NPC状态、记忆亮点等。",
       "enabled": true
+    },
+    {
+      "name": "search_memory",
+      "description": "按主题检索当前会话可见的历史记忆，返回可回溯的原始证据。",
+      "enabled": true
     }
   ]
 }

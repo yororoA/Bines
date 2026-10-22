@@ -20,7 +20,14 @@ def search_memory(query: str, k: int = 8):
         raise RuntimeError("记忆服务未就绪")
     k = max(1, min(int(k), 20))
     hits = client.search(query, [identity.scope], k=k)
-    return [{"content": hit["content"], "kind": hit["kind"], "day_key": hit.get("day_key")} for hit in hits]
+    return [{
+        "content": hit["content"], "kind": hit["kind"], "day_key": hit.get("day_key"),
+        "evidence": [
+            {"source_type": ev.get("source_type"), "source_ref": ev.get("source_ref"),
+             "role": ev.get("role"), "content": ev.get("content"), "ts": ev.get("ts")}
+            for ev in (hit.get("evidence") or [])[:3]
+        ],
+    } for hit in hits]
 
 
 def _apply_changes(state, *, current_location=None, relationship_delta=None, add_item=None, remove_item=None,

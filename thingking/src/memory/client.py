@@ -80,9 +80,9 @@ class MemoryClient:
         return self.call("complete_state_update", job_id=job_id, changes=changes, expected_version=expected_version)
 
     def complete_summary(self, job_id: int, summary: str, tags: Sequence[str], facts: Sequence[Dict[str, Any]],
-                         importance: float) -> Dict[str, Any]:
+                         importance: float, retrieval: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.call("complete_summary", job_id=job_id, summary=summary, tags=list(tags), facts=list(facts),
-                         importance=importance)
+                         importance=importance, **({"retrieval": retrieval} if retrieval else {}))
 
     def complete_diary(self, job_id: int, text: str) -> Dict[str, Any]:
         return self.call("complete_diary", job_id=job_id, text=text)
@@ -97,8 +97,16 @@ class MemoryClient:
     def list_memories(self, **filters: Any) -> Dict[str, Any]:
         return self.call("list_memories", **filters)
 
-    def search(self, query: str, scopes: Sequence[str], kinds: Optional[Sequence[str]] = None, k: int = 10) -> List[Dict[str, Any]]:
-        return self.call("search", query=query, scopes=list(scopes), kinds=list(kinds) if kinds else None, k=k)
+    def search(self, query: str, scopes: Sequence[str], kinds: Optional[Sequence[str]] = None, k: int = 10,
+               as_of: Optional[float] = None, include_history: bool = False) -> List[Dict[str, Any]]:
+        return self.call("search", query=query, scopes=list(scopes), kinds=list(kinds) if kinds else None,
+                         k=k, as_of=as_of, include_history=include_history)
+
+    def state_history(self, scope="owner", as_of=None, limit=20):
+        return self.call("state_history", scope=scope, as_of=as_of, limit=limit)
+
+    def facts(self, scope="owner", subject=None, predicate=None, as_of=None, limit=20):
+        return self.call("facts", scope=scope, subject=subject, predicate=predicate, as_of=as_of, limit=limit)
 
     def get_memory(self, memory_id: str) -> Optional[Dict[str, Any]]:
         return self.call("get_memory", memory_id=memory_id)

@@ -26,10 +26,17 @@ _SUMMARY_INSTRUCTIONS = """请阅读下面的聊天记录，输出 JSON：
   "tags": ["英文标签，如 Daily, Work, Game, Emotion, Hobby, User_Profile，最多 5 个"],
   "importance": 1到10的整数，表示这段经历的重要程度,
   "facts": [
-    {{"subject": "参与者编号（必须来自下方参与者列表）", "content": "关于该参与者的长期稳定事实或偏好", "importance": 1到10}}
-  ]
+    {{"subject": "参与者编号（必须来自下方参与者列表）", "content": "关于该参与者的长期稳定事实或偏好",
+      "importance": 1到10, "predicate": "同类事实的稳定键名，如 running_time",
+      "value": "该键的新值", "source_message_id": 原话的整数消息编号}}
+  ],
+  "retrieval": {{"context":"一句上下文说明", "keywords":["原文关键词"], "aliases":["原文明示的别名"]}}
 }}
 facts 只写长期稳定的信息（身份、偏好、习惯、重要约定、生日等），临时话题不要写；没有就输出空数组。
+predicate/value 仅用于明确的单值事实和变更，沿用已有键；不确定省略。不要把多个爱好误当互相替代。
+source_message_id 必须指向该参与者亲口说出的原话；助手推断不能充当用户事实。
+valid_from 可选 Unix 秒，仅在原话明确指定生效时间时提供，否则省略。不能用模型当前时间填历史日期。
+已有事实键：{fact_keys}
 {scene}
 参与者：
 {participants}
@@ -74,7 +81,7 @@ def build_summary_prompt(materials: Dict[str, Any]) -> List[Dict[str, str]]:
         if message["role"] != ROLE_ASSISTANT:
             participants.setdefault(message["actor_id"], _speaker(message))
     transcript = "\n".join(
-        f"[{_format_ts(m['ts'])}] {_speaker(m)}{'(旁听)' if m['role'] == ROLE_OBSERVED else ''}: {m['content']}"
+        f"[消息{m['id']}][{_format_ts(m['ts'])}] {_speaker(m)}{'(旁听)' if m['role'] == ROLE_OBSERVED else ''}: {m['content']}"
         for m in messages
     )
     if materials["scope"] == OWNER_SCOPE:
@@ -87,7 +94,8 @@ def build_summary_prompt(materials: Dict[str, Any]) -> List[Dict[str, str]]:
     return [
         {"role": "system", "content": _SUMMARY_SYSTEM},
         {"role": "user", "content": _SUMMARY_INSTRUCTIONS.format(
-            scene=scene, participants=participant_lines, transcript=transcript)},
+            scene=scene, participants=participant_lines, transcript=transcript,
+            fact_keys=json.dumps(materials.get("fact_keys", []), ensure_ascii=False))},
     ]
 
 
@@ -101,7 +109,8 @@ def parse_summary(raw: str) -> Tuple[str, List[str], List[Dict[str, Any]], float
         raise ValueError("summary output has empty summary")
     tags = [str(t).strip() for t in data.get("tags") or [] if str(t).strip()][:5]
     facts = [
-        {"subject": str(f.get("subject") or ""), "content": str(f.get("content") or "").strip(),
+        {**{key: f[key] for key in ("predicate", "value", "source_message_id", "valid_from") if key in f},
+         "subject": str(f.get("subject") or ""), "content": str(f.get("content") or "").strip(),
          "importance": f.get("importance", 6)}
         for f in data.get("facts") or [] if isinstance(f, dict) and str(f.get("content") or "").strip()
     ]
@@ -202,7 +211,11 @@ class MemoryWorker:
     def _summarize(self, job: Dict[str, Any], materials: Dict[str, Any]) -> None:
         raw = self.complete_text(build_summary_prompt(materials))
         summary, tags, facts, importance = parse_summary(raw)
-        result = self.client.complete_summary(job["id"], summary, tags, facts, importance)
+        retrieval = json.loads(re.search(r"\{.*\}", raw, re.DOTALL).group()).get("retrieval")
+        if retrieval is not None and not isinstance(retrieval, dict):
+            raise ValueError("retrieval 必须是对象")
+        result = self.client.complete_summary(job["id"], summary, tags, facts, importance,
+                                               **({"retrieval": retrieval} if retrieval else {}))
         logger.info("memory job %s summarized %d messages -> %s", job["id"], len(materials["messages"]), result.get("episode_id"))
         if result.get("status") == "done" and materials["scope"] == OWNER_SCOPE and self.on_owner_summary:
             try:

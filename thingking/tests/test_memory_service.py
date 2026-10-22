@@ -338,6 +338,58 @@ class StateTest(unittest.TestCase):
         self.assertIsNone(self.fx.service.claim_job(kinds=["update_state"]))
 
 
+class HybridRetrievalTest(unittest.TestCase):
+    def setUp(self):
+        self.fx = MemoryFixture()
+
+    def tearDown(self):
+        self.fx.close()
+
+    def test_search_returns_original_message_evidence(self):
+        self.fx.service.record_turn(local_env(), "我新买了一条蓝色围巾", "挺适合你")
+        hits = self.fx.service.search("蓝色围巾", [OWNER_SCOPE], k=5)
+        self.assertTrue(hits)
+        evidence = [item for hit in hits for item in hit.get("evidence") or []]
+        self.assertTrue(any(item["source_type"] == "message" and "蓝色围巾" in item["content"]
+                            for item in evidence))
+        self.assertTrue(all(item["scope"] == OWNER_SCOPE for item in evidence))
+
+    def test_state_history_is_recorded_but_not_invented(self):
+        self.fx.service.put_state(OWNER_SCOPE, {"relationship_score": 10})
+        self.fx.service.put_state(OWNER_SCOPE, {"relationship_score": 11})
+        history = self.fx.service.state_history(OWNER_SCOPE)
+        self.assertEqual(history[0]["data"]["relationship_score"], 11)
+        self.assertEqual(history[-1]["data"]["relationship_score"], 10)
+        # 没有旧状态时不能凭空生成 version 0。
+        self.assertFalse(any(item["version"] == 0 for item in history))
+
+    def test_idle_small_conversation_flushes_summary_before_trigger(self):
+        fx = MemoryFixture(summarize_trigger=40, summarize_chunk=30,
+                           summarize_idle_seconds=60, summarize_idle_min=2)
+        self.addCleanup(fx.close)
+        fx.service.record_turn(local_env(ts=fx.clock()), "短会话第一句", "回复一")
+        fx.service.record_turn(local_env(ts=fx.clock()), "短会话第二句", "回复二")
+        fx.clock.advance(61)
+        job = fx.service.claim_job(kinds=["summarize"])
+        self.assertIsNotNone(job)
+        self.assertEqual(job["job"]["kind"], "summarize")
+        self.assertEqual(len(job["materials"]["messages"]), 4)
+
+    def test_fact_versions_keep_only_current_by_default(self):
+        memory_id = self.fx.repo.add_memory(
+            "semantic", OWNER_SCOPE, "管理员通常早晨跑步", subject_id="owner", meta={"episode_id": ""},
+        )
+        self.fx.repo.temporal.put_fact(memory_id, OWNER_SCOPE, "owner", "running_time", "morning", 10)
+        second = self.fx.repo.add_memory(
+            "semantic", OWNER_SCOPE, "管理员改为晚饭后慢跑", subject_id="owner", meta={"episode_id": ""},
+        )
+        self.fx.repo.temporal.put_fact(second, OWNER_SCOPE, "owner", "running_time", "evening", 20)
+        current = self.fx.service.facts(OWNER_SCOPE, subject="owner", predicate="running_time")
+        self.assertEqual([row["value"] for row in current], ["evening"])
+        past = self.fx.service.facts(OWNER_SCOPE, subject="owner", predicate="running_time", as_of=15)
+        self.assertEqual([row["value"] for row in past], ["morning"])
+
+
 class IndexTest(unittest.TestCase):
     def setUp(self):
         self.fx = MemoryFixture()
