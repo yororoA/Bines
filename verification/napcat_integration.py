@@ -490,6 +490,98 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.api.calls[0][1]["group_id"], "20")
         self.assertEqual(self.api.calls[1], ("future_napcat_extension", {"anything": {"nested": [1, 2]}}))
 
+    def test_all_send_actions_compact_blank_lines_and_preserve_native_payloads(self):
+        from copy import deepcopy
+        from chatBot.messages import SEND_ACTIONS, FORWARD_ACTIONS, compact_qq_send_params
+
+        card = '[CQ:json,data={"note":"a\n\nb"}]'
+        for action in sorted(SEND_ACTIONS):
+            with self.subTest(action=action):
+                field = "messages" if action in FORWARD_ACTIONS else "message"
+                content = [
+                    {"type": "reply", "data": {"id": "1"}},
+                    {"type": "text", "data": {"text": "\n  \n第一句\n"}},
+                    {"type": "text", "data": {"text": "\t\n第二句\n正常换行\r\n\r\n"}},
+                    {"type": "image", "data": {"file": "https://example.test/a.png", "summary": "a\n\nb"}},
+                    {"type": "markdown", "data": {"content": "a\n\nb"}},
+                    {"type": "json", "data": {"data": '{"note":"a\\n\\nb"}'}},
+                ]
+                message = [{"type": "node", "data": {
+                    "user_id": "99", "nickname": "a\n\nb", "content": content,
+                }}] if action in FORWARD_ACTIONS else content
+                params = {"user_id": "1", field: message}
+                original = deepcopy(params)
+                self.service.call(LOCAL_IDENTITY, action, params, "compact:"+action)
+                sent = self.api.calls[-1][1][field]
+                chain = sent[0]["data"]["content"] if action in FORWARD_ACTIONS else sent
+                self.assertEqual(chain[1]["data"]["text"], "第一句\n")
+                self.assertEqual(chain[2]["data"]["text"], "第二句\n正常换行")
+                self.assertEqual(chain[0], content[0])
+                self.assertEqual(chain[3:], content[3:])
+                if action in FORWARD_ACTIONS:
+                    self.assertEqual(sent[0]["data"]["nickname"], "a\n\nb")
+                self.assertEqual(params, original)
+                self.assertEqual(compact_qq_send_params(action, self.api.calls[-1][1]), self.api.calls[-1][1])
+        for message in ["\n甲\r\n \r\n乙\r\n\t\r\n", {"type": "text", "data": {"text": "\n甲\n\n乙\n"}}]:
+            params = {"user_id": "1", "message": message, "auto_escape": True}
+            result = compact_qq_send_params("send_private_msg", params)["message"]
+            text = result if isinstance(result, str) else result["data"]["text"]
+            self.assertIn(text, {"甲\r\n乙", "甲\n乙"})
+        cq = compact_qq_send_params("send_private_msg", {"message": "甲\n\n"+card+"\n\n乙"})["message"]
+        self.assertEqual(cq, "甲\n"+card+"\n乙")
+        self.assertEqual(compact_qq_send_params("send_qzone_msg", {"content": "a\n\nb"}), {"content": "a\n\nb"})
+
+    def test_compact_text_matches_native_receipt_history_and_idempotent_retry(self):
+        current = event("1", msg_id=409)
+        event_id = self.insert(current)
+        params = {"user_id": "1", "message": [
+            {"type": "text", "data": {"text": "嗯哼 那就算过关了\n\n接下来聊点别的吧"}},
+            {"type": "image", "data": {"file": "https://example.test/a.png"}},
+        ]}
+        with tool_context(ToolContext(self.store.identity(current), event_id, "compact-native")) as context:
+            first = self.client.raw_api("send_private_msg", params, operation_id="once")
+            self.client.raw_api("send_private_msg", params, operation_id="once")
+            receipt = context.receipts[0]
+            self.assertEqual(receipt["params"], self.api.calls[-1][1])
+            self.assertEqual(receipt["params"]["message"][0]["data"]["text"],
+                             "嗯哼 那就算过关了\n接下来聊点别的吧")
+            with self.store.connection() as db:
+                operation = db.execute("SELECT params FROM operations WHERE id=?",
+                                       (first["operation_id"],)).fetchone()
+            self.assertEqual(json.loads(operation["params"]), receipt["params"])
+            QQThinking(self.store, self.client).remember_send(
+                self.store.identity(current), receipt["params"], receipt["result"],
+            )
+        self.assertEqual(len([action for action, _ in self.api.calls if action == "send_private_msg"]), 1)
+        history = self.store.context(self.store.identity(current))
+        self.assertNotIn("\n\n", history[-1]["content"])
+        self.assertIn("过关了\n接下来", history[-1]["content"])
+        self.assertIn("\n\n", params["message"][0]["data"]["text"])
+        stranger = self.store.identity(event("2"))
+        self.service.call(stranger, "send_private_msg", {
+            "user_id": "2", "message": "甲\n\n乙",
+        }, "compact-stranger")
+        self.assertEqual(self.api.calls[-1][1]["message"], [
+            {"type": "text", "data": {"text": "甲\n乙"}}])
+
+    def test_final_text_fallback_compacts_without_splitting_in_private_and_group(self):
+        for group in (None, "10"):
+            with self.subTest(group=group):
+                current = event("1", group=group, msg_id=410, message=[
+                    {"type": "at", "data": {"qq": "99"}},
+                    {"type": "text", "data": {"text": "试一下"}}])
+                self.insert(current)
+                rows = self.store.claim("compact-fallback", 0, 0)
+
+                class Model:
+                    def run_skill_protocol(inner, *args, **kwargs):
+                        return "\n那当然啦\n \n这点小事\n正常换行\n\n", [], []
+
+                QQThinking(self.store, self.client).process(rows, Model())
+                self.assertEqual(self.api.calls[-1][1]["message"], [
+                    {"type": "text", "data": {"text": "那当然啦\n这点小事\n正常换行"}}])
+                self.store.finish([row["id"] for row in rows], "compact-fallback")
+
     def test_cq_and_streaming_transport_nonblocking(self):
         self.assertEqual(segments("[CQ:at,qq=99]a&amp;b")[1]["data"]["text"], "a&b")
         holder = {}

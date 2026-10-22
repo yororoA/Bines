@@ -8,7 +8,10 @@ import re
 from pathlib import PurePosixPath
 from urllib.request import Request, build_opener, ProxyHandler
 from chatBot.config import WEBUI_URL, WEBUI_TOKEN, ROOT
-from chatBot.messages import segments, outgoing_segments, SEND_ACTIONS, FORWARD_ACTIONS, sent_message
+from chatBot.messages import (
+    segments, outgoing_segments, SEND_ACTIONS, FORWARD_ACTIONS, sent_message,
+    compact_qq_send_params,
+)
 from chatBot.catalog import reference_catalog, with_runtime_schema, bundled_document
 
 # Safe conversation operations are explicit; new/unknown actions require local ownership.
@@ -310,7 +313,7 @@ class CapabilityService:
             if action in FORWARD_ACTIONS and any(part["type"] != "node" for part in params[field]):
                 raise ValueError("合并转发需使用 node 消息段")
         self.authorize(identity, action, params)
-        return params
+        return compact_qq_send_params(action, params)
 
     def call(self, identity, action, params=None, operation_id=None, timeout=30):
         params = self.prepare(identity, action, params)

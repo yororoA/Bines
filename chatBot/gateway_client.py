@@ -35,6 +35,9 @@ class GatewayClient:
     def raw_api(self, action, params=None, timeout=30, operation_id=None):
         from tools.context import CURRENT_CONTEXT
         from chatBot.capabilities import is_read
+        from chatBot.messages import compact_qq_send_params
+        # Receipts must contain the same compact text the gateway dispatches.
+        params = compact_qq_send_params(action, params or {})
         context = CURRENT_CONTEXT.get()
         receipt = None
         if not is_read(action):

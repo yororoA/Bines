@@ -63,6 +63,80 @@ def sent_message(params):
     return params.get("messages", params.get("message"))
 
 
+def _compact_text_fragments(fragments):
+    """Remove empty rows across adjacent text segments without merging segments."""
+    text = "".join(fragments)
+    # CQ payloads (e.g. JSON cards) are opaque; only surrounding text is edited.
+    protected = [match.span() for match in re.finditer(r"\[CQ:[^\]]*\]", text)]
+    deletions, last_content_break = [], None
+    for match in re.finditer(r"([^\r\n]*)(\r\n|\r|\n|$)", text):
+        start, end = match.span()
+        if start == end:
+            continue
+        if any(start < right and end > left for left, right in protected):
+            last_content_break = None
+        elif not match.group(1).strip():
+            deletions.append((start, end))
+        else:
+            last_content_break = match.span(2) if match.group(2) else None
+    if last_content_break:
+        deletions.append(last_content_break)
+    deletions.sort()
+    result, offset = [], 0
+    for fragment in fragments:
+        end = offset + len(fragment)
+        cursor, pieces = offset, []
+        for left, right in deletions:
+            if right <= cursor or left >= end:
+                continue
+            pieces.append(text[cursor:max(cursor, left)])
+            cursor = min(end, right)
+        pieces.append(text[cursor:end])
+        result.append("".join(pieces))
+        offset = end
+    return result
+
+
+def _compact_qq_message(message):
+    if isinstance(message, str):
+        return _compact_text_fragments([message])[0]
+    if isinstance(message, dict):
+        return _compact_qq_message([message])[0]
+    if not isinstance(message, list):
+        return message
+    result, text_indices = [], []
+
+    def flush_text():
+        fragments = [result[index]["data"]["text"] for index in text_indices]
+        for index, text in zip(text_indices, _compact_text_fragments(fragments)):
+            result[index] = {**result[index], "data": {**result[index]["data"], "text": text}}
+        text_indices.clear()
+
+    for part in message:
+        data = part.get("data") if isinstance(part, dict) else None
+        is_text = (isinstance(data, dict) and part.get("type") == "text"
+                   and isinstance(data.get("text"), str))
+        if is_text:
+            text_indices.append(len(result))
+        else:
+            flush_text()
+            if isinstance(data, dict) and part.get("type") == "node" and "content" in data:
+                part = {**part, "data": {**data, "content": _compact_qq_message(data["content"])}}
+        result.append(part)
+    flush_text()
+    return result
+
+
+def compact_qq_send_params(action, params):
+    """Compact outgoing text only, preserving targets, bubbles and native media."""
+    if action not in SEND_ACTIONS:
+        return params
+    return {
+        key: _compact_qq_message(value) if key in {"message", "messages"} else value
+        for key, value in params.items()
+    }
+
+
 def readable(message):
     parts = []
     for segment in segments(message):

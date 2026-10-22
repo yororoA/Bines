@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 from chatBot.config import DEBOUNCE, MAX_WAIT, WORKERS, GROUP_REPLY_MODE, REPLY_TEMPERATURE
-from chatBot.messages import Identity, segments, readable, SEND_ACTIONS, sent_message
+from chatBot.messages import Identity, segments, readable, SEND_ACTIONS, sent_message, compact_qq_send_params
 from chatBot.store import MemoryStore
 from chatBot.gateway_client import GatewayClient
 from tools.context import ToolContext, tool_context
@@ -123,6 +123,8 @@ class QQThinking:
 
     def send_actions(self, identity, turn_id, actions, start=0):
         """Send segments once each; persisted progress lets a crash resume without duplicates."""
+        actions = [{**item, "params": compact_qq_send_params(item["action"], item["params"])}
+                   for item in actions]
         for index in range(start, len(actions)):
             item = actions[index]
             self.store.save_turn(turn_id, "ready", {"actions": actions, "next": index})
