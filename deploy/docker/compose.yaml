@@ -58,6 +58,7 @@ services:
         required: false
     environment:
       BINES_PROFILE: ${BINES_PROFILE:-chatbot}
+      BINES_MEMORY_BACKEND: ${BINES_MEMORY_BACKEND:-remote}
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_QQ_GATEWAY_HOST: 0.0.0.0
       BINES_QQ_GATEWAY_URL: http://chatbot:6102

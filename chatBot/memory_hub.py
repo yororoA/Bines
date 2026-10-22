@@ -29,25 +29,32 @@ class MemoryHub:
         self.service = service
         self.source = "gateway:" + hashlib.sha256(str(Path(store.path).resolve()).encode()).hexdigest()
         profile = profile or os.environ.get("_BINES_LAUNCH_PROFILE") or os.environ.get("BINES_PROFILE", "full")
+        backend = os.environ.get("BINES_MEMORY_BACKEND", "auto").strip().lower()
         if self.service is None and client is not None:
             self.client = client
         elif self.service is None:
             from config import ZMQ_HOST, ZMQ_PORTS
             remote = MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
-            # Vector RAG is the source of truth whenever the Memory Server is up;
-            # the embedded lexical service only covers a standalone QQ host. An
-            # explicit ``settings`` always means isolated embedded memory (tests).
-            if profile != "chatbot" or (settings is None and remote.ping(timeout_ms=3000)):
+            # Docker compose sets remote explicitly: never open the shared memory.db
+            # a second time just because the Memory Server is still loading its model.
+            if backend == "remote":
+                self.client = remote
+            elif backend == "embedded":
+                self._embedded(settings)
+            elif profile != "chatbot" or (settings is None and remote.ping(timeout_ms=3000)):
                 self.client = remote
             else:
-                from memory.lexical_index import LexicalIndex
-                from memory.repository import MemoryRepository
-                from memory.service import MemoryService
-                from memory.settings import load_settings
-                settings = settings or load_settings()
-                repo = MemoryRepository(settings.db_path)
-                self.service = MemoryService(repo, LexicalIndex(repo), settings)
-                self.service.sync_identities()
+                self._embedded(settings)
+
+    def _embedded(self, settings=None):
+        from memory.lexical_index import LexicalIndex
+        from memory.repository import MemoryRepository
+        from memory.service import MemoryService
+        from memory.settings import load_settings
+        settings = settings or load_settings()
+        repo = MemoryRepository(settings.db_path)
+        self.service = MemoryService(repo, LexicalIndex(repo), settings)
+        self.service.sync_identities()
 
     def _call(self, method, **params):
         if self.service is not None:
@@ -140,10 +147,26 @@ class MemoryHub:
 
     def start(self):
         import logging
+        import time
         logging.getLogger("bines.memory.gateway").info(
             "记忆后端 · %s", "网关内置词面检索" if self.service is not None else "Memory Server (RAG)"
         )
-        self._call("ping")
+        if self.service is None:
+            timeout = float(os.environ.get("BINES_MEMORY_READY_TIMEOUT", "300"))
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    self._call("ping")
+                    break
+                except Exception as exc:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(f"Memory Server 未就绪（等待 {timeout:.0f}s）：{exc}") from exc
+                    logging.getLogger("bines.memory.gateway").warning(
+                        "Memory Server 尚未就绪，2 秒后重试：%s", exc,
+                    )
+                    time.sleep(2)
+        else:
+            self._call("ping")
         self.import_legacy()
         while self.sync() == 500:
             pass

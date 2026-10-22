@@ -118,7 +118,7 @@ python bines.py --console
 
 ## 记忆系统与人格
 
-- 无论完整模式还是纯 QQ 模式，**RAG Server** 都独占 `thingking/memory_data/memory.db` 和 `index/`（可重建的 Chroma 索引），桌面客户端直接使用 `5560`；QQ 客户端经 ChatBot 网关转发到同一个 RAG Server。`--host --profile chatbot` 且本机没有 RAG Server 时，网关才退回内置词面检索，之后切到 RAG 会自动补建向量索引。
+- 无论完整模式还是纯 QQ 模式，**RAG Server** 都独占 `thingking/memory_data/memory.db` 和 `index/`（可重建的 Chroma 索引），桌面客户端直接使用 `5560`；QQ 客户端经 ChatBot 网关转发到同一个 RAG Server。Docker 中 ChatBot 显式使用 `BINES_MEMORY_BACKEND=remote`，即使 Memory Server 仍在加载模型也不会回退到内置检索，避免两个进程同时写同一个库；启动最多等待 `BINES_MEMORY_READY_TIMEOUT`（默认 300 秒）。`--host --profile chatbot` 且本机没有 RAG Server 时才使用内置词面检索。
 - QQ 原始消息、事件队列和发送回执保存在独立的 `gateway.db`，提交成功后同步到记忆库。启动时自动识别旧 NapCat `memory.db` 的表结构并迁移到 `gateway.db`，不会覆盖新版库；同步可恢复且去重。
 - 本机与 `BINES_OWNER_QQ_IDS` 显式绑定的主人私聊共享 owner 记忆和状态；其他私聊按机器人账号与用户隔离，群聊按账号与群号隔离，个人状态再按发言人区分。群管理员角色不赋予主人身份。
 - 动态状态按真实新消息由独立 Memory Worker 在后台更新，不再等到累计 40 条消息触发摘要。普通问候、记忆查询和假设不改变好感度；明确情感事件才使用小幅增量。状态任务完成和写库在同一事务中提交，重试不重复加分；消息撤回或同消息手动更新后取消自动任务。群聊个人状态按群和用户保存，不改主人私聊状态。
