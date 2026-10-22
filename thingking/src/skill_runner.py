@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import inspect
 import json
+import ast
 from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Mapping
@@ -18,6 +19,10 @@ QQ_ALLOWED_ACTIONS = {
     "napcat_events", "update_status", "search_memory", "browser_search", "web_fetch",
 }
 QQ_GROUP_OWNER_ACTIONS = {"napcat_custom_faces", "napcat_send_custom_face"}
+NAPCAT_ACTIONS = {
+    "napcat_call", "napcat_discover", "napcat_catalog", "napcat_operation", "napcat_events",
+    "napcat_send", "napcat_forward", "napcat_custom_faces", "napcat_send_custom_face",
+}
 QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | QQ_GROUP_OWNER_ACTIONS | {
     "napcat_operation", "mcp_discover", "mcp_call",
     "get_qq_group_list", "get_qq_friend_list", "broadcast_to_all_friends",
@@ -175,7 +180,7 @@ class SkillRunner:
             if context.identity.privileged:
                 enabled &= QQ_OWNER_ACTIONS
             elif context.identity.owner:
-                enabled &= self.qq_allowed_actions | QQ_GROUP_OWNER_ACTIONS
+                enabled &= self.qq_allowed_actions | NAPCAT_ACTIONS
             else:
                 enabled &= self.qq_allowed_actions
         if allowed_skills is not None:
@@ -187,10 +192,71 @@ class SkillRunner:
             enabled &= allowed_actions
         return enabled
 
+    @staticmethod
+    def _parameter_schema(annotation) -> Dict[str, Any]:
+        """Render simple Python annotations without importing desktop modules."""
+        if isinstance(annotation, ast.AST):
+            annotation = ast.unparse(annotation)
+        elif annotation is inspect.Parameter.empty:
+            return {}
+        else:
+            annotation = getattr(annotation, "__name__", str(annotation))
+        variants = str(annotation).replace("typing.", "").split("|")
+        schemas = []
+        types = {"str": "string", "int": "integer", "float": "number",
+                 "bool": "boolean", "dict": "object", "list": "array",
+                 "None": "null", "NoneType": "null"}
+        for variant in variants:
+            kind = types.get(variant.strip())
+            if kind:
+                schema = {"type": kind}
+                if kind == "array":
+                    schema["items"] = {}
+                schemas.append(schema)
+        if not schemas:
+            return {}
+        return schemas[0] if len(schemas) == 1 else {"anyOf": schemas}
+
+    def function_tools(self, source: str | None = None, allowed_skills=None) -> List[Dict[str, Any]]:
+        """Native function calling with source signatures and dynamic NapCat dispatch."""
+        tools = []
+        for action in sorted(self.actions_for_source(source, allowed_skills)):
+            function = self.registry[action]
+            properties, required = {}, []
+            if hasattr(function, "module"):
+                path = self.skills_dir.parent / "tools" / f"{function.module}.py"
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                node = next(item for item in tree.body
+                            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == function.name)
+                arguments = [*node.args.posonlyargs, *node.args.args]
+                optional_from = len(arguments) - len(node.args.defaults)
+                for index, arg in enumerate(arguments):
+                    properties[arg.arg] = self._parameter_schema(arg.annotation) if arg.annotation else {}
+                    if index < optional_from:
+                        required.append(arg.arg)
+                for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+                    properties[arg.arg] = self._parameter_schema(arg.annotation) if arg.annotation else {}
+                    if default is None:
+                        required.append(arg.arg)
+            else:
+                for name, parameter in inspect.signature(function).parameters.items():
+                    if parameter.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
+                        continue
+                    properties[name] = self._parameter_schema(parameter.annotation)
+                    if parameter.default is inspect.Parameter.empty:
+                        required.append(name)
+            tools.append({"type": "function", "function": {
+                "name": action, "description": self._action_description(action),
+                "parameters": {"type": "object", "properties": properties, "required": required},
+            }})
+        return tools
+
     def instructions_for_source(
         self,
         source: str | None = None,
         allowed_skills: Iterable[str] | None = None,
+        *,
+        native: bool = False,
     ) -> str:
         enabled = self.actions_for_source(source, allowed_skills)
         sections = []
@@ -206,9 +272,19 @@ class SkillRunner:
                 from chatBot.catalog import model_api_index
                 from chatBot.capabilities import SCOPED
                 from tools.context import CURRENT_CONTEXT
-                sections.append(model_api_index(CURRENT_CONTEXT.get().identity.privileged, SCOPED))
+                identity = CURRENT_CONTEXT.get().identity
+                sections.append(model_api_index(identity.local or identity.owner, SCOPED))
             for action in actions:
                 sections.append(f"Action `{action}` — {self._action_description(action)}")
+        if native:
+            return (
+                "通过原生工具调用执行操作，可在一轮中调用多个工具，按返回结果继续组合接口。"
+                "NapCat 原生接口统一使用 napcat_call，参数和消息段由你决定；"
+                "需要参数说明时调用 napcat_discover，无需套用固定 action 模板。"
+                "消息数量、分段、图文组合、引用、@及目标会话由你自主选择。"
+                "已通过接口发送的回复不在最终文本重复；需要继续说话时可以继续发送。\n\n"
+                + "\n\n".join(sections)
+            )
         return (
             "本地技能通过纯文本协议调用。需要执行操作时，整条回复只能包含一个如下块，不能附加解释：\n"
             f"{CALL_START}\n"

@@ -128,7 +128,7 @@ def relationship_guard(state: Dict[str, Any], persona: Dict[str, Any] | None = N
 def _guard(persona: Dict[str, Any] | None, rules: str, relationship: str = "") -> str:
     p = persona or load_persona()
     guard = p["voice_guard"]
-    examples = "" if relationship else "\n".join(
+    examples = "\n".join(
         f"- 用户：{row['user']}\n  碧波：{row['assistant']}"
         for row in guard["examples"]
     )

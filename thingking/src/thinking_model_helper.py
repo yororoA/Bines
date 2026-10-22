@@ -1,6 +1,7 @@
 """Single-model client and text-protocol local Skill execution."""
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Iterable, List, Tuple
 
 from config import DEEPSEEK_MODEL
@@ -39,6 +40,11 @@ class ThinkingModelHelper:
         max_tokens: int = 2048,
     ) -> Tuple[str, List[Dict[str, str]], List[str]]:
         """Request one text-protocol skill at a time and return ordinary final text."""
+        if source in {"QQ", "qq"}:
+            return self.run_tool_calls(messages, skill_runner, source=source,
+                                       max_iterations=max(24, max_iterations),
+                                       temperature=temperature, max_tokens=max_tokens,
+                                       allowed_skills=allowed_skills)
         conversation = [dict(message) for message in messages]
         skill_rules = skill_runner.instructions_for_source(source, allowed_skills)
         if not conversation or conversation[0].get("role") != "system":
@@ -76,3 +82,52 @@ class ThinkingModelHelper:
             })
 
         return final_text or (history[-1]["result"] if history else ""), history, []
+
+    def run_tool_calls(self, messages, skill_runner, *, source="QQ", max_iterations=24,
+                       temperature=0.2, max_tokens=2048, allowed_skills=None):
+        """Execute model-selected native calls in order, preserving thinking turns."""
+        conversation = [dict(message) for message in messages]
+        rules = skill_runner.instructions_for_source(source, allowed_skills, native=True)
+        # Tool documentation describes capabilities; the following character and
+        # scoped context define how the assistant speaks and what it remembers.
+        conversation.insert(0, {"role": "system", "content": rules})
+        tools = skill_runner.function_tools(source, allowed_skills)
+        # Keep the turn's already-sampled voice after tool results, which otherwise
+        # become the last instructions before each newly generated message.
+        voice = next((message["content"] for message in reversed(messages)
+                      if message.get("role") == "system"
+                      and message.get("content", "").startswith("--- 本轮角色口吻")), "")
+        history = []
+        for _ in range(max_iterations):
+            request_messages = [*conversation, *([{"role": "system", "content": voice}] if voice else [])]
+            response = self.client.chat.completions.create(
+                model=self.model, messages=request_messages, tools=tools or None,
+                temperature=temperature, max_tokens=max_tokens, stream=False,
+            )
+            if not response.choices:
+                return "", history, []
+            message = response.choices[0].message
+            calls = message.tool_calls or []
+            if not calls:
+                return (message.content or "").strip(), history, []
+            assistant = {"role": "assistant", "content": message.content or "",
+                         "tool_calls": [call.model_dump(exclude_none=True) for call in calls]}
+            reasoning = getattr(message, "reasoning_content", None)
+            if reasoning is not None:
+                assistant["reasoning_content"] = reasoning
+            conversation.append(assistant)
+            for call in calls:
+                action = call.function.name
+                try:
+                    args = json.loads(call.function.arguments)
+                except (TypeError, json.JSONDecodeError):
+                    result = "工具参数必须是有效的 JSON 对象"
+                else:
+                    result = skill_runner.execute(
+                        {"skill": skill_runner.action_to_skill.get(action),
+                         "action": action, "args": args}, source=source,
+                        allowed_skills=allowed_skills,
+                    )
+                history.append({"action": action, "result": result})
+                conversation.append({"role": "tool", "tool_call_id": call.id, "content": result})
+        raise RuntimeError("QQ 工具调用达到轮次上限；已执行的操作保留回执")

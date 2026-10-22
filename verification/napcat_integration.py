@@ -35,6 +35,7 @@ class FakeAPI:
     def __init__(self):
         self.calls = []
         self.history = []
+        self.quoted = {}
         self.send_status = "ok"
         self.custom_faces = [
             {
@@ -47,6 +48,9 @@ class FakeAPI:
         self.calls.append((action, params))
         if action.endswith("msg_history"):
             return {"status": "ok", "retcode": 0, "data": {"messages": self.history}}
+        if action == "get_msg":
+            data = self.quoted.get(str(params.get("message_id")))
+            return {"status": "ok", "retcode": 0, "data": data} if data else {"status": "failed"}
         if action == "fetch_custom_face":
             return {"status": "ok", "retcode": 0,
                     "data": [row["url"] for row in self.custom_faces[:int(params.get("count", 20))]]}
@@ -229,22 +233,109 @@ class Integration(unittest.TestCase):
                 self.assertEqual(collapse.call_count, 1 if expected else 0)
                 self.store.finish([row["id"] for row in rows], "worker")
 
-    def test_long_group_reply_is_split_into_short_messages(self):
-        from chatBot.messages import split_qq_text
+    def test_quoted_image_and_mention_are_analyzed_in_group_and_private(self):
+        for group in ("10", None):
+            with self.subTest(group=group):
+                quoted = event("3" if group else "2", group=group, msg_id=95, message=[
+                    {"type": "image", "data": {"url": "https://qq.example/quoted.png", "file": "image.png"}},
+                ])
+                self.api.quoted["95"] = quoted
+                # The reference is outside the recent history/cache window.
+                current = event("2", group=group, msg_id=96, message=[
+                    {"type": "reply", "data": {"id": "95"}},
+                    {"type": "at", "data": {"qq": "99"}},
+                    {"type": "text", "data": {"text": " "}},
+                ])
+                self.insert(current)
+                rows = self.store.claim("worker", 0, 0)
 
-        self.assertEqual(split_qq_text("短回复"), ["短回复"])
+                class Model:
+                    def run_skill_protocol(inner, conversation, runner, **kwargs):
+                        self.assertIn("引用消息 95", conversation[-1]["content"])
+                        self.assertIn("不是空@", str(conversation))
+                        self.assertIn("小猫举着写有下班的牌子", str(conversation))
+                        return "这猫也想下班啦", [], []
+
+                with patch("config.DEEPSEEK_API_KEY", "test"), patch(
+                    "vlm_client.call_vision", return_value="小猫举着写有下班的牌子"
+                ) as vision:
+                    QQThinking(self.store, self.client).process(rows, Model())
+                self.assertEqual(vision.call_args.args[0], ["https://qq.example/quoted.png"])
+                self.assertEqual(vision.call_args.kwargs["image_labels"], ["引用消息 95 的图片"])
+                self.store.finish([row["id"] for row in rows], "worker")
+
+    def test_each_batched_reply_uses_its_own_event_authority(self):
+        for message_id in (101, 102):
+            self.api.quoted[str(message_id)] = event("3", group="10", msg_id=message_id, text=f"引用{message_id}")
+            self.insert(event("2", group="10", msg_id=message_id + 100, message=[
+                {"type": "reply", "data": {"id": str(message_id)}},
+                {"type": "at", "data": {"qq": "99"}},
+            ]))
+        rows = self.store.claim("worker", 0, 0)
+
+        class Model:
+            def run_skill_protocol(inner, conversation, runner, **kwargs):
+                self.assertIn("引用101", conversation[-1]["content"])
+                self.assertIn("引用102", conversation[-1]["content"])
+                return "看到这两条啦", [], []
+
+        QQThinking(self.store, self.client).process(rows, Model())
+        self.assertEqual(sum(action == "get_msg" for action, _ in self.api.calls), 2)
+
+    def test_quoted_message_rejects_foreign_peer_and_unreferenced_ids(self):
+        current = event("2", group="10", msg_id=97, message=[
+            {"type": "reply", "data": {"id": "95"}}, {"type": "at", "data": {"qq": "99"}},
+        ])
+        event_id = self.insert(current)
+        identity = self.store.identity(current)
+        self.api.quoted["95"] = event("3", group="20", msg_id=95, text="其他群的秘密")
+        with tool_context(ToolContext(identity, event_id, "bad-reference")):
+            with self.assertRaises(RuntimeError):
+                self.client.request("/quoted_message", {"message_id": "95"})
+            with self.assertRaises(RuntimeError):
+                self.client.request("/quoted_message", {"message_id": "96"})
+        self.assertEqual(sum(action == "get_msg" for action, _ in self.api.calls), 1)
+
+    def test_recalled_quote_is_not_read_or_passed_to_vision(self):
+        original = event("3", group="10", msg_id=95, message=[
+            {"type": "image", "data": {"url": "https://qq.example/recalled.png"}},
+        ])
+        self.insert(original)
+        with self.store.connection() as db:
+            db.execute("UPDATE events SET status='done'")
+            db.execute("UPDATE messages SET recalled=1,content='[消息已撤回]',raw=NULL")
+        self.insert(event("2", group="10", msg_id=97, message=[
+            {"type": "reply", "data": {"id": "95"}}, {"type": "at", "data": {"qq": "99"}},
+        ]))
+        rows = self.store.claim("worker", 0, 0)
+
+        class Model:
+            def run_skill_protocol(inner, conversation, runner, **kwargs):
+                self.assertIn("已撤回", conversation[-1]["content"])
+                return "引用的那张看不到了 重发一下吧", [], []
+
+        with patch("vlm_client.call_vision") as vision:
+            QQThinking(self.store, self.client).process(rows, Model())
+        vision.assert_not_called()
+        self.assertFalse(any(action == "get_msg" for action, _ in self.api.calls))
+
+    def test_images_without_usable_source_or_vision_config_are_not_empty(self):
+        from chatBot.media import describe_images
+        with patch("config.DEEPSEEK_API_KEY", ""):
+            self.assertIn("识别未配置", describe_images([{"message": [
+                {"type": "image", "data": {"url": "https://qq.example/test.png"}},
+            ]}]))
+        with patch("config.DEEPSEEK_API_KEY", "test"):
+            self.assertIn("暂不可读取", describe_images([{"message": [
+                {"type": "image", "data": {"file": "local-image.png"}},
+            ]}]))
+        self.assertEqual(describe_images([{"message": [{"type": "at", "data": {"qq": "99"}}]}]), "")
+
+    def test_model_final_text_is_not_split_or_automatically_mentioned(self):
         long_text = (
             "这是一段比较长的说明。它会被拆成多条短消息发送。"
             "每条只讲一个意思。这样群里看起来不会太累。"
         ) * 3
-        chunks = split_qq_text(long_text)
-        self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(len(chunk) <= 15 for chunk in chunks))
-        # Words must not be cut in half: split only at whitespace or punctuation.
-        self.assertEqual(
-            split_qq_text("知道啊 黑白简笔画少女闭眼举双手 头顶写着投降两字"),
-            ["知道啊", "黑白简笔画少女闭眼举双手", "头顶写着投降两字"],
-        )
 
         for group in ("10", None):
             with self.subTest(group=group):
@@ -261,16 +352,140 @@ class Integration(unittest.TestCase):
                 bot.process(rows, Model())
                 expected = "send_group_msg" if group else "send_private_msg"
                 sends = [params for action, params in self.api.calls if action == expected]
-                self.assertGreater(len(sends), 1)
-                self.assertTrue(all(len(params["message"][-1]["data"]["text"]) <= 15 for params in sends))
-                if group:
-                    self.assertEqual(sum(
-                        any(part["type"] == "at" for part in params["message"]) for params in sends
-                    ), 1)
-                    self.assertTrue(all(
-                        not any(part["type"] == "at" for part in params["message"]) for params in sends[1:]
-                    ))
+                self.assertEqual(len(sends), 1)
+                self.assertEqual(sends[0]["message"], [{"type": "text", "data": {"text": long_text}}])
                 self.store.finish([row["id"] for row in rows], "worker")
+
+    def test_native_calls_preserve_model_message_layout_targets_and_reasoning(self):
+        from copy import deepcopy
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from openai.types.chat import ChatCompletionMessage
+        from thinking_model_helper import ThinkingModelHelper
+
+        original = event("1", group="10", msg_id=401, message=[
+            {"type": "at", "data": {"qq": "99"}},
+            {"type": "text", "data": {"text": "按你想的方式发两段并通知另外一群"}},
+        ])
+        self.insert(original)
+        rows = self.store.claim("worker", 0, 0)
+        first_chain = [
+            {"type": "reply", "data": {"id": "401"}},
+            {"type": "text", "data": {"text": "这段很长也保持为模型选择的一条消息\n保留模型自己的换行"}},
+            {"type": "image", "data": {"file": "https://example.test/media.png", "sub_type": 1}},
+            {"type": "face", "data": {"id": "1"}},
+        ]
+        second_chain = [
+            {"type": "at", "data": {"qq": "all"}},
+            {"type": "text", "data": {"text": "第二段由模型选择单独发送"}},
+        ]
+        other_chain = [{"type": "text", "data": {"text": "另一群的通知"}}]
+        params = [
+            {"group_id": "10", "message": first_chain},
+            {"group_id": "10", "message": second_chain},
+            {"group_id": "20", "message": other_chain},
+        ]
+        calls = [
+            {"id": f"native-{index}", "type": "function",
+             "function": {"name": "napcat_call", "arguments": json.dumps({
+                 "action": "send_group_msg", "params": payload,
+             })}}
+            for index, payload in enumerate(params)
+        ]
+        model = ThinkingModelHelper.__new__(ThinkingModelHelper)
+        model.model = "test"
+        requests = []
+        responses = [
+            ChatCompletionMessage(role="assistant", content=None, tool_calls=calls,
+                                  reasoning_content="先按不同用途组合消息"),
+            ChatCompletionMessage(role="assistant", content="已经发送 不要再向群里发送这段确认"),
+        ]
+
+        def complete(**kwargs):
+            requests.append(deepcopy(kwargs))
+            return SimpleNamespace(choices=[SimpleNamespace(message=responses.pop(0))])
+
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=complete)))
+        with patch("tools.napcat_tool.GatewayClient", return_value=self.client):
+            QQThinking(self.store, self.client).process(rows, model)
+        sends = [payload for action, payload in self.api.calls if action == "send_group_msg"]
+        self.assertEqual(sends, params)
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(requests[0]["tools"])
+        self.assertNotIn("[[SKILL_CALL]]", requests[0]["messages"][0]["content"])
+        self.assertTrue(requests[0]["messages"][-1]["content"].startswith("--- 本轮角色口吻"))
+        continuation = requests[1]["messages"]
+        self.assertTrue(continuation[-1]["content"].startswith("--- 本轮角色口吻"))
+        self.assertEqual(continuation[-1], requests[0]["messages"][-1])
+        self.assertEqual(continuation[-5]["reasoning_content"], "先按不同用途组合消息")
+        self.assertEqual([message["tool_call_id"] for message in continuation[-4:-1]],
+                         ["native-0", "native-1", "native-2"])
+        for message in continuation[-4:-1]:
+            self.assertIn("'status': 'ok'", message["content"])
+        self.assertNotIn("另一群的通知", str(self.store.context(self.store.identity(original))))
+        self.assertIn("另一群的通知", str(self.store.context(Identity("99", "1", "20", owner=True))))
+        QQThinking(self.store, self.client).process(rows, Mock())
+        self.assertEqual(len([call for call in self.api.calls if call[0] == "send_group_msg"]), 3)
+
+    def test_native_tool_error_is_returned_to_model_for_correction(self):
+        from types import SimpleNamespace
+        from openai.types.chat import ChatCompletionMessage
+        from thinking_model_helper import ThinkingModelHelper
+
+        current = event("2", msg_id=405)
+        event_id = self.insert(current)
+        messages = [
+            ChatCompletionMessage(role="assistant", content=None, tool_calls=[{
+                "id": "invalid", "type": "function",
+                "function": {"name": "napcat_call", "arguments": "not json"},
+            }]),
+            ChatCompletionMessage(role="assistant", content="重新说明一下"),
+        ]
+        seen = []
+
+        def complete(**kwargs):
+            seen.append(kwargs["messages"][:])
+            return SimpleNamespace(choices=[SimpleNamespace(message=messages.pop(0))])
+
+        model = ThinkingModelHelper.__new__(ThinkingModelHelper)
+        model.model = "test"
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=complete)))
+        bot = QQThinking(self.store, self.client)
+        with tool_context(ToolContext(self.store.identity(current), event_id, "native-invalid")):
+            text, _, _ = model.run_skill_protocol(
+                [{"role": "user", "content": "测试"}], bot.runner, source="QQ", allowed_skills=["napcat"],
+            )
+        self.assertEqual(text, "重新说明一下")
+        self.assertIn("有效的 JSON", seen[1][-1]["content"])
+        self.assertFalse(self.api.calls)
+
+    def test_owner_group_raw_api_preserves_all_native_media_segments(self):
+        current = event("1", group="10", msg_id=408)
+        event_id = self.insert(current)
+        chain = [
+            {"type": kind, "data": payload} for kind, payload in (
+                ("reply", {"id": "408"}),
+                ("at", {"qq": "all"}),
+                ("text", {"text": "正文\n模型自己换行"}),
+                ("image", {"file": "https://example.test/a.gif", "sub_type": 1}),
+                ("record", {"file": "/bines-media/voice.amr"}),
+                ("video", {"file": "/bines-media/video.mp4"}),
+                ("json", {"data": '{"app":"com.tencent.structmsg"}'}),
+                ("markdown", {"content": "# 原生内容"}),
+                ("contact", {"type": "qq", "id": "2"}),
+                ("location", {"lat": 1, "lon": 2}),
+                ("dice", {}),
+                ("rps", {}),
+            )
+        ]
+        with tool_context(ToolContext(self.store.identity(current), event_id, "all-segments")):
+            result = self.client.raw_api("send_group_msg", {"group_id": "20", "message": chain})
+            self.assertEqual(result["status"], "ok")
+            extension = self.client.raw_api("future_napcat_extension", {"anything": {"nested": [1, 2]}})
+            self.assertEqual(extension["status"], "ok")
+        self.assertEqual(self.api.calls[0][1]["message"], chain)
+        self.assertEqual(self.api.calls[0][1]["group_id"], "20")
+        self.assertEqual(self.api.calls[1], ("future_napcat_extension", {"anything": {"nested": [1, 2]}}))
 
     def test_cq_and_streaming_transport_nonblocking(self):
         self.assertEqual(segments("[CQ:at,qq=99]a&amp;b")[1]["data"]["text"], "a&b")
@@ -614,10 +829,10 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
                     with patch("tools.napcat_tool.GatewayClient", return_value=self.client):
                         QQThinking(self.store, self.client).process(rows, Model())
                     sends = [p for a, p in self.api.calls[before:] if a.startswith("send_")]
-                    self.assertEqual(len(sends), 1 if kind == "combined" else 2)
+                    self.assertEqual(len(sends), 1)
                     self.assertTrue(any(part["type"] == "image" for part in sends[0]["message"]))
                     texts = [part["data"]["text"] for p in sends for part in p["message"] if part["type"] == "text"]
-                    self.assertEqual(texts, ["晚安"])
+                    self.assertEqual(texts, ["晚安"] if kind == "combined" else [])
                     self.store.finish([r["id"] for r in rows], "worker")
 
     def test_stale_observed_image_url_is_not_reused(self):

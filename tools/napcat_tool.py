@@ -98,6 +98,7 @@ def napcat_custom_faces(count: int = 20):
         "index": index,
         "description": row.get("desc") or row.get("ocrWord") or "[表情]",
         "md5": row.get("md5", ""),
+        "url": row["url"],
     } for index, row in enumerate(rows)]
 
 

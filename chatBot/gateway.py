@@ -48,15 +48,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 result = service.catalog.status(identity)
                 result["connected"] = service.client.is_connected
             elif self.path == "/schemas":
-                if not identity.privileged:
-                    raise PermissionError("完整 schema 只允许本机或主人私聊")
+                if not (identity.local or identity.owner):
+                    raise PermissionError("完整 schema 只允许本机或已绑定主人")
                 result = service.catalog.schemas()
             elif self.path == "/action":
                 result = service.call(identity, data["action"], data.get("params", {}),
                                       data.get("operation_id"), data.get("timeout", 30))
+            elif self.path == "/quoted_message":
+                result = service.quoted_message(identity, event_id, data.get("message_id"))
             elif self.path == "/operation":
-                if not identity.privileged:
-                    raise PermissionError("回执查询只允许本机或主人私聊")
+                if not (identity.local or identity.owner):
+                    raise PermissionError("回执查询只允许本机或已绑定主人")
                 result = service.store.operation(data["operation_id"])
             elif self.path == "/operation_state":
                 # Internal endpoint for local Thinking processes: it only reads the

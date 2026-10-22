@@ -24,7 +24,7 @@ CUSTOM_FACE_URL_PREFIX = "https://p.qpic.cn/qq_expression/"
 
 
 def allowed_actions(identity, schemas):
-    if identity.privileged:
+    if identity.local or identity.owner:
         return set(schemas)
     allowed = set(schemas) & SCOPED
     if identity.owner and identity.group:
@@ -91,11 +91,11 @@ class SchemaCatalog:
         return {
             "documented_version": manifest["version"], "source": manifest["source"],
             "documented_actions": len(documented), "catalog_actions": len(schemas),
-            "allowed_actions": len(allowed), "all_actions_allowed": identity.privileged,
+            "allowed_actions": len(allowed), "all_actions_allowed": identity.local or identity.owner,
             "runtime_verified": self._runtime is not None,
             "runtime_actions": len(self._runtime) if self._runtime is not None else None,
-            "missing_in_runtime": sorted(documented - self._runtime) if self._runtime is not None and identity.privileged else None,
-            "runtime_only_actions": sorted(self._runtime - documented) if self._runtime is not None and identity.privileged else None,
+            "missing_in_runtime": sorted(documented - self._runtime) if self._runtime is not None and (identity.local or identity.owner) else None,
+            "runtime_only_actions": sorted(self._runtime - documented) if self._runtime is not None and (identity.local or identity.owner) else None,
             "notice": self._runtime_error,
         }
 
@@ -134,6 +134,56 @@ class CapabilityService:
         if not row:
             raise PermissionError("不能引用或转发其他会话、不存在或已撤回的消息")
         return row
+
+    def quoted_message(self, identity, event_id, message_id):
+        """Resolve only a reply actually present in this event, checking its peer."""
+        message_id = str(message_id)
+        if not event_id or not re.fullmatch(r"-?\d+", message_id):
+            raise PermissionError("引用消息需来自当前 QQ 事件")
+        with self.store.connection() as db:
+            row = db.execute("SELECT raw FROM events WHERE id=?", (event_id,)).fetchone()
+        event = json.loads(row["raw"]) if row else {}
+        current = self.store.identity(event)
+        references = {
+            str((part.get("data") or {}).get("id"))
+            for part in segments(event.get("message", event.get("raw_message", "")))
+            if part.get("type") == "reply"
+        }
+        if current != identity or message_id not in references:
+            raise PermissionError("该消息不是本轮实际引用的消息")
+        external_id = f"{identity.account}:{identity.group or 'p:'+identity.user}:{message_id}"
+        with self.store.connection() as db:
+            cached = db.execute(
+                "SELECT raw,recalled FROM messages WHERE scope=? AND external_id=?",
+                (identity.scope, external_id),
+            ).fetchone()
+        if cached and cached["recalled"]:
+            return {"status": "failed", "msg": "引用消息已撤回"}
+        # Refresh expiring image URLs through NapCat; cached text remains useful
+        # when the original message is no longer available from the history API.
+        result = self.client.raw_api("get_msg", {"message_id": message_id}, timeout=10)
+        if not isinstance(result, dict) or result.get("status") != "ok":
+            if cached and cached["raw"]:
+                return {"status": "ok", "data": json.loads(cached["raw"])}
+            return {"status": "failed", "msg": "引用消息暂不可读取"}
+        data = result.get("data") or {}
+        if not isinstance(data, dict):
+            raise PermissionError("引用消息返回格式无效")
+        same_message = str(data.get("message_id")) == message_id
+        same_account = str(data.get("self_id", identity.account)) == identity.account
+        if identity.group:
+            same_peer = (data.get("message_type") == "group"
+                         and str(data.get("group_id")) == identity.group)
+        else:
+            sender = str(data.get("user_id") or (data.get("sender") or {}).get("user_id") or "")
+            outgoing_peer = str(data.get("target_id") or data.get("peer_id") or "")
+            same_peer = (data.get("message_type") == "private" and not data.get("group_id")
+                         and (sender == identity.user or
+                              (sender == identity.account and
+                               (outgoing_peer == identity.user or bool(cached)))))
+        if not (same_message and same_account and same_peer):
+            raise PermissionError("引用消息不属于当前会话")
+        return result
 
     def _image_source(self, identity, source):
         if not isinstance(source, str) or not source:
@@ -205,12 +255,10 @@ class CapabilityService:
                 raise ValueError("商城表情必须提供 emoji_package_id、emoji_id 和 key")
 
     def authorize(self, identity, action, params):
-        if identity.privileged:
-            return
-        if identity.owner and identity.group and action in OWNER_GROUP_READS:
+        if identity.local or identity.owner:
             return
         if action not in SCOPED:
-            raise PermissionError("该 NapCat 动作需要本机或显式绑定主人的私聊授权")
+            raise PermissionError("该 NapCat 动作需要本机或显式绑定的主人授权")
         if action.endswith("msg_history") and params.get("message_seq"):
             # NapCat resolves a short message ID to a global peer; a foreign cursor
             # must not pivot a conversation-scoped history request.
@@ -247,11 +295,12 @@ class CapabilityService:
             if not 1 <= count <= 100:
                 raise ValueError("count 必须为 1–100")
 
-    def call(self, identity, action, params=None, operation_id=None, timeout=30):
+    def prepare(self, identity, action, params=None):
+        """Normalize and authorize an action without dispatching it."""
         if not isinstance(action, str) or not action or len(action) > 128 or not isinstance(params or {}, dict):
             raise ValueError("action 和 params 格式无效")
         params = dict(params or {})
-        if action in SEND_ACTIONS:
+        if action in SEND_ACTIONS and not (identity.local or identity.owner):
             if "message" in params and "messages" in params:
                 raise ValueError("不能同时传 message 和 messages")
             field = "messages" if action in FORWARD_ACTIONS and "messages" in params else "message"
@@ -261,6 +310,10 @@ class CapabilityService:
             if action in FORWARD_ACTIONS and any(part["type"] != "node" for part in params[field]):
                 raise ValueError("合并转发需使用 node 消息段")
         self.authorize(identity, action, params)
+        return params
+
+    def call(self, identity, action, params=None, operation_id=None, timeout=30):
+        params = self.prepare(identity, action, params)
         if not is_read(action):
             if not operation_id:
                 raise ValueError("写操作必须携带 operation_id")

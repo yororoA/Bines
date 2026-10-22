@@ -42,17 +42,17 @@ class PersonaSourceTest(unittest.TestCase):
         guard = persona_profile.style_guard()
         self.assertIn("本轮角色口吻（高优先级）", guard)
         self.assertIn("不能退化成通用助手", guard)
-        self.assertIn("避免通用助手式寒暄", guard)
+        self.assertIn("安抚套话", guard)
         self.assertIn("不在回复中谈论人格提示", guard)
         self.assertIn("以下示例只约束语气", guard)
 
     def test_qq_style_guard_is_short_and_light_on_punctuation(self):
         guard = persona_profile.qq_style_guard()
         self.assertIn("QQ 回复格式", guard)
-        self.assertIn("简洁优先", guard)
+        self.assertIn("简洁直接", guard)
         self.assertIn("少用标点", guard)
-        self.assertIn("超过 15 个字", guard)
-        self.assertIn("不要从词中间截断", guard)
+        self.assertIn("自己决定分段", guard)
+        self.assertIn("不按字数拆分", guard)
         self.assertNotIn("正常使用逗号、顿号、句号", guard)
         self.assertIn("两个空格", persona_profile.output_rules())
 
@@ -68,7 +68,9 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("本轮关系口吻：非常亲密", guard)
         self.assertIn("直白表达感谢与关心", guard)
         self.assertIn("真诚夸奖", guard)
-        self.assertIn("我很在乎你", guard)
+        self.assertIn("日常", guard)
+        self.assertIn("趴着降温", guard)
+        self.assertIn("嗯哼", guard)
         self.assertNotIn("别让我重复", guard)
         self.assertEqual(state["relationship_level"], "普通")
         for score, level in ((-200, "敌对"), (-80, "冷淡"), (0, "普通"), (80, "亲近"), (200, "非常亲密")):

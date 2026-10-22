@@ -109,8 +109,8 @@ def model_api_index(privileged=True, allowed=None):
     return (
         f"NapCatDocs {manifest['version']} API 索引：本身份可调用 {len(names)}/{len(catalog)} 个文档接口。\n"
         "这是文档目录，不能据此声称运行中的 NapCat 已支持或已执行接口。"
-        "先用 napcat_catalog 查询运行状态，napcat_discover(action=接口名) 获取参数，"
-        "再用 napcat_call(action=接口名, params={...}) 调用。"
+        "使用 napcat_call(action=接口名, params={...}) 调用；"
+        "需要参数说明时用 napcat_discover(action=接口名)，运行状态用 napcat_catalog 查询。"
         "运行时的新接口通过 napcat_discover() 发现。\n" + "\n".join(rows)
     )
 

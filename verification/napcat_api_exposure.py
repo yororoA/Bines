@@ -111,11 +111,11 @@ class APIExposure(unittest.TestCase):
         with tool_context(ToolContext(owner_group, "trusted-owner-group", "owner-group")):
             instructions = self.runner.instructions_for_source("QQ")
             self.assertIn("napcat_send_custom_face", instructions)
-            self.assertNotIn("- get_credentials:", instructions)
+            self.assertIn("- get_credentials:", instructions)
         discovered = self.catalog.discover(owner_group)
         self.assertEqual(
             {row["action"] for row in discovered},
-            expected & (SCOPED | OWNER_GROUP_READS),
+            expected,
         )
         self.assertEqual(
             self.server.service.call(owner_group, "fetch_custom_face", {"count": 20})["status"],

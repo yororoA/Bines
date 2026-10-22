@@ -11,12 +11,13 @@ class GatewayClient:
         self.url, self.token = url.rstrip("/"), token or gateway_token()
         self.opener = build_opener(ProxyHandler({}))
 
-    def request(self, path, data, timeout=30):
+    def request(self, path, data, timeout=30, *, event_id=None):
         from tools.context import CURRENT_CONTEXT
         context = CURRENT_CONTEXT.get()
         payload = dict(data)
-        if context.event_id:
-            payload["event_id"] = context.event_id
+        current_event_id = event_id or context.event_id
+        if current_event_id:
+            payload["event_id"] = current_event_id
         request = Request(self.url+path, data=json.dumps(payload).encode(), headers={
             "Content-Type": "application/json", "Authorization": f"Bearer {self.token}",
         })
