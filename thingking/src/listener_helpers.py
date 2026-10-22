@@ -50,3 +50,25 @@ def build_bored_prompt(event_data: Dict[str, Any]) -> Tuple[str, str]:
             "or start a casual conversation.)"
         )
     return log_line, prompt
+
+
+def bored_event_rejection(event_data, snapshot, now, *, online=True, busy=False, config=None):
+    """Recheck candidate freshness after queueing and before publishing local output."""
+    from common.proactive import ProactiveConfig, human_ref, parse_decision
+    config = config or ProactiveConfig.from_env()
+    if not online or busy:
+        return "unavailable"
+    if event_data.get("kind") == "connection" and config.quiet(now):
+        return "quiet_hours"
+    if not 0 <= now - float(event_data.get("timestamp") or 0) <= config.expiry:
+        return "expired"
+    user = snapshot.get("last_user") or {}
+    if not human_ref(user) or human_ref(user) != event_data.get("based_on_user"):
+        return "new_user_message"
+    owner_ts = float((snapshot.get("last_owner_activity") or {}).get("ts") or 0)
+    if owner_ts > float(event_data.get("activity_at") or 0):
+        return "owner_active_elsewhere"
+    if now - max(float(user.get("ts") or 0), owner_ts) < config.min_idle:
+        return "not_idle"
+    decision = parse_decision(json.dumps({**event_data, "should_act": True}))
+    return "" if decision and event_data.get("id") else "invalid_candidate"

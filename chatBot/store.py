@@ -68,6 +68,14 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS turns (
                     id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT
                 );
+                CREATE TABLE IF NOT EXISTS proactive_sessions (
+                    conversation TEXT PRIMARY KEY, value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS proactive_runs (
+                    id TEXT PRIMARY KEY, conversation TEXT NOT NULL, candidate TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued', delivered_at REAL DEFAULT 0,
+                    error TEXT
+                );
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(events)")}
             if "batch" not in columns:
@@ -149,6 +157,10 @@ class MemoryStore:
                 rows = db.execute("SELECT * FROM events WHERE batch=? AND status='pending' ORDER BY received,id", (batch,)).fetchall()
             else:
                 rows = [event for event in rows if not event["batch"]]
+                # Internal initiations never coalesce into a real person's reply batch.
+                humans = [event for event in rows
+                          if json.loads(event["raw"]).get("post_type") != "bines_proactive"]
+                rows = humans or rows[:1]
                 batch = hashlib.sha256("|".join(event["id"] for event in rows).encode()).hexdigest()
             for event in rows:
                 db.execute("UPDATE events SET status='working',worker=?,lease=?,attempts=attempts+1,batch=? WHERE id=?",

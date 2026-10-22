@@ -37,6 +37,7 @@ _OPERATING_RULES = [
     "不要把它们变成当前状态或继续照着它们演。工具目录说明具备什么能力，"
     "运行是否可用、是否查询或执行过必须以本轮真实回执为准。",
     "收到 [System Event: Long Silence] 或 [System Event: Bored] 时，可以随口开启话题，也可以保持安静；只有情境明确需要时才使用技能。",
+    "可信 [System Event: Will] 是自主意愿轮次：结合时间、当前情绪和有依据的历史，自主选择交流、探索或操作技能，也可以暂缓。遵守本轮 contact_allowed 与执行状态，不续演用户回复。",
 ]
 
 _STATE_LABELS = (

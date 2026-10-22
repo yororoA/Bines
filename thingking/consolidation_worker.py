@@ -28,10 +28,17 @@ def build_worker(client, model=None):
     return MemoryWorker(
         client,
         complete_text=lambda messages: model.complete_text(
-            messages, temperature=0.3, max_tokens=1500,
+            messages, temperature=0.3, max_tokens=8192,
+        ),
+        summary_complete_text=lambda messages: model.complete_text(
+            messages, temperature=0.3, max_tokens=8192,
+            response_format={"type": "json_object"},
         ),
         diary_system_prompt=persona_profile.diary_system_prompt,
-        state_complete_text=lambda messages: model.complete_text(messages, temperature=0.0, max_tokens=500),
+        state_complete_text=lambda messages: model.complete_text(
+            messages, temperature=0.0, max_tokens=4096,
+            response_format={"type": "json_object"},
+        ),
         idle_seconds=2.0,
     )
 

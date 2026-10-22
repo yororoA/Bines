@@ -28,13 +28,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("请求大小无效")
             data = json.loads(self.rfile.read(length))
             identity = LOCAL_IDENTITY
+            event = {}
             event_id = data.get("event_id")
             if event_id:
                 with self.server.service.store.connection() as db:
                     row = db.execute("SELECT raw FROM events WHERE id=?", (event_id,)).fetchone()
                 if not row:
                     raise PermissionError("未知 QQ 事件")
-                identity = self.server.service.store.identity(json.loads(row["raw"]))
+                event = {**json.loads(row["raw"]), "event_id": event_id}
+                identity = self.server.service.store.identity(event)
             service = self.server.service
             if self.path == "/health":
                 result = {"connected": service.client.is_connected}
@@ -52,6 +54,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     raise PermissionError("完整 schema 只允许本机或已绑定主人")
                 result = service.catalog.schemas()
             elif self.path == "/action":
+                if event.get("post_type") == "bines_proactive":
+                    from chatBot.proactive import dispatch_allowed
+                    activity = self.server.memory_hub.call(
+                        LOCAL_IDENTITY, "activity_snapshot", {},
+                    ).get("last_owner_activity") or {}
+                    dispatch_allowed(service.store, event, data["action"], data.get("params", {}),
+                                     data.get("operation_id"), central_activity=float(activity.get("ts") or 0))
                 result = service.call(identity, data["action"], data.get("params", {}),
                                       data.get("operation_id"), data.get("timeout", 30))
             elif self.path == "/quoted_message":

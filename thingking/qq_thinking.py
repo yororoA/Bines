@@ -147,6 +147,16 @@ class QQThinking:
 
     def process(self, rows, model):
         events = [{**json.loads(row["raw"]), "event_id": row["id"]} for row in rows]
+        if any(event.get("post_type") == "bines_proactive" for event in events):
+            for event in events:
+                if event.get("post_type") == "bines_proactive":
+                    self.process_proactive(event, model)
+            # A legacy/mixed batch must still process the real input on its own.
+            human_rows = [row for row, event in zip(rows, events)
+                          if event.get("post_type") != "bines_proactive"]
+            if human_rows:
+                self.process(human_rows, model)
+            return
         identity = self.store.identity(events[-1])
         relevant = [event for event in events if self.should_reply(event, self.store.identity(event))]
         if not relevant:
@@ -254,6 +264,75 @@ class QQThinking:
                 return
             self.send_actions(identity, turn_id, self.reply_actions(identity, [text]))
 
+    def process_proactive(self, event, model):
+        from chatBot.proactive import guard
+        from will_runtime import run_intention, outcome_succeeded
+        identity, turn_id = self.store.identity(event), event["event_id"]
+        snapshot = self.memory.activity_snapshot()
+        activity = (snapshot.get("last_owner_activity") or {}).get("ts") or 0
+        previous = self.store.begin_turn(turn_id)
+        if previous and previous["status"] == "done":
+            return
+        # Receipt recovery is allowed after expiry, but never dispatch a new stale write.
+        reason = guard(self.store, event, central_activity=float(activity))
+        if reason and not self.store.turn_writes(turn_id):
+            with self.store.connection() as db:
+                db.execute("UPDATE proactive_runs SET status='skipped',error=? WHERE id=?", (reason, turn_id))
+            self.store.save_turn(turn_id, "done")
+            return
+        try:
+            completed = False
+            context = ToolContext(identity, turn_id, turn_id, autonomous=True,
+                                  contact_allowed=event["proactive"].get("contact_allowed", True))
+            with tool_context(context):
+                if previous and previous["status"] == "ready":
+                    saved = json.loads(previous["payload"])
+                    self.send_actions(identity, turn_id, saved["actions"], int(saved.get("next", 0)))
+                    completed = True
+                elif previous and self.store.turn_writes(turn_id):
+                    # A crash during autonomous tool use must not rerun its model.
+                    raise RuntimeError("自主轮次已执行操作，保留回执，禁止重新生成")
+                else:
+                    def check():
+                        latest = self.memory.activity_snapshot()
+                        activity = (latest.get("last_owner_activity") or {}).get("ts") or 0
+                        return guard(self.store, event, central_activity=float(activity))
+                    memory_context = self.memory.build_context(
+                        identity_envelope(identity), query=event["proactive"]["topic"],
+                    )
+                    try:
+                        text, outcomes = run_intention(
+                            model, self.runner, memory_context, event["proactive"], check,
+                        )
+                    finally:
+                        for receipt in context.receipts:
+                            if receipt["action"] in SEND_ACTIONS:
+                                self.remember_send(identity, receipt["params"], receipt.get("result") or {})
+                    if any((r.get("result") or {}).get("status") == "uncertain" for r in context.receipts):
+                        raise RuntimeError("自主操作回执不确定，暂停本轮")
+                    sent = any(r["action"] in SEND_ACTIONS and successful(r.get("result"))
+                               for r in context.receipts)
+                    if (event["proactive"]["kind"] == "connection" and text.strip()
+                            and not sent and not check()):
+                        self.send_actions(identity, turn_id, self.reply_actions(identity, [text]))
+                        completed = True
+                    else:
+                        self.store.save_turn(turn_id, "done", {"outcomes": outcomes, "reflection": text[:2000]})
+                        completed = sent or any(outcome_succeeded(item) for item in outcomes)
+            with self.store.connection() as db:
+                db.execute("UPDATE proactive_runs SET status=?,delivered_at=? WHERE id=?",
+                           ("completed" if completed else "skipped", time.time() if completed else 0, turn_id))
+            log.info("自主意图已完成 · %s", event["proactive"]["topic"])
+        except Exception as exc:
+            with self.store.connection() as db:
+                uncertain = db.execute(
+                    "SELECT 1 FROM operations WHERE id LIKE ? AND status IN ('started','uncertain')",
+                    (turn_id + ":%",),
+                ).fetchone()
+                db.execute("UPDATE proactive_runs SET status=?,error=? WHERE id=?",
+                           ("uncertain" if uncertain else "failed", str(exc), turn_id))
+            raise
+
     def worker(self):
         worker = str(uuid.uuid4())
         if self.model_factory:
@@ -298,6 +377,10 @@ class QQThinking:
         deps.register_memory_client(self.memory)
         # Summaries, facts and diaries are owned by the standalone Memory Worker.
         threads = [threading.Thread(target=self.worker, name=f"qq-thinking-{index}") for index in range(WORKERS)]
+        from chatBot.proactive import QQProactive, enabled
+        if enabled():
+            scheduler = QQProactive(self.store, self.memory, self.client)
+            threads.append(threading.Thread(target=scheduler.run, args=(self.stop,), name="qq-proactive"))
         for thread in threads:
             thread.start()
         log.info("QQ Thinking ready · %s workers", WORKERS)

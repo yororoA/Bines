@@ -124,6 +124,13 @@ class MemoryHub:
                 elif method == "search":
                     params["scopes"] = [identity.scope]
                     params["k"] = max(1, min(int(params.get("k", 8)), 20))
+                elif method == "activity_snapshot" and identity.owner and not identity.group and event_id:
+                    # Only a persisted scheduler event can recheck cross-channel activity.
+                    with self.store.connection() as db:
+                        event_row = db.execute("SELECT raw FROM events WHERE id=?", (event_id,)).fetchone()
+                    if not event_row or json.loads(event_row["raw"]).get("post_type") != "bines_proactive":
+                        raise PermissionError("活动检查仅用于可信自主轮次")
+                    params = {"limit": 0}
                 else:
                     raise PermissionError("当前 QQ 会话只允许读取自身上下文和更新自身状态")
             if method == "build_context":

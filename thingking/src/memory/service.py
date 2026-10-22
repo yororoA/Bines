@@ -373,9 +373,29 @@ class MemoryService:
         return {"imported": imported}
 
     def activity_snapshot(self, limit: int = 10) -> Dict[str, Any]:
-        """Owner's local conversation tail and state, for proactive behaviour (bored detector)."""
+        """Actual human activity is independent of the recent assistant-message tail."""
         messages = self.repo.recent_messages("local", limit)
-        return {"messages": [_message_view(m) for m in messages], "state": self.repo.get_state(OWNER_SCOPE)["data"]}
+        rows = self.repo.conn.execute(
+            "SELECT * FROM messages WHERE role='user' "
+            "AND (actor_id=? OR actor_id IN (SELECT 'qq:'||external_id FROM identity_links "
+            "WHERE channel='qq' AND identity_id=?)) "
+            "AND LOWER(origin)='live' ORDER BY ts DESC,id DESC", (OWNER_ACTOR, OWNER_ACTOR),
+        )
+        last_user = last_owner = None
+        for row in rows:
+            message = dict(row)
+            if is_system_event(message["content"]):
+                continue
+            if last_owner is None:
+                last_owner = {**_message_view(message), "conversation_id": message["conversation_id"]}
+            if message["conversation_id"] == "local":
+                last_user = _message_view(message)
+                break
+        return {
+            "messages": [_message_view(m) for m in messages],
+            "last_user": last_user, "last_owner_activity": last_owner,
+            "state": self.repo.get_state(OWNER_SCOPE)["data"],
+        }
 
     # ---------- consolidation jobs ----------
     def _cancel_state_for_message(self, message_id: int) -> None:

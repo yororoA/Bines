@@ -31,6 +31,7 @@ from listener_helpers import (
     update_player_busy_from_control_payload,
     is_user_online,
     build_bored_prompt,
+    bored_event_rejection,
 )
 from path_setup import ensure_project_root
 from runtime_wiring import register_runtime_dependencies
@@ -339,6 +340,7 @@ def zmq_send(data, lang="zh", translation=None, cough=None, origin=None, enable_
 
 def _flush_zmq_outbound_queue():
     """Send queued PUB messages on the listener thread that owns the sockets."""
+    proactive_publish_failed = False
     while True:
         try:
             pending = _ZMQ_OUTBOUND_QUEUE.get_nowait()
@@ -347,11 +349,18 @@ def _flush_zmq_outbound_queue():
 
         for channel, frames in pending:
             try:
+                if channel == "bored_result" and proactive_publish_failed:
+                    payload = json.loads(frames[1])
+                    payload.update(status="uncertain", reason="output_publish_failed")
+                    frames = [frames[0], json.dumps(payload).encode()]
+                if channel == "bored_result":
+                    proactive_publish_failed = False
                 socket = {
                     "text": pub_text_socket,
                     "tts": pub_socket,
                     "audio": audio_play_pub_socket,
                     "control": control_pub_socket,
+                    "bored_result": control_pub_socket,
                 }[channel]
                 socket.send_multipart(frames)
                 if channel == "tts":
@@ -362,6 +371,7 @@ def _flush_zmq_outbound_queue():
                         payload.get("cough"),
                     )
             except Exception as e:
+                proactive_publish_failed = True
                 logger.exception("[Thinking] ZMQ %s 发布失败: %s", channel, e)
         _ZMQ_OUTBOUND_QUEUE.task_done()
 
@@ -925,48 +935,96 @@ def start_zmq_listener():
                         if topic == "bored":
                             msg_bytes = parts[1]
                             data = json.loads(msg_bytes.decode('utf-8'))
-                            # 用户下线状态下忽略 bored，不发起主动对话
-                            if not is_user_online(PRESENCE_STATE_PATH):
-                                continue
-                            # 检查是否正在处理对话
-                            with IS_PROCESSING_DIALOGUE_LOCK:
-                                is_processing = IS_PROCESSING_DIALOGUE
-                            
-                            if is_processing:
-                                print(f"[Thinking] Received bored message but currently processing dialogue, rejecting...", flush=True)
-                            else:
-                                bored_log, bored_prompt = build_bored_prompt(data)
-                                print(bored_log, flush=True)
-                                
-                                # 触发屏幕分析刷新
+                            # A trusted intention enters the existing skill execution chain.
+                            def process_bored_async(candidate=dict(data)):
+                                global IS_PROCESSING_DIALOGUE, INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT
+                                status, reason, reserved = "skipped", "", False
+                                text = ""
                                 try:
-                                    if send_realtime_screen_flush_signal(REALTIME_SCREEN_PATHS):
-                                        print(f"[Thinking] Sent flush signal to Realtime Screen Analysis. Waiting for update...", flush=True)
-                                    else:
-                                        print(f"[Thinking] Failed to send flush signal", flush=True)
-
-                                    # [优化] 等待分析脚本响应：
-                                    # 分析脚本是轮询的，可能需要一点时间来感知信号并写入文件。
-                                    # 给它 1~2 秒的反应时间，尽量让本次 LLM 调用能读取到最新的屏幕分析结果。
-                                    time.sleep(1.5)
-
-                                except Exception as e:
-                                    print(f"[Thinking] Failed to send flush signal: {e}", flush=True)
-
-                                # 异步处理bored消息
-                                def process_bored_async():
                                     with processing_lock:
-                                        if processing_state["is_processing"]:
-                                            print(f"[Thinking] Another message is processing, skipping bored message", flush=True)
-                                            return
-                                        processing_state["is_processing"] = True
-                                    try:
-                                        process_message(bored_prompt, "")
-                                    finally:
+                                        busy = processing_state["is_processing"] or _is_processing_dialogue() or is_player_busy
+                                        if not busy:
+                                            processing_state["is_processing"] = True
+                                            reserved = True
+                                    if reserved:
+                                        with IS_PROCESSING_DIALOGUE_LOCK:
+                                            IS_PROCESSING_DIALOGUE = True
+                                    snapshot = memory_client.activity_snapshot()
+                                    reason = bored_event_rejection(
+                                        candidate, snapshot, time.time(),
+                                        online=is_user_online(PRESENCE_STATE_PATH), busy=busy,
+                                    )
+                                    if last_interaction_time >= float(candidate.get("timestamp") or 0):
+                                        reason = "incoming_message"
+                                    if not reason:
+                                        from will_runtime import run_intention, outcome_succeeded
+                                        from tools.context import ToolContext, tool_context
+                                        from chatBot.messages import LOCAL_IDENTITY
+                                        def check():
+                                            if last_interaction_time >= candidate["timestamp"] or is_player_busy:
+                                                return "user_active"
+                                            return bored_event_rejection(
+                                                candidate, memory_client.activity_snapshot(), time.time(),
+                                                online=is_user_online(PRESENCE_STATE_PATH),
+                                            )
+                                        envelope = envelope_for_turn(None, None, "", owner_name=MEMORY_SETTINGS.owner_name).to_dict()
+                                        memory_context = memory_client.build_context(envelope, query=candidate["topic"])
+                                        reset_segment_index()
+                                        will_context = ToolContext(
+                                            LOCAL_IDENTITY, turn_id="will:" + candidate["id"],
+                                            autonomous=True, contact_allowed=candidate.get("contact_allowed", True),
+                                            check=check,
+                                        )
+                                        with tool_context(will_context):
+                                            text, outcomes = run_intention(
+                                                ThinkingModelHelper(), skill_runner, memory_context, candidate, check,
+                                                source=None,
+                                            )
+                                        from chatBot.messages import SEND_ACTIONS
+                                        contacted = any(
+                                            receipt["action"] in SEND_ACTIONS | {"send_qzone_msg"}
+                                            and (receipt.get("result") or {}).get("status") == "ok"
+                                            for receipt in will_context.receipts)
+                                        if contacted:
+                                            status = "sent"
+                                        elif candidate["kind"] == "connection" and text and not check():
+                                            zmq_send(text, enable_audio=True)
+                                            zmq_send("", cough="end", origin=text)
+                                            status = "sent"
+                                        elif any(outcome_succeeded(item) for item in outcomes):
+                                            status = "completed"
+                                        # Internal opportunity is never recorded as a person's speech.
+                                        try:
+                                            memory_client.record_turn(
+                                                envelope, user_text="", assistant_text=text if status == "sent" else "",
+                                                state_update=False,
+                                            )
+                                        except Exception as mem_err:
+                                            logger.warning("主动消息记忆写入失败: %s", mem_err)
+                                except Exception as exc:
+                                    reason = str(exc)
+                                finally:
+                                    result = {"id": candidate.get("id"), "timestamp": time.time(),
+                                              "status": status, "reason": reason, "reflection": text[:2000]}
+                                    # The acknowledgement follows the output on the same listener
+                                    # queue; publishing a candidate alone is never counted as sent.
+                                    _ZMQ_OUTBOUND_QUEUE.put([("bored_result", [
+                                        b"bored_result", json.dumps(result).encode(),
+                                    ])])
+                                    if reserved:
+                                        with IS_PROCESSING_DIALOGUE_LOCK:
+                                            IS_PROCESSING_DIALOGUE = False
                                         with processing_lock:
                                             processing_state["is_processing"] = False
-                                
-                                executor.submit(process_bored_async)
+                                        with INTERRUPT_LOCK:
+                                            pending = PENDING_INTERRUPT_INPUT
+                                            INTERRUPT_REQUESTED = False
+                                            PENDING_INTERRUPT_INPUT = None
+                                        submit_pending_interrupt(
+                                            pending=pending, executor=executor, processing_lock=processing_lock,
+                                            processing_state=processing_state, process_message=process_message,
+                                        )
+                            executor.submit(process_bored_async)
                 except json.JSONDecodeError:
                     pass
                 except Exception as e:

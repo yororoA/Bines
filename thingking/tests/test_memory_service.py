@@ -689,9 +689,11 @@ class HybridRetrievalTest(unittest.TestCase):
         self.assertEqual(job["job"]["kind"], "summarize")
         self.assertEqual(len(job["materials"]["messages"]), 4)
 
-    def test_state_parser_tolerates_extra_json_or_empty_output(self):
+    def test_state_parser_tolerates_extra_json_but_rejects_empty_output(self):
         from memory.worker import _state_changes
-        self.assertEqual(_state_changes(""), {})
+        with self.assertRaisesRegex(ValueError, "empty text"):
+            _state_changes("")
+        self.assertEqual(_state_changes("{}"), {})
         self.assertEqual(_state_changes('{"relationship_delta":1}\n{"extra":2}'), {"relationship_delta": 1})
         self.assertEqual(_state_changes('结果如下：\n{"add_item":"围巾"}\n完成'), {"add_item": "围巾"})
 

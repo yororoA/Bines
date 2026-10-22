@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, Iterable, List, Tuple
 
 from config import DEEPSEEK_MODEL
 from common.deepseek_client import get_deepseek_client
 from skill_runner import SkillProtocolError, SkillRunner
+
+logger = logging.getLogger("bines.thinking.model")
+_MAX_TEXT_RETRY_TOKENS = 262144
+
+
+class ModelCompletionError(RuntimeError):
+    """The API succeeded but did not return a complete final answer."""
 
 
 class ThinkingModelHelper:
@@ -16,17 +24,41 @@ class ThinkingModelHelper:
         self.model = DEEPSEEK_MODEL
         self.client = get_deepseek_client()
 
-    def complete_text(self, messages: List[Dict[str, Any]], *, temperature=0.4, max_tokens=2048) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            stream=False,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        if not response.choices:
-            return ""
-        return (response.choices[0].message.content or "").strip()
+    def complete_text(self, messages: List[Dict[str, Any]], *, temperature=0.4, max_tokens=2048,
+                      response_format: Dict[str, str] | None = None) -> str:
+        # Thinking and final text share the output budget. Retry the original
+        # request once with more room; never use reasoning or truncated text.
+        for attempt in range(2):
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=False,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **({"response_format": response_format} if response_format else {}),
+            )
+            if not response.choices:
+                raise ModelCompletionError(f"model {self.model} returned no choices")
+            choice = response.choices[0]
+            text = (choice.message.content or "").strip()
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason == "length":
+                retry_tokens = _MAX_TEXT_RETRY_TOKENS
+                if attempt == 0 and retry_tokens > max_tokens:
+                    logger.warning("model %s reached output limit %d; retrying with %d tokens",
+                                   self.model, max_tokens, retry_tokens)
+                    max_tokens = retry_tokens
+                    continue
+            if finish_reason == "length" or not text:
+                usage = getattr(response, "usage", None)
+                details = getattr(usage, "completion_tokens_details", None)
+                raise ModelCompletionError(
+                    f"model {self.model} returned {'truncated output' if finish_reason == 'length' else 'empty text'}"
+                    f" (finish_reason={finish_reason}, max_tokens={max_tokens},"
+                    f" completion_tokens={getattr(usage, 'completion_tokens', None)},"
+                    f" reasoning_tokens={getattr(details, 'reasoning_tokens', None)})"
+                )
+            return text
 
     def run_skill_protocol(
         self,

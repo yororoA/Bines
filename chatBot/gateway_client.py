@@ -39,6 +39,13 @@ class GatewayClient:
         # Receipts must contain the same compact text the gateway dispatches.
         params = compact_qq_send_params(action, params or {})
         context = CURRENT_CONTEXT.get()
+        if context.autonomous:
+            if context.check:
+                reason = context.check()
+                if reason:
+                    raise RuntimeError(f"自主行动已取消：{reason}")
+            if not context.contact_allowed and not is_read(action):
+                raise PermissionError("当前自主轮次只允许不打扰他人的读取")
         receipt = None
         if not is_read(action):
             if any((item.get("result") or {}).get("status") == "uncertain" for item in context.receipts):

@@ -11,6 +11,9 @@ class ToolContext:
     event_id: str | None = None
     turn_id: str | None = None
     receipts: list = field(default_factory=list, compare=False)
+    autonomous: bool = False
+    contact_allowed: bool = True
+    check: object = field(default=None, compare=False)
 
 
 CURRENT_CONTEXT = ContextVar("bines_tool_context", default=ToolContext())

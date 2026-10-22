@@ -72,7 +72,7 @@ def _state_changes(raw: str) -> Dict[str, Any]:
     """Accept one JSON object; models sometimes append a second object or prose."""
     text = (raw or "").strip()
     if not text:
-        return {}
+        raise ValueError("state model returned empty text")
     start = text.find("{")
     if start < 0:
         raise ValueError(f"state output is not JSON: {text[:200]!r}")
@@ -160,9 +160,11 @@ class MemoryWorker:
         on_owner_summary: Optional[Callable[[str], None]] = None,
         idle_seconds: float = 30.0,
         state_complete_text: Optional[CompleteText] = None,
+        summary_complete_text: Optional[CompleteText] = None,
     ):
         self.client = client
         self.complete_text = complete_text
+        self.summary_complete_text = summary_complete_text or complete_text
         self.diary_system_prompt = diary_system_prompt
         self.on_owner_summary = on_owner_summary
         self.idle_seconds = idle_seconds
@@ -230,7 +232,7 @@ class MemoryWorker:
         logger.info("state job %s · %s · changed=%s", job["id"], job["scope"], result.get("changed"))
 
     def _summarize(self, job: Dict[str, Any], materials: Dict[str, Any]) -> None:
-        raw = self.complete_text(build_summary_prompt(materials))
+        raw = self.summary_complete_text(build_summary_prompt(materials))
         summary, tags, facts, importance = parse_summary(raw)
         retrieval = json.loads(re.search(r"\{.*\}", raw, re.DOTALL).group()).get("retrieval")
         if retrieval is not None and not isinstance(retrieval, dict):
