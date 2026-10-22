@@ -25,6 +25,7 @@ venv/
 .tools/installer/
 .tools/downloads/
 .tools/memory_export/
+.tools/memory-repair-*/
 singing/singing_venv/
 voiceprints
 /model

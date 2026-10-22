@@ -10,19 +10,20 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .client import MemoryClient
-from .models import OWNER_SCOPE, ROLE_ASSISTANT, ROLE_OBSERVED
+from .models import OWNER_SCOPE, ROLE_ASSISTANT, ROLE_OBSERVED, ZONE
 
 logger = logging.getLogger("bines.memory.worker")
 
 CompleteText = Callable[[List[Dict[str, str]]], str]
 
 _SUMMARY_SYSTEM = (
-    "你负责把一段聊天记录压缩成长期记忆。只依据记录内容，不要编造。输出严格 JSON，不要输出其他文字。"
+    "你负责把同一天的聊天记录提炼成长期记忆。只依据记录中的事实与事件，不要编造。"
+    "排除系统事件和模型自我推测，不把助手猜测当作用户事实。输出严格 JSON，不要输出其他文字。"
 )
 
 _SUMMARY_INSTRUCTIONS = """请阅读下面的聊天记录，输出 JSON：
 {{
-  "summary": "第三人称中文叙述的剧情摘要，保留情感变化、关键事件、约定、冲突与和解；闲聊或测试用一两句概括",
+  "summary": "第三人称中文事实与事件摘要，保留明确的关键事件、约定和情感变化；闲聊或测试用一两句概括，不逐句复述 User/Assistant 对话",
   "tags": ["英文标签，如 Daily, Work, Game, Emotion, Hobby, User_Profile，最多 5 个"],
   "importance": 1到10的整数，表示这段经历的重要程度,
   "facts": [
@@ -49,10 +50,13 @@ _DIARY_INSTRUCTIONS = """日期：{day}
 【当日经历摘要】
 {episodes}
 
-【当前状态（写日记时可参考）】
+【当日可靠历史状态（空对象表示无可靠记录）】
 {state}
 
-请以第一人称写一段当天的日记，保留关键事件与情感变化，语气自然像在写日记。不要逐条列举，输出一整段连贯的日记正文。"""
+请以第一人称写一段当天的日记，保留有证据的关键事件与情感变化，语气自然。
+日期必须以给定日期为准，事实只能来自当日经历摘要。历史状态只作有证据的背景，不能补成当日事件。
+排除系统事件、模型自我推测、未发生的计划和假设；不要引用今天或其他日期的状态，不凭空补齐空白日。
+不要逐句复述 User/Assistant 对话或逐条列举，输出一整段连贯的日记正文。"""
 
 _STATE_SYSTEM = """依据一条真实用户消息维护当前会话的动态状态。输出严格 JSON 对象，键名使用 update_status 参数：
 current_location, active_quest, important_thing, add_item, remove_item, npc_attire, npc_activity,
@@ -82,7 +86,7 @@ def _state_changes(raw: str) -> Dict[str, Any]:
 
 
 def _format_ts(ts: Optional[float]) -> str:
-    return datetime.fromtimestamp(float(ts)).strftime("%m/%d %H:%M") if ts else ""
+    return datetime.fromtimestamp(float(ts), ZONE).strftime("%m/%d %H:%M") if ts else ""
 
 
 def _speaker(message: Dict[str, Any]) -> str:

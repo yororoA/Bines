@@ -101,7 +101,9 @@ class EvidenceStoreTest(unittest.TestCase):
         self.assertEqual(self.store.sync()["unchanged"], len(ids))
         self.assertEqual(self.store.all_ids(), ids)
         self.assertEqual(self.source_snapshot(), before)
-        self.assertEqual(self.store.evidence(message_chunks[-1], ["owner"])[0]["content"], "首段\n\n" + text)
+        bounded = self.store.evidence(message_chunks[-1], ["owner"])[0]["content"]
+        self.assertLessEqual(len(bounded), 480)
+        self.assertIn(bounded, "首段\n\n" + text)
 
     def test_changes_prune_old_chunks_and_fts_and_reset_marks(self):
         memory_id = self.memory("旧关键词" * 400)
@@ -455,6 +457,17 @@ class EvidenceStoreTest(unittest.TestCase):
         self.assertEqual(self.store.unindexed_keys(), [])
         self.store.clear_index_marks()
         self.assertEqual(len(self.store.unindexed_keys(limit=1000)), 410)
+
+    def test_archived_dialogue_is_only_accessible_through_summary_evidence(self):
+        message_id = self.message("管理员确认喜欢 Grapefruit Moon", origin="archived")
+        memory_id = self.memory("管理员表达了对 Grapefruit Moon 的喜爱",
+                                meta={"source_message_ids": [message_id]})
+        self.store.sync()
+        self.assertFalse(self.store.bm25_query("Grapefruit Moon", ["owner"], kinds=["message"]))
+        evidence = self.store.evidence(self.key(memory_id), ["owner"], query="Grapefruit Moon")
+        self.assertEqual(evidence[0]["source_id"], message_id)
+        self.assertEqual(evidence[0]["content"], "管理员确认喜欢 Grapefruit Moon")
+        self.assertFalse(self.store.evidence(self.key(memory_id), ["other"]))
 
 
 if __name__ == "__main__":

@@ -141,7 +141,7 @@ class HybridRetriever:
                 **(memory or {}), "id": row["memory_id"] or f"message:{row['message_id']}",
                 "memory_id": row["memory_id"], "message_id": row["message_id"],
                 "key_id": row["id"], "scope": row["scope"], "kind": row["kind"],
-                "content": row["content"], "evidence": evidence,
+                "content": memory["content"] if memory else row["content"], "evidence": evidence,
                 "score": row["score"], "rrf_score": row["rrf_score"],
                 "retrieval_channels": row["retrieval_channels"], "origin": row["meta"].get("origin"),
             })

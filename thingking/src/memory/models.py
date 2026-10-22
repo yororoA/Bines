@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
+
+ZONE = ZoneInfo(os.getenv("BINES_MEMORY_TIMEZONE", "Asia/Shanghai"))
 
 CHANNEL_LOCAL = "local"
 CHANNEL_QQ_PRIVATE = "qq_private"
@@ -48,7 +52,7 @@ def content_hash(text: str) -> str:
 
 def day_key(ts: Optional[float] = None, day_start_hour: int = 4) -> str:
     """Calendar day for memory purposes; the day rolls over at ``day_start_hour`` (default 04:00)."""
-    dt = datetime.fromtimestamp(time.time() if ts is None else float(ts))
+    dt = datetime.fromtimestamp(time.time() if ts is None else float(ts), ZONE)
     if dt.hour < day_start_hour:
         dt -= timedelta(days=1)
     return dt.strftime("%Y-%m-%d")

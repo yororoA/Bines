@@ -205,6 +205,8 @@ class ConsolidationTest(unittest.TestCase):
         self.assertIn("小明喜欢打篮球", [p["content"] for p in context["profile"]])
 
     def test_diary_job_for_live_episodes(self):
+        from dataclasses import replace
+        self.fx.service.settings = replace(self.fx.settings, summarize_chunk=6)
         self._talk(3)
         _summarize_next(self.fx, "今天一起听了歌")
         self.fx.clock.advance(2 * 86400)
@@ -219,6 +221,318 @@ class ConsolidationTest(unittest.TestCase):
         self.fx.service.record_turn(local_env(), "[System Event: User Online] (...)", "欢迎回来")
         working = self.fx.service.build_context(local_env(), "")["working"]
         self.assertEqual([m["role"] for m in working], ["assistant"])
+
+
+class RuntimeMemoryBoundaryTest(unittest.TestCase):
+    def setUp(self):
+        self.fx = MemoryFixture(summarize_trigger=40, summarize_chunk=30)
+        self.service, self.repo = self.fx.service, self.fx.repo
+        self.service.resolve(local_env())
+
+    def tearDown(self):
+        self.fx.close()
+
+    def _message(self, text="a real event", ts=None, **fields):
+        ts = self.fx.clock() if ts is None else ts
+        return self.repo.add_message(
+            "local", OWNER_SCOPE, fields.pop("role", "user"), text, ts, self.service._day(ts),
+            actor_id="owner", **fields,
+        )
+
+    def _episode(self, text="past event", ts=None, **fields):
+        ts = self.fx.clock() - 86400 if ts is None else ts
+        return self.repo.add_memory(
+            "episode", OWNER_SCOPE, text, day_key=self.service._day(ts),
+            start_ts=ts, end_ts=ts, **fields,
+        )
+
+    def test_pending_filters_ignore_archived_recalled_and_system_messages(self):
+        valid = self._message(ts=self.fx.clock() - 10000)
+        excluded = [
+            self._message(origin="archived"),
+            self._message(origin="recalled"),
+            self._message("[消息已撤回]"),
+            self._message("[MESSAGE RECALLED]"),
+            self._message(" [System Event: User Online] "),
+            self._message("[系统：自动操作]"),
+            self._message("[Screen Monitor]"),
+            self._message(role="system"),
+            self._message("   "),
+        ]
+        self.assertEqual(self.repo.pending_message_count("local"), 1)
+        self.assertEqual([m["id"] for m in self.repo.oldest_pending_messages("local", 30)], [valid])
+        rows = self.repo.idle_pending_conversations(self.fx.clock() - 60, 1)
+        self.assertEqual([(r["n"], r["last_ts"]) for r in rows], [(1, self.fx.clock() - 10000)])
+        self.assertEqual(self.repo.idle_pending_conversations(self.fx.clock(), 2), [])
+        self.assertIsNotNone(self.repo.get_message(excluded[0]))
+        self.assertNotIn(excluded[0], [m["id"] for m in self.repo.recent_messages("local", 100)])
+        self.assertNotIn(excluded[0], [
+            m["id"] for m in self.repo.recent_scope_messages(OWNER_SCOPE, "another", 0, 100)
+        ])
+
+    def test_legacy_cross_day_summary_uses_first_day_and_exact_ids(self):
+        today = self._message("today", ts=self.fx.clock())
+        later = self._message("yesterday later", ts=self.fx.clock() - 86400 + 10)
+        archived = self._message("old raw", ts=self.fx.clock() - 86400, origin="archived")
+        earlier = self._message("yesterday earlier", ts=self.fx.clock() - 86400)
+        same_time = self._message("same timestamp", ts=self.fx.clock() - 86400)
+        expected = [earlier, same_time, later]
+        self.assertEqual([m["id"] for m in self.repo.oldest_pending_messages("local", 30)], expected)
+        job_id = self.repo.enqueue_job("summarize", OWNER_SCOPE, {"from_id": today, "to_id": same_time},
+                                       "old-cross-day", conversation_id="local")
+        claimed = self.service.claim_job(kinds=["summarize"])
+        self.assertEqual(claimed["job"]["id"], job_id)
+        self.assertEqual([m["id"] for m in claimed["materials"]["messages"]], expected)
+        self.assertEqual(self.repo.get_job(job_id)["payload"]["source_message_ids"], expected)
+        result = self.service.complete_summary(job_id, "only yesterday")
+        episode = self.repo.get_memory(result["episode_id"])
+        self.assertEqual(episode["day_key"], self.service._day(self.fx.clock() - 86400))
+        self.assertEqual(episode["meta"]["source_message_ids"], expected)
+        self.assertNotIn("message_range", episode["meta"])
+        self.assertTrue(all(self.repo.get_message(i)["episode_id"] == episode["id"] for i in expected))
+        self.assertIsNone(self.repo.get_message(today)["episode_id"])
+        self.assertIsNone(self.repo.get_message(archived)["episode_id"])
+
+    def test_explicit_summary_ids_do_not_consolidate_interleaved_messages(self):
+        first = self._message("first")
+        middle = self._message("not in job")
+        last = self._message("last")
+        self.repo.enqueue_job(
+            "summarize", OWNER_SCOPE,
+            {"from_id": first, "to_id": last, "source_message_ids": [first, last]},
+            "explicit-ids", conversation_id="local",
+        )
+        claimed = self.service.claim_job(kinds=["summarize"])
+        self.assertEqual(claimed["materials"]["source_message_ids"], [first, last])
+        result = self.service.complete_summary(claimed["job"]["id"], "selected events")
+        self.assertEqual(self.repo.get_memory(result["episode_id"])["meta"]["source_message_ids"], [first, last])
+        self.assertIsNone(self.repo.get_message(middle)["episode_id"])
+        self.assertEqual(self.repo.mark_consolidated_ids("another", [middle], "wrong"), 0)
+
+    def test_small_past_tail_blocks_diary_and_is_summarized_even_with_live_today(self):
+        episode = self._episode()
+        past = self._message("late past detail", ts=self.fx.clock() - 86400)
+        today = self._message("today is active")
+        self.assertEqual(self.service.enqueue_due_diaries(), 0)
+        self.assertIsNone(self.service.claim_job(kinds=["diary"]))
+        summary = self.service.claim_job(kinds=["summarize"])
+        self.assertEqual(summary["materials"]["source_message_ids"], [past])
+        result = self.service.complete_summary(summary["job"]["id"], "late past detail")
+        diary = self.service.claim_job(kinds=["diary"])
+        self.assertEqual(set(diary["job"]["payload"]["episode_ids"]), {episode, result["episode_id"]})
+        self.assertIsNone(self.repo.get_message(today)["episode_id"])
+
+    def test_diary_only_fills_valid_past_days_with_active_evidence(self):
+        for day in ("1900-01-01", self.service._day(self.fx.clock()), "2999-01-01", "2026-2-01"):
+            with self.subTest(day=day):
+                self.repo.enqueue_job("diary", OWNER_SCOPE, {"day_key": day}, "empty:" + day)
+        deleted = self._episode("deleted original", ts=self.fx.clock() - 2 * 86400)
+        self.repo.delete_memory(deleted)
+        self._episode("[System Event: User Online]", ts=self.fx.clock() - 3 * 86400)
+        self.assertIsNone(self.service.claim_job(kinds=["diary"]))
+        self.assertEqual(self.repo.count_memories(kinds=["diary"]), 0)
+        legacy = self._episode("legacy evidence", origin="legacy")
+        self.assertEqual(self.service.enqueue_due_diaries(), 1)
+        job = self.service.claim_job(kinds=["diary"])
+        self.assertEqual(job["materials"]["episode_ids"], [legacy])
+        self.assertEqual(job["materials"]["state"], {})
+        self.assertEqual(self.service.complete_diary(job["job"]["id"], "legacy diary")["status"], "done")
+        self.assertEqual(self.repo.count_memories(kinds=["diary"]), 1)
+
+    def test_deleted_diary_can_be_regenerated_from_same_episode_set(self):
+        self._episode()
+        first = self.service.claim_job(kinds=["diary"])
+        diary = self.service.complete_diary(first["job"]["id"], "first diary")["diary_id"]
+        self.service.delete_memory(diary)
+        self.assertEqual(self.service.enqueue_due_diaries(), 1)
+        second = self.service.claim_job(kinds=["diary"])
+        self.assertEqual(second["materials"]["episodes_hash"], first["materials"]["episodes_hash"])
+        replacement = self.service.complete_diary(second["job"]["id"], "replacement diary")["diary_id"]
+        self.assertNotEqual(replacement, diary)
+        self.assertTrue(self.repo.get_memory(diary)["deleted"])
+        self.assertEqual(self.repo.count_memories(kinds=["diary"]), 1)
+
+    def test_late_episode_and_edited_episode_overwrite_one_active_diary(self):
+        first = self._episode("first event", meta={"source_message_ids": [11], "source_memory_ids": ["old-1"]})
+        day = self.repo.get_memory(first)["day_key"]
+        deleted = self.repo.add_memory("diary", OWNER_SCOPE, "deleted diary", day_key=day)
+        self.repo.delete_memory(deleted)
+        job = self.service.claim_job(kinds=["diary"])
+        diary_id = self.service.complete_diary(job["job"]["id"], "first diary")["diary_id"]
+        self.assertNotEqual(diary_id, deleted)
+        second = self._episode("late event", meta={"source_message_ids": [22], "source_memory_ids": ["old-2"]})
+        self.assertEqual(self.service.enqueue_due_diaries(), 1)
+        job = self.service.claim_job(kinds=["diary"])
+        self.assertEqual(set(job["materials"]["episode_ids"]), {first, second})
+        result = self.service.complete_diary(job["job"]["id"], "revised diary")
+        self.assertEqual(result["diary_id"], diary_id)
+        diary = self.repo.get_memory(diary_id)
+        self.assertEqual(diary["content"], "revised diary")
+        self.assertEqual(set(diary["meta"]["source_message_ids"]), {11, 22})
+        self.assertEqual(set(diary["meta"]["source_memory_ids"]), {"old-1", "old-2"})
+        self.assertEqual(self.repo.count_memories(kinds=["diary"], day_key=day), 1)
+        self.assertTrue(self.repo.get_memory(deleted)["deleted"])
+        self.assertEqual(self.service.enqueue_due_diaries(), 0)
+        digest = diary["meta"]["episodes_hash"]
+        self.repo.update_memory(second, content="corrected late event")
+        self.assertEqual(self.service.enqueue_due_diaries(), 1)
+        job = self.service.claim_job(kinds=["diary"])
+        self.assertNotEqual(job["job"]["payload"]["episodes_hash"], digest)
+        self.assertEqual(self.service.complete_diary(job["job"]["id"], "corrected diary")["diary_id"], diary_id)
+
+    def test_changed_evidence_during_generation_rejects_stale_diary(self):
+        first = self._episode()
+        job = self.service.claim_job(kinds=["diary"])
+        second = self._episode("late arrival")
+        self.assertEqual(self.service.enqueue_due_diaries(), 0)
+        result = self.service.complete_diary(job["job"]["id"], "stale output")
+        self.assertEqual(result["status"], "ignored")
+        self.assertEqual(self.repo.count_memories(kinds=["diary"]), 0)
+        replacement = self.service.claim_job(kinds=["diary"])
+        self.assertEqual(set(replacement["materials"]["episode_ids"]), {first, second})
+        self.service.complete_diary(replacement["job"]["id"], "complete output")
+        self.assertEqual(self.repo.count_memories(kinds=["diary"]), 1)
+
+    def test_pending_message_during_generation_rejects_diary(self):
+        self._episode()
+        job = self.service.claim_job(kinds=["diary"])
+        self._message("unfinished", ts=self.fx.clock() - 86400)
+        self.assertEqual(self.service.complete_diary(job["job"]["id"], "too early")["status"], "ignored")
+        self.assertEqual(self.repo.count_memories(kinds=["diary"]), 0)
+        self.assertIsNone(self.service.claim_job(kinds=["diary"]))
+        self.assertIsNotNone(self.service.claim_job(kinds=["summarize"]))
+
+    def test_diary_uses_historical_state_before_shifted_day_boundary(self):
+        from datetime import datetime
+        from memory.models import ZONE
+        self.fx.clock.now = datetime(2026, 10, 20, 12, tzinfo=ZONE).timestamp()
+        self.service.put_state(OWNER_SCOPE, {"location": "yesterday"})
+        episode = self._episode(ts=self.fx.clock())
+        self.fx.clock.now = datetime(2026, 10, 21, 3, 59, tzinfo=ZONE).timestamp()
+        self.service.put_state(OWNER_SCOPE, {"location": "before day rollover"})
+        self.fx.clock.now = datetime(2026, 10, 21, 4, tzinfo=ZONE).timestamp()
+        self.service.put_state(OWNER_SCOPE, {"location": "today"})
+        job = self.service.claim_job(kinds=["diary"])
+        self.assertEqual(job["materials"]["day_key"], self.repo.get_memory(episode)["day_key"])
+        self.assertEqual(job["materials"]["state"], {"location": "before day rollover"})
+        self.assertEqual(self.service.get_state(OWNER_SCOPE)["data"], {"location": "today"})
+
+    def test_diary_never_falls_back_to_current_or_older_day_state(self):
+        self.fx.clock.advance(-2 * 86400)
+        self.service.put_state(OWNER_SCOPE, {"location": "two days ago"})
+        self.fx.clock.advance(2 * 86400)
+        self._episode()
+        self.service.put_state(OWNER_SCOPE, {"location": "today"})
+        job = self.service.claim_job(kinds=["diary"])
+        self.assertEqual(job["materials"]["state"], {})
+
+    def test_backdated_version_inheriting_future_state_is_not_used(self):
+        past = self.fx.clock() - 86400
+        self.repo.put_state(OWNER_SCOPE, {"future": "today"})
+        self.repo.put_state(OWNER_SCOPE, {"future": "inherited"}, effective_at=past)
+        self._episode()
+        job = self.service.claim_job(kinds=["diary"])
+        self.assertEqual(job["materials"]["state"], {})
+
+    def test_repair_diary_with_matching_episode_is_not_regenerated(self):
+        episode = self._episode(origin="repair", meta={"source_message_ids": [1]})
+        day = self.repo.get_memory(episode)["day_key"]
+        self.repo.add_memory("diary", OWNER_SCOPE, "repaired diary", day_key=day,
+                             origin="repair", meta={"episode_id": episode, "source_message_ids": [1]})
+        self.assertEqual(self.service.enqueue_due_diaries(), 0)
+        self._episode("late real event")
+        self.assertEqual(self.service.enqueue_due_diaries(), 1)
+
+    def test_archived_source_remains_evidence_and_can_be_recalled(self):
+        message = self._message("a blue scarf", origin="archived", source_ref="archived-source")
+        unrelated = self._message("another blue scarf detail", origin="archived")
+        episode = self._episode("a blue scarf was given", meta={"source_message_ids": [message]},
+                                 conversation_id="local")
+        other_episode = self._episode("unrelated event", meta={"source_message_ids": [unrelated]})
+        day = self.repo.get_memory(episode)["day_key"]
+        diary = self.repo.add_memory("diary", OWNER_SCOPE, "scarf diary", day_key=day,
+                                     meta={"episode_ids": [episode], "source_message_ids": [message]})
+        quote = self.repo.add_memory("excerpt", OWNER_SCOPE, "scarf quotation",
+                                     meta={"curated_quote": True, "source_message_ids": [message]})
+        self.service.reconcile_index()
+        hits = self.service.search("blue scarf", [OWNER_SCOPE], kinds=["episode"])
+        evidence = [e for h in hits if h["id"] == episode for e in h.get("evidence") or []]
+        self.assertTrue(any(e["source_id"] == message and "blue scarf" in e["content"] for e in evidence))
+        self.service.record_message(local_env(), "user", "[消息已撤回]",
+                                    source_ref="archived-source", recalled=True)
+        self.assertTrue(all(self.repo.get_memory(i)["deleted"] for i in (episode, diary, quote)))
+        self.assertFalse(self.repo.get_memory(other_episode)["deleted"])
+        self.assertEqual(self.repo.get_message(message)["content"], "[消息已撤回]")
+        self.assertEqual(self.repo.get_message(message)["origin"], "recalled")
+        self.assertEqual(self.repo.pending_message_count("local"), 0)
+
+    def test_default_recall_keeps_curated_quotes_not_raw_messages(self):
+        raw = self._message("我新买了一条蓝色围巾")
+        excerpt = self.repo.add_memory("excerpt", OWNER_SCOPE, "蓝色围巾的原始转录")
+        quote = self.repo.add_memory("excerpt", OWNER_SCOPE, "蓝色围巾的精选原话",
+                                     meta={"curated_quote": 1, "source_message_ids": [raw]})
+        context = self.service.build_context(local_env(), "蓝色围巾")
+        self.assertEqual(context["recall_query"], "蓝色围巾")
+        self.assertNotIn(excerpt, [m["id"] for m in context["recalled"]])
+        self.assertFalse(any(m["kind"] == "message" for m in context["recalled"]))
+        self.assertTrue(any(m["id"] == quote and m["meta"]["curated_quote"] == 1 for m in context["recalled"]))
+        explicit = self.service.search("蓝色围巾", [OWNER_SCOPE], kinds=["message"])
+        self.assertTrue(any(h["message_id"] == raw for h in explicit))
+
+    def test_profile_is_bounded_and_keeps_legacy_identity(self):
+        fixed = self.repo.add_memory("semantic", OWNER_SCOPE, "fixed identity",
+                                     subject_id="owner", origin="legacy", importance=1)
+        target = None
+        for i in range(40):
+            target = self.repo.add_memory("semantic", OWNER_SCOPE, f"stable detail {i}",
+                                          subject_id="owner", importance=9)
+        context = self.service.build_context(local_env(), "stable detail 39")
+        self.assertLessEqual(len(context["profile"]), max(self.fx.settings.profile_k, 12))
+        self.assertIn(fixed, [f["id"] for f in context["profile"]])
+        hits = self.service.search("stable detail 39", [OWNER_SCOPE], kinds=["semantic"])
+        self.assertTrue(any(h["id"] == target for h in hits))
+
+    def test_memory_timezone_is_independent_of_process_timezone(self):
+        import os
+        import subprocess
+        from datetime import datetime, timezone
+        ts = datetime(2026, 10, 20, 20, 30, tzinfo=timezone.utc).timestamp()
+        code = (
+            "from memory.models import day_key; from memory.worker import _format_ts; "
+            f"print(day_key({ts})); print(_format_ts({ts}))"
+        )
+        import sys
+        for process_zone in ("UTC", "America/New_York"):
+            with self.subTest(process_zone=process_zone):
+                result = subprocess.run(
+                    [sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                    env={**os.environ, "TZ": process_zone, "BINES_MEMORY_TIMEZONE": "Asia/Shanghai",
+                         "PYTHONPATH": os.pathsep.join(sys.path), "PYTHONDONTWRITEBYTECODE": "1"},
+                )
+                self.assertEqual(result.stdout.splitlines(), ["2026-10-21", "10/21 04:30"])
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True,
+            env={**os.environ, "TZ": "Asia/Shanghai", "BINES_MEMORY_TIMEZONE": "UTC",
+                 "PYTHONPATH": os.pathsep.join(sys.path), "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        self.assertEqual(result.stdout.splitlines(), ["2026-10-20", "10/20 20:30"])
+
+    def test_generation_prompts_constrain_date_facts_and_no_transcript_replay(self):
+        from memory.worker import build_diary_prompt, build_summary_prompt
+        prompt = build_diary_prompt({"day_key": "2026-10-20", "episodes": ["当日确实听了歌"], "state": {}},
+                                    "日记人格")
+        self.assertEqual(prompt[0]["content"], "日记人格")
+        self.assertIn("日期：2026-10-20", prompt[1]["content"])
+        self.assertIn("当日确实听了歌", prompt[1]["content"])
+        self.assertIn("排除系统事件、模型自我推测", prompt[1]["content"])
+        self.assertNotIn("当前状态", prompt[1]["content"])
+        summary = build_summary_prompt({
+            "scope": OWNER_SCOPE,
+            "messages": [{"id": 1, "role": "user", "actor_id": "owner", "content": "heard music",
+                          "ts": self.fx.clock()}],
+        })
+        self.assertIn("事实与事件", summary[0]["content"])
+        self.assertIn("不逐句复述 User/Assistant", summary[1]["content"])
 
 
 class StateTest(unittest.TestCase):

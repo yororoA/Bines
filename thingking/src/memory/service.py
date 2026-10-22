@@ -1,9 +1,12 @@
 """Memory lifecycle: record turns, assemble scoped context, run consolidation jobs, admin operations."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import time
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from . import scope_policy
@@ -20,12 +23,13 @@ from .models import (
     ROLE_OBSERVED,
     ROLE_USER,
     ROLES,
+    ZONE,
     ConversationEnvelope,
     content_hash,
     day_key,
     is_system_event,
 )
-from .repository import MemoryRepository
+from .repository import MemoryRepository, consolidation_candidate
 from .settings import MemorySettings
 from .vector_index import VectorIndex
 from .temporal import TemporalStore
@@ -55,7 +59,7 @@ def _memory_view(row: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
     view = {
         key: row.get(key)
         for key in ("id", "kind", "scope", "conversation_id", "subject_id", "content", "importance",
-                    "start_ts", "end_ts", "day_key", "tags", "origin", "evidence", "key_id",
+                    "start_ts", "end_ts", "day_key", "tags", "meta", "origin", "evidence", "key_id",
                     "retrieval_channels", "score", "memory_id", "message_id")
     }
     view.update(extra)
@@ -98,6 +102,16 @@ class MemoryService:
     def _day(self, ts: Optional[float]) -> str:
         return day_key(ts, self.settings.day_start_hour)
 
+    def _past_day_bounds(self, day: str) -> Optional[tuple[float, float]]:
+        try:
+            start = datetime.strptime(day, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            return None
+        if start.strftime("%Y-%m-%d") != day or day >= self._day(self.clock()):
+            return None
+        start = start.replace(hour=self.settings.day_start_hour, tzinfo=ZONE)
+        return start.timestamp(), (start + timedelta(days=1)).timestamp()
+
     # ---------- recording ----------
     def record_turn(self, envelope: Dict[str, Any], user_text: str = "", assistant_text: str = "",
                     state_update: bool = True) -> Dict[str, Any]:
@@ -134,7 +148,7 @@ class MemoryService:
             actor_id = ASSISTANT_ACTOR if role == ROLE_ASSISTANT else env.actor_id
             if source_ref and recalled:
                 old = self.repo.conn.execute(
-                    "SELECT id,episode_id,source_ref FROM messages WHERE source_ref=?", (source_ref,)
+                    "SELECT id,episode_id,source_ref,day_key FROM messages WHERE source_ref=?", (source_ref,)
                 ).fetchone()
                 if old:
                     self._cancel_state_for_message(old["id"])
@@ -147,32 +161,55 @@ class MemoryService:
                         "AND status IN ('pending','running')",
                         (JOB_SUMMARIZE, env.conversation_id),
                     )
-                    # Invalidate summaries/facts derived from a recalled message.
-                    if old["episode_id"]:
-                        episode = self.repo.get_memory(old["episode_id"])
-                        if episode:
-                            derived = self.repo.list_memories(
-                                scopes=[env.scope], day_key=episode.get("day_key") or "", limit=100000,
-                            )
-                            for memory in derived:
-                                if (memory["id"] == episode["id"] or memory["kind"] == KIND_DIARY
-                                        or memory["meta"].get("episode_id") == episode["id"]):
-                                    self.delete_memory(memory["id"])
-                        self.repo.conn.execute(
-                            "UPDATE messages SET episode_id=NULL WHERE episode_id=?", (old["episode_id"],)
-                        )
+                    self._retract_message_memories(env.scope, dict(old))
                     self.repo.conn.execute(
-                        "UPDATE messages SET content='[消息已撤回]' WHERE id=?", (old["id"],)
+                        "UPDATE messages SET content='[消息已撤回]',origin='recalled' WHERE id=?", (old["id"],)
                     )
             message_id = self.repo.add_message(
                 env.conversation_id, env.scope, role, content.strip(), ts, self._day(ts),
                 actor_id=actor_id, actor_name="" if role == ROLE_ASSISTANT else env.actor_name,
                 source_ref=source_ref,
+                origin="recalled" if recalled else ORIGIN_LIVE,
             )
             self._maybe_enqueue_summary(env.conversation_id, env.scope)
             if state_update and role == ROLE_USER and not recalled and not is_system_event(content):
                 self._enqueue_state(env, message_id)
         return {"conversation_id": env.conversation_id, "scope": env.scope, "message_ids": [message_id]}
+
+    def _retract_message_memories(self, scope: str, message: Dict[str, Any]) -> None:
+        memories = self.repo.list_memories(scopes=[scope], limit=100000)
+        invalid = {
+            m["id"] for m in memories
+            if message["id"] in (m["meta"].get("source_message_ids") or [])
+        }
+        if message["episode_id"]:
+            invalid.add(message["episode_id"])
+        days = {message["day_key"]}
+        while True:
+            linked = {
+                m["id"] for m in memories
+                if m["meta"].get("episode_id") in invalid
+                or invalid.intersection(m["meta"].get("episode_ids") or [])
+                or invalid.intersection(m["meta"].get("source_memory_ids") or [])
+            }
+            linked.update(
+                m["id"] for m in memories if m["kind"] == KIND_DIARY and m["day_key"] in days
+            )
+            expanded = invalid | linked
+            days.update(m["day_key"] for m in memories if m["id"] in expanded)
+            if expanded == invalid:
+                break
+            invalid = expanded
+        for memory_id in invalid:
+            self.delete_memory(memory_id)
+            self.repo.conn.execute("UPDATE messages SET episode_id=NULL WHERE episode_id=?", (memory_id,))
+        for day in days:
+            self.repo.conn.execute(
+                "UPDATE jobs SET status='done',lease_until=NULL,dedupe_key=NULL,updated_at=? "
+                "WHERE kind=? AND scope=? AND status IN ('pending','running') "
+                "AND json_extract(payload, '$.day_key')=?",
+                (self.clock(), JOB_DIARY, scope, day),
+            )
 
     # ---------- context ----------
     def build_context(self, envelope: Dict[str, Any], query: str = "") -> Dict[str, Any]:
@@ -185,7 +222,7 @@ class MemoryService:
         recall_query = self._recall_query(query or env.content, working)
         excluded = {bridge["id"]} if bridge else set()
         recalled = self._recall(
-            recall_query, scopes, [KIND_EPISODE, KIND_EXCERPT, KIND_DIARY, "message"], excluded,
+            recall_query, scopes, [KIND_EPISODE, KIND_EXCERPT, KIND_DIARY], excluded,
             env.conversation_id, window_start,
         )
         diaries = [item for item in recalled if item["kind"] == KIND_DIARY][: self.settings.diary_k]
@@ -210,6 +247,7 @@ class MemoryService:
             "envelope": env.to_dict(),
             "scope": env.scope,
             "conversation_id": env.conversation_id,
+            "recall_query": recall_query,
             "working": [_message_view(m) for m in working],
             "other_channels": other_channels,
             "bridge": _memory_view(bridge) if bridge else None,
@@ -250,6 +288,8 @@ class MemoryService:
                                      k=self.settings.retrieval_candidates, excluded=excluded)
         visible = []
         for row in rows:
+            if row["kind"] == KIND_EXCERPT and (row.get("meta") or {}).get("curated_quote") != 1:
+                continue
             overlaps_window = (
                 row["kind"] == KIND_EPISODE
                 and row.get("conversation_id") == conversation_id
@@ -268,19 +308,17 @@ class MemoryService:
     def _profile(self, env: ConversationEnvelope, scopes: Sequence[str], query: str) -> List[Dict[str, Any]]:
         subject = OWNER_ACTOR if env.scope == OWNER_SCOPE else env.actor_id
         facts = self.repo.list_memories(
-            kinds=[KIND_SEMANTIC], scopes=scopes, subject_id=subject, order="importance",
+            kinds=[KIND_SEMANTIC], scopes=scopes, subject_id=subject, order="profile",
             limit=max(32, self.settings.profile_k),
         )
         _, historical = time_intent(query)
         current_ids = set(self.repo.temporal.visible_memory_ids([f["id"] for f in facts], include_history=historical))
         facts = [f for f in facts if f["id"] in current_ids]
-        # 原 permanent 用户画像很小且每条都重要，完整提供而非随机丢弃第九条以后。
-        # 关键词召回优先放在画像开头，固定画像保留；规模增长时也不会挤掉相关事实。
         relevant = self._recall(query, scopes, [KIND_SEMANTIC], (), env.conversation_id, None)
-        selected = relevant[:self.settings.profile_k]
+        selected = [f for f in relevant if f.get("subject_id") == subject][:self.settings.profile_k]
         selected_ids = {item["id"] for item in selected}
-        facts = selected + [item for item in facts if item["id"] not in selected_ids]
-        return [_memory_view(fact) for fact in facts]
+        selected += [f for f in facts if f["id"] not in selected_ids]
+        return [_memory_view(fact) for fact in selected[:max(self.settings.profile_k, 12)]]
 
     # ---------- state ----------
     def get_state(self, scope: str = OWNER_SCOPE) -> Dict[str, Any]:
@@ -364,36 +402,78 @@ class MemoryService:
         chunk = self.repo.oldest_pending_messages(conversation_id, self.settings.summarize_chunk)
         if not chunk:
             return
-        from_id, to_id = chunk[0]["id"], chunk[-1]["id"]
-        self.repo.enqueue_job(
-            JOB_SUMMARIZE, scope, {"from_id": from_id, "to_id": to_id},
-            dedupe_key=f"{JOB_SUMMARIZE}:{conversation_id}:{from_id}:{to_id}", conversation_id=conversation_id,
-        )
+        self._enqueue_summary_chunk(conversation_id, scope, chunk)
+
+    def _enqueue_summary_chunk(self, conversation_id: str, scope: str, chunk: Sequence[Dict[str, Any]]) -> bool:
+        ids = [m["id"] for m in chunk]
+        payload = {"from_id": min(ids), "to_id": max(ids), "day_key": chunk[0]["day_key"],
+                   "source_message_ids": ids}
+        digest = content_hash(json.dumps(ids))
+        return self.repo.enqueue_job(
+            JOB_SUMMARIZE, scope, payload,
+            dedupe_key=f"{JOB_SUMMARIZE}:{conversation_id}:{digest}", conversation_id=conversation_id,
+        ) is not None
 
     def enqueue_due_summaries(self) -> int:
         """Flush small conversations after idle time instead of waiting for 40 messages."""
         before = self.clock() - self.settings.summarize_idle_seconds
         created = 0
-        for row in self.repo.idle_pending_conversations(before, self.settings.summarize_idle_min):
+        for row in self.repo.idle_pending_conversations(
+            before, self.settings.summarize_idle_min, self._day(self.clock()),
+        ):
             conversation_id, scope = row["conversation_id"], row["scope"]
             if self.repo.has_open_job(JOB_SUMMARIZE, conversation_id):
                 continue
             chunk = self.repo.oldest_pending_messages(conversation_id, self.settings.summarize_chunk)
             if not chunk:
                 continue
-            self.repo.enqueue_job(
-                JOB_SUMMARIZE, scope, {"from_id": chunk[0]["id"], "to_id": chunk[-1]["id"]},
-                dedupe_key=f"{JOB_SUMMARIZE}:{conversation_id}:{chunk[0]['id']}:{chunk[-1]['id']}",
-                conversation_id=conversation_id,
-            )
-            created += 1
+            created += int(self._enqueue_summary_chunk(conversation_id, scope, chunk))
         return created
+
+    def _diary_episodes(self, scope: str, day: str) -> List[Dict[str, Any]]:
+        if self._past_day_bounds(day) is None or self.repo.has_pending_messages_for_day(scope, day):
+            return []
+        return [
+            e for e in self.repo.episodes_for_day(scope, day)
+            if e["content"].strip() and not is_system_event(e["content"])
+            and e["origin"] not in ("recalled", "withdrawn", "retracted", "deleted", "system", "archived")
+        ]
+
+    @staticmethod
+    def _episode_signature(episodes: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        material = [
+            [e["id"], e["content"], e["meta"].get("source_message_ids", []),
+             e["meta"].get("source_memory_ids", [])]
+            for e in episodes
+        ]
+        digest = hashlib.sha256(json.dumps(
+            material, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        return {"episode_ids": [e["id"] for e in episodes], "episodes_hash": digest}
+
+    def _diary_is_current(self, scope: str, day: str, signature: Dict[str, Any]) -> bool:
+        diaries = self.repo.list_memories(kinds=[KIND_DIARY], scopes=[scope], day_key=day, limit=2)
+        if len(diaries) != 1:
+            return False
+        meta = diaries[0]["meta"]
+        if "episodes_hash" not in meta and meta.get("episode_id"):
+            return signature["episode_ids"] == [meta["episode_id"]]
+        return all(meta.get(key) == value for key, value in signature.items())
 
     def enqueue_due_diaries(self) -> int:
         today = self._day(self.clock())
         created = 0
-        for day in self.repo.undiaried_live_days(OWNER_SCOPE, today):
-            if self.repo.enqueue_job(JOB_DIARY, OWNER_SCOPE, {"day_key": day}, dedupe_key=f"{JOB_DIARY}:{OWNER_SCOPE}:{day}"):
+        for day in self.repo.episode_days_before(OWNER_SCOPE, today):
+            episodes = self._diary_episodes(OWNER_SCOPE, day)
+            if not episodes:
+                continue
+            signature = self._episode_signature(episodes)
+            if self._diary_is_current(OWNER_SCOPE, day, signature) or self.repo.has_open_diary_job(OWNER_SCOPE, day):
+                continue
+            if self.repo.enqueue_job(
+                JOB_DIARY, OWNER_SCOPE, {"day_key": day, **signature},
+                dedupe_key=f"{JOB_DIARY}:{OWNER_SCOPE}:{day}:{signature['episodes_hash']}",
+            ):
                 created += 1
         return created
 
@@ -401,8 +481,8 @@ class MemoryService:
         now = self.clock()
         if now - self._last_diary_check >= DIARY_CHECK_INTERVAL:
             self._last_diary_check = now
-            self.enqueue_due_diaries()
             self.enqueue_due_summaries()
+            self.enqueue_due_diaries()
         while True:
             job = self.repo.claim_job(self.settings.job_lease_seconds, kinds=kinds or [JOB_SUMMARIZE, JOB_DIARY])
             if job is None:
@@ -410,12 +490,46 @@ class MemoryService:
             materials = self._job_materials(job)
             if materials is not None:
                 return {"job": job, "materials": materials}
-            self.repo.finish_job(job["id"])
+            self.repo.finish_job(job["id"], release_dedupe=job["kind"] == JOB_DIARY)
+
+    def _summary_messages(self, job: Dict[str, Any]) -> List[Dict[str, Any]]:
+        payload = job["payload"]
+        if "source_message_ids" in payload:
+            candidates = [self.repo.get_message(int(i)) for i in payload["source_message_ids"]]
+        else:
+            candidates = self.repo.pending_messages_in_range(
+                job["conversation_id"], payload["from_id"], payload["to_id"],
+            )
+        messages = sorted(
+            (m for m in candidates if m and m["conversation_id"] == job["conversation_id"]
+             and m["scope"] == job["scope"] and m["episode_id"] is None
+             and consolidation_candidate(m["role"], m["content"], m["origin"])),
+            key=lambda m: (m["ts"], m["id"]),
+        )
+        day = payload.get("day_key") or (messages[0]["day_key"] if messages else None)
+        return [m for m in messages if m["day_key"] == day]
+
+    def _diary_state(self, scope: str, day: str) -> Dict[str, Any]:
+        bounds = self._past_day_bounds(day)
+        if bounds is None:
+            return {}
+        start, end = bounds
+        history = self.repo.temporal.state_history(scope, as_of=math.nextafter(end, -math.inf), limit=1)
+        if not history or history[0]["effective_at"] < start:
+            return {}
+        snapshot = history[0]
+        # Full snapshots inherit earlier versions; a backdated version may contain future state.
+        unsafe = self.repo.conn.execute(
+            "SELECT 1 FROM state_history WHERE scope = ? AND version <= ? "
+            "AND (redacted = 1 OR effective_at > ? OR recorded_at > ?) LIMIT 1",
+            (scope, snapshot["version"], snapshot["effective_at"], end),
+        ).fetchone()
+        return {} if unsafe else snapshot["data"]
 
     def _job_materials(self, job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if job["kind"] == JOB_STATE:
             message = self.repo.get_message(int(job["payload"]["message_id"]))
-            if not message or message["content"] == "[消息已撤回]":
+            if not message or not consolidation_candidate(message["role"], message["content"], message["origin"]):
                 return None
             state = self.repo.get_state(job["scope"])
             # 后台判断逐条使用真实消息；不等待 40 条摘要，也不把其他群成员混入个人状态。
@@ -424,16 +538,18 @@ class MemoryService:
                 "state": state["data"], "version": state["version"],
             }
         if job["kind"] == JOB_SUMMARIZE:
-            payload = job["payload"]
-            messages = [
-                m for m in self.repo.messages_in_range(job["conversation_id"], payload["from_id"], payload["to_id"])
-                if m["episode_id"] is None
-            ]
+            messages = self._summary_messages(job)
             if not messages:
                 return None
+            payload = {**job["payload"], "day_key": messages[0]["day_key"],
+                       "source_message_ids": [m["id"] for m in messages]}
+            self.repo.update_job_payload(job["id"], payload)
+            job["payload"] = payload
             return {
                 "scope": job["scope"],
                 "conversation_id": job["conversation_id"],
+                "day_key": payload["day_key"],
+                "source_message_ids": payload["source_message_ids"],
                 "messages": [_message_view(m) for m in messages],
                 "fact_keys": [
                     {"subject": f["subject"], "predicate": f["predicate"]}
@@ -442,16 +558,21 @@ class MemoryService:
             }
         if job["kind"] == JOB_DIARY:
             day = job["payload"]["day_key"]
-            if self.repo.list_memories(kinds=[KIND_DIARY], scopes=[job["scope"]], day_key=day, limit=1):
-                return None
-            episodes = self.repo.episodes_for_day(job["scope"], day)
+            episodes = self._diary_episodes(job["scope"], day)
             if not episodes:
                 return None
+            signature = self._episode_signature(episodes)
+            if self._diary_is_current(job["scope"], day, signature):
+                return None
+            payload = {**job["payload"], **signature}
+            self.repo.update_job_payload(job["id"], payload)
+            job["payload"] = payload
             return {
                 "scope": job["scope"],
                 "day_key": day,
                 "episodes": [e["content"] for e in episodes],
-                "state": self.repo.get_state(OWNER_SCOPE)["data"],
+                **signature,
+                "state": self._diary_state(job["scope"], day),
             }
         return None
 
@@ -510,27 +631,26 @@ class MemoryService:
         if not summary:
             raise ValueError("summary is empty")
         conversation_id, scope = job["conversation_id"], job["scope"]
-        payload = job["payload"]
-        fresh_facts = self._fresh_facts(scope, facts)
         new_ids: List[str] = []
         with self.repo.transaction():
-            messages = [
-                m for m in self.repo.messages_in_range(conversation_id, payload["from_id"], payload["to_id"])
-                if m["episode_id"] is None
-            ]
+            messages = self._summary_messages(job)
             if not messages:
                 self.repo.finish_job(job["id"])
                 return {"status": "done", "episode_id": None, "scope": scope}
+            fresh_facts = self._fresh_facts(scope, facts)
+            message_ids = [m["id"] for m in messages]
+            day = messages[0]["day_key"]
             end_ts = max(m["ts"] for m in messages)
             episode_id = self.repo.add_memory(
                 KIND_EPISODE, scope, summary, conversation_id=conversation_id,
                 importance=self._clamp_importance(importance), start_ts=min(m["ts"] for m in messages),
-                end_ts=end_ts, day_key=self._day(end_ts), tags=[str(t) for t in tags][:8],
-                meta={"message_range": [payload["from_id"], payload["to_id"]],
+                end_ts=end_ts, day_key=day, tags=[str(t) for t in tags][:8],
+                meta={"source_message_ids": message_ids,
+                      "source_memory_ids": job["payload"].get("source_memory_ids", []),
                       "retrieval": retrieval or {}, "facts": [f["content"] for f in fresh_facts]},
             )
             new_ids.append(episode_id)
-            self.repo.mark_consolidated(conversation_id, payload["from_id"], payload["to_id"], episode_id)
+            self.repo.mark_consolidated_ids(conversation_id, message_ids, episode_id)
             actors = {m["actor_id"] for m in messages if m["role"] in (ROLE_USER, ROLE_OBSERVED)}
             for fact in fresh_facts:
                 subject = str(fact.get("subject") or "").strip()
@@ -540,8 +660,9 @@ class MemoryService:
                     KIND_SEMANTIC, scope, fact["content"], conversation_id=conversation_id,
                     subject_id=subject if subject in actors else None,
                     importance=self._clamp_importance(fact.get("importance", 6)), end_ts=end_ts,
-                    day_key=self._day(end_ts),
-                    meta={"episode_id": episode_id, "retrieval": retrieval or {}},
+                    day_key=day,
+                    meta={"episode_id": episode_id, "source_message_ids": message_ids,
+                          "retrieval": retrieval or {}},
                 )
                 new_ids.append(fact_id)
                 source_id = fact.get("source_message_id")
@@ -561,6 +682,8 @@ class MemoryService:
                                                 float(valid_from), source_ref=episode_id)
             self.repo.finish_job(job["id"])
             self._maybe_enqueue_summary(conversation_id, scope)
+            self.enqueue_due_summaries()
+            self.enqueue_due_diaries()
         self._index_ids(new_ids)
         return {"status": "done", "episode_id": episode_id, "semantic_ids": new_ids[1:], "scope": scope}
 
@@ -597,10 +720,30 @@ class MemoryService:
             raise ValueError("diary is empty")
         day = job["payload"]["day_key"]
         with self.repo.transaction():
-            diary_id = None
-            if not self.repo.list_memories(kinds=[KIND_DIARY], scopes=[job["scope"]], day_key=day, limit=1):
-                diary_id = self.repo.add_memory(KIND_DIARY, job["scope"], text, importance=8, day_key=day)
-            self.repo.finish_job(job["id"])
+            episodes = self._diary_episodes(job["scope"], day)
+            signature = self._episode_signature(episodes)
+            if not episodes or any(job["payload"].get(key) != value for key, value in signature.items()):
+                self.repo.finish_job(job["id"], release_dedupe=True)
+                self.enqueue_due_summaries()
+                self.enqueue_due_diaries()
+                return {"status": "ignored", "diary_id": None}
+            if self._diary_is_current(job["scope"], day, signature):
+                self.repo.finish_job(job["id"], release_dedupe=True)
+                return {"status": "done", "diary_id": None}
+            diaries = self.repo.list_memories(kinds=[KIND_DIARY], scopes=[job["scope"]], day_key=day, limit=100000)
+            meta = {**(diaries[0]["meta"] if diaries else {}), **signature}
+            for key in ("source_message_ids", "source_memory_ids"):
+                meta[key] = list(dict.fromkeys(
+                    source for e in episodes for source in (e["meta"].get(key) or [])
+                ))
+            if diaries:
+                diary_id = diaries[0]["id"]
+                self.repo.update_memory(diary_id, content=text, meta=meta, importance=8)
+                for duplicate in diaries[1:]:
+                    self.delete_memory(duplicate["id"])
+            else:
+                diary_id = self.repo.add_memory(KIND_DIARY, job["scope"], text, importance=8, day_key=day, meta=meta)
+            self.repo.finish_job(job["id"], release_dedupe=True)
         if diary_id:
             self._index_ids([diary_id])
         return {"status": "done", "diary_id": diary_id}

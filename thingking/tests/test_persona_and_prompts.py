@@ -227,6 +227,21 @@ class PromptBuilderTest(unittest.TestCase):
         messages = prompt_builder.build_conversation_messages(prompt_builder.empty_context(env))
         self.assertIn("正在私聊你", messages[0]["content"])
 
+    def test_normal_recall_uses_summary_and_original_words_are_opt_in(self):
+        context = {
+            "recalled": [{"kind": "episode", "day_key": "2026-01-18",
+                          "content": "管理员提出帮助修复视觉模块",
+                          "evidence": [{"source_type": "message", "source_ref": "old:1",
+                                        "role": "assistant", "content": "长篇旧台词" * 150}]}],
+            "recall_query": "视觉修复是哪天",
+        }
+        normal = prompt_builder._memory_recall_block(context)
+        self.assertIn("管理员提出帮助修复视觉模块", normal)
+        self.assertNotIn("长篇旧台词", normal)
+        quoted = prompt_builder._memory_recall_block({**context, "recall_query": "当时的原话"})
+        self.assertIn("长篇旧台词", quoted)
+        self.assertLess(len(quoted), 800)
+
 
 class TimeGapTest(unittest.TestCase):
     def test_time_gap_uses_last_user_timestamp(self):

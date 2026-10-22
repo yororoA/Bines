@@ -112,6 +112,16 @@ def _chunks(text: str) -> Iterator[str]:
             start = end - CHUNK_OVERLAP
 
 
+def _short_evidence(text: str, query: str, limit: int = 480) -> str:
+    """Use one contiguous source span rather than replaying a whole transcript."""
+    if len(text) <= limit:
+        return text
+    terms = set(_tokens(query))
+    pieces = list(_chunks(text))
+    selected = max(pieces, key=lambda part: len(terms.intersection(_tokens(part)))) if pieces else text
+    return selected[:limit]
+
+
 def _expansions(meta: Mapping[str, Any]) -> List[Tuple[str, str]]:
     result = []
 
@@ -133,12 +143,19 @@ def _expansions(meta: Mapping[str, Any]) -> List[Tuple[str, str]]:
     return result
 
 
-def _active(row: Mapping[str, Any], source_type: str) -> bool:
+def _active(row: Mapping[str, Any], source_type: str, *, include_archived: bool = False) -> bool:
     text = row.get("content") or ""
     meta = _object(row.get("meta"))
     if not text.strip() or text.strip().lower() in _RECALLED or is_system_event(text):
         return False
     if source_type == "message" and row.get("role") not in ROLES:
+        return False
+    if source_type == "message" and row.get("origin") == "archived" and not include_archived:
+        return False
+    if source_type == "message" and row.get("episode_id") and not include_archived:
+        return False  # Consolidated dialogue is reached through its summary evidence.
+    if (source_type == "memory" and meta.get("legacy_type") == "raw_conversation"
+            and not meta.get("curated_quote")):
         return False
     for data in (row, meta):
         if any(data.get(flag) in (True, 1, "true", "1")
@@ -429,6 +446,13 @@ class EvidenceStore:
             meta = _object(current.get("meta"))
             episode_id = meta.get("episode_id")
             clauses, params = [], [scope]
+            explicit_ids = [
+                int(value) for value in meta.get("source_message_ids") or []
+                if not isinstance(value, bool) and re.fullmatch(r"\d+", str(value))
+            ]
+            if explicit_ids:
+                clauses.append(f"id IN ({_placeholders(explicit_ids)})")
+                params.extend(explicit_ids)
             conversation_id = current.get("conversation_id") or memory.get("conversation_id")
             span = self._message_range(meta.get("message_range"))
             if span and conversation_id:
@@ -455,7 +479,7 @@ class EvidenceStore:
                 f"SELECT * FROM messages WHERE scope = ? AND ({' OR '.join(clauses)})", params,
             ):
                 message = dict(raw)
-                if _active(message, "message"):
+                if _active(message, "message", include_archived=True):
                     messages[message["id"]] = message
         return list(messages.values())
 
@@ -490,14 +514,14 @@ class EvidenceStore:
                 return [{
                     "source_type": "message", "source_id": row["id"],
                     "source_ref": row.get("source_ref") or f"messages:{row['id']}",
-                    "role": row["role"], "actor_id": row["actor_id"], "content": row["content"],
+                    "role": row["role"], "actor_id": row["actor_id"], "content": _short_evidence(row["content"], query),
                     "ts": row["ts"], "scope": row["scope"],
                 } for row in messages[:limit]]
             return [{
                 "source_type": "legacy_memory" if source.get("origin") == ORIGIN_LEGACY else "summary",
                 "source_id": source["id"],
                 "source_ref": source.get("source_ref") or f"memories:{source['id']}",
-                "role": None, "actor_id": None, "content": source["content"],
+                "role": None, "actor_id": None, "content": _short_evidence(source["content"], query),
                 "ts": source["end_ts"] if source.get("end_ts") is not None else source.get("created_at"),
                 "scope": source["scope"],
             }]
