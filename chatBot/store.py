@@ -6,7 +6,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from chatBot.config import DATA_DIR, OWNER_QQ_IDS
+from chatBot.config import GATEWAY_DIR, OWNER_QQ_IDS
 from chatBot.messages import Identity, readable
 
 
@@ -35,7 +35,7 @@ def prepare_gateway_database(data_dir):
 
 class MemoryStore:
     def __init__(self, path=None, owners=None):
-        self.path = path or prepare_gateway_database(DATA_DIR)
+        self.path = path or prepare_gateway_database(GATEWAY_DIR)
         self.owners = OWNER_QQ_IDS if owners is None else frozenset(map(str, owners))
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:

@@ -7,6 +7,9 @@ ROOT = defaults.ROOT_DIR
 DATA_DIR = Path(os.environ.get("BINES_MEMORY_DIR", str(ROOT / "thingking" / "memory_data")))
 if not DATA_DIR.is_absolute():
     DATA_DIR = ROOT / DATA_DIR
+GATEWAY_DIR = Path(os.environ.get("BINES_GATEWAY_DIR", str(DATA_DIR)))
+if not GATEWAY_DIR.is_absolute():
+    GATEWAY_DIR = ROOT / GATEWAY_DIR
 ONEBOT_WS_URL = defaults.NAPCAT_WS_URL
 ONEBOT_ACCESS_TOKEN = defaults.NAPCAT_ACCESS_TOKEN
 BOT_QQ_ID = os.environ.get("BINES_BOT_QQ_ID", "")

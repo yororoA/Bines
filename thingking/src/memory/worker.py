@@ -64,6 +64,23 @@ add_memory_highlight, remove_memory_highlight, relationship_delta。
 例如：{"add_item":"蓝色围巾","relationship_delta":1}。"""
 
 
+def _state_changes(raw: str) -> Dict[str, Any]:
+    """Accept one JSON object; models sometimes append a second object or prose."""
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    start = text.find("{")
+    if start < 0:
+        raise ValueError(f"state output is not JSON: {text[:200]!r}")
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"state output JSON is invalid: {exc.msg}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("state output must be an object")
+    return value
+
+
 def _format_ts(ts: Optional[float]) -> str:
     return datetime.fromtimestamp(float(ts)).strftime("%m/%d %H:%M") if ts else ""
 
@@ -199,7 +216,7 @@ class MemoryWorker:
             )},
         ]
         raw = self.state_complete_text(messages)
-        changes = json.loads(raw.strip())
+        changes = _state_changes(raw)
         # 模型偶尔把单数参数包成单元素数组；只兼容这种不丢信息的情况。
         if isinstance(changes, dict):
             for key, value in list(changes.items()):

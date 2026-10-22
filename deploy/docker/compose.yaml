@@ -7,6 +7,14 @@ x-logging: &bines-logging
     max-file: "3"
 
 services:
+  gateway-init:
+    image: bines-launcher:local
+    user: "0:0"
+    command: ["sh", "-c", "chown -R ${BINES_UID:-1000}:${BINES_GID:-1000} /app/gateway_data || true; chmod -R 0777 /app/gateway_data"]
+    restart: "no"
+    volumes:
+      - bines-gateway:/app/gateway_data
+
   napcat:
     image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
     logging: *bines-logging
@@ -57,9 +65,11 @@ services:
       - path: ../../.env
         required: false
     environment:
+      PYTHONFAULTHANDLER: "1"
       BINES_PROFILE: ${BINES_PROFILE:-chatbot}
       BINES_MEMORY_BACKEND: ${BINES_MEMORY_BACKEND:-remote}
       BINES_MEMORY_DIR: /app/thingking/memory_data
+      BINES_GATEWAY_DIR: /app/gateway_data
       BINES_QQ_GATEWAY_HOST: 0.0.0.0
       BINES_QQ_GATEWAY_URL: http://chatbot:6102
       BINES_NAPCAT_WS_URL: ws://napcat:3001
@@ -71,11 +81,14 @@ services:
       - ../../thingking/memory_data:/app/thingking/memory_data
       - ../../thingking/models:/app/thingking/models
       - ../../deploy/napcat/data:/app/deploy/napcat/data
+      - bines-gateway:/app/gateway_data
     depends_on:
       napcat:
         condition: service_started
       memory-server:
         condition: service_healthy
+      gateway-init:
+        condition: service_completed_successfully
     networks:
       - bines
     healthcheck:
@@ -97,10 +110,12 @@ services:
     environment:
       BINES_PROFILE: ${BINES_PROFILE:-chatbot}
       BINES_MEMORY_DIR: /app/thingking/memory_data
+      BINES_GATEWAY_DIR: /app/gateway_data
       BINES_QQ_GATEWAY_URL: http://chatbot:6102
     volumes:
       - ../../thingking/memory_data:/app/thingking/memory_data
       - ../../thingking/models:/app/thingking/models
+      - bines-gateway:/app/gateway_data
     depends_on:
       chatbot:
         condition: service_healthy
@@ -147,6 +162,7 @@ services:
       - path: ../../.env
         required: false
     environment:
+      BINES_DOCKER_MODE: "1"
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_ZMQ_HOST: 0.0.0.0
       HF_HOME: /app/thingking/models/hf-cache
@@ -198,3 +214,7 @@ services:
 networks:
   bines:
     driver: bridge
+
+volumes:
+  bines-gateway:
+    name: bines-gateway

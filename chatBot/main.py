@@ -1,7 +1,9 @@
 """ChatBot gateway; embeds lightweight memory only in the two-process QQ profile."""
 import logging
+import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +17,19 @@ from chatBot.memory_hub import MemoryHub
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    store, client = MemoryStore(), NapCatClient()
+    # Docker named-volume initialization can lag one scheduling tick behind the
+    # dependency; retry the writable check instead of crash-looping the gateway.
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            store = MemoryStore()
+            break
+        except sqlite3.OperationalError as exc:
+            if "unable to open database file" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            logging.warning("gateway.db 暂不可写，1 秒后重试：%s", exc)
+            time.sleep(1)
+    client = NapCatClient()
     memory = MemoryHub(store)
     memory.start()
     client.add_event_listener(store.ingest)
