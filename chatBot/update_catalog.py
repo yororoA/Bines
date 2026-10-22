@@ -22,14 +22,17 @@ def update(version):
         raise ValueError("Expected OneBot POST actions")
     API_DIR.mkdir(exist_ok=True)
     target = API_DIR / f"napcat-{version}.openapi.json"
-    target.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":"))+"\n", encoding="utf-8")
+    # Write bytes, not text: write_text() would turn "\n" into "\r\n" on Windows,
+    # and the manifest hash would then never match on a checkout with LF endings.
+    payload = (json.dumps(document, ensure_ascii=False, separators=(",", ":"))+"\n").encode("utf-8")
+    target.write_bytes(payload)
     manifest = {
         "version": version, "file": target.name, "source": url,
         "source_sha256": hashlib.sha256(raw).hexdigest(),
-        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+        "sha256": hashlib.sha256(payload).hexdigest(),
         "actions": len(document["paths"]),
     }
-    (API_DIR / "manifest.json").write_text(json.dumps(manifest, indent=2)+"\n", encoding="utf-8")
+    (API_DIR / "manifest.json").write_bytes((json.dumps(manifest, indent=2)+"\n").encode("utf-8"))
     print(f"NapCatDocs {version}: {manifest['actions']} actions saved in {target}")
 
 

@@ -54,6 +54,7 @@ DEPENDENCIES.md
 
 node_modules
 *.env
+.env.*
 test/
 
 .workbuddy/
