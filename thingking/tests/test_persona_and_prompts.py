@@ -69,6 +69,7 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("直白表达感谢与关心", guard)
         self.assertIn("真诚夸奖", guard)
         self.assertIn("日常", guard)
+        self.assertIn("自己的喜好", guard)
         self.assertIn("趴着降温", guard)
         self.assertIn("嗯哼", guard)
         self.assertNotIn("别让我重复", guard)
@@ -241,6 +242,18 @@ class PromptBuilderTest(unittest.TestCase):
         quoted = prompt_builder._memory_recall_block({**context, "recall_query": "当时的原话"})
         self.assertIn("长篇旧台词", quoted)
         self.assertLess(len(quoted), 800)
+
+    def test_legacy_state_background_is_bounded_and_not_live_activity(self):
+        text = prompt_builder._state_block({
+            "npc_state": {"current_activity": "上次聊过的事"},
+            "important_thing": "已经结束的反馈",
+            "memory_highlights": ["第一段背景"] * 20 + [f"{i}:" + "历史叙述" * 80 for i in range(30)],
+        })
+        self.assertIn("上次记录的活动", text)
+        self.assertIn("不代表本轮话题仍在继续", text)
+        self.assertIn("不是当前活动、情绪或台词", text)
+        self.assertEqual(text.count("第一段背景"), 1)
+        self.assertLess(len(text), 2100)
 
 
 class TimeGapTest(unittest.TestCase):

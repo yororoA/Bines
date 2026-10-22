@@ -27,6 +27,10 @@ DEBOUNCE = float(os.environ.get("BINES_QQ_DEBOUNCE", "1.5"))
 MAX_WAIT = float(os.environ.get("BINES_QQ_MAX_WAIT", "5"))
 WORKERS = int(os.environ.get("BINES_QQ_WORKERS", "4"))
 GROUP_REPLY_MODE = os.environ.get("BINES_QQ_GROUP_REPLY", "mention")
+# Conversation needs more variation than low-temperature extraction/tool tasks.
+REPLY_TEMPERATURE = float(os.environ.get("BINES_QQ_TEMPERATURE", "0.85"))
+if not 0 <= REPLY_TEMPERATURE <= 2:
+    raise ValueError("BINES_QQ_TEMPERATURE 必须在 0 到 2 之间")
 
 
 def gateway_token():

@@ -44,7 +44,7 @@ _STATE_LABELS = (
     ("relationship_level", "与当前对话者的关系"),
     ("relationship_score", "当前会话的好感度数值（范围 -200 到 200）"),
     ("active_quest", "正在进行的约定或任务"),
-    ("important_thing", "最近的重要情况"),
+    ("important_thing", "近期背景（不代表本轮话题仍在继续）"),
 )
 
 _QQ_PREFIX = re.compile(r"^\[QQ(?:群消息|私聊)\]\[[^\]]*\]:\s*")
@@ -100,7 +100,7 @@ def _state_block(state: Dict[str, Any]) -> str:
     if npc.get("attire"):
         lines.append(f"- 你现在的穿着：{npc['attire']}")
     if npc.get("current_activity"):
-        lines.append(f"- 你正在做的事：{npc['current_activity']}")
+        lines.append(f"- 上次记录的活动（以本轮消息为准）：{npc['current_activity']}")
     if npc.get("visual_module_status"):
         lines.append(f"- 视觉模块状态：{npc['visual_module_status']}")
     for key, label in _STATE_LABELS:
@@ -114,8 +114,15 @@ def _state_block(state: Dict[str, Any]) -> str:
         lines.append(f"- 持有物品：{'；'.join(map(str, state['inventory']))}")
     highlights = state.get("memory_highlights") or []
     if highlights:
-        lines.append("- 重要回忆：")
-        lines.extend(f"  · {item}" for item in highlights)
+        lines.append("- 历史背景摘要（可能含旧猜测，不是当前活动、情绪或台词；事实以记忆证据为准）：")
+        # Legacy state accumulated repeated emotional retellings independently
+        # of recall. Keep a bounded background, rather than a second transcript.
+        size = 0
+        for item in dict.fromkeys(map(str, highlights)):
+            if size + len(item) > 1800:
+                break
+            lines.append(f"  · {item}")
+            size += len(item)
     return "--- 当前状态 ---\n" + "\n".join(lines) if lines else ""
 
 

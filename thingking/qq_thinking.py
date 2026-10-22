@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
-from chatBot.config import DEBOUNCE, MAX_WAIT, WORKERS, GROUP_REPLY_MODE
+from chatBot.config import DEBOUNCE, MAX_WAIT, WORKERS, GROUP_REPLY_MODE, REPLY_TEMPERATURE
 from chatBot.messages import Identity, segments, readable, SEND_ACTIONS, sent_message
 from chatBot.store import MemoryStore
 from chatBot.gateway_client import GatewayClient
@@ -211,7 +211,9 @@ class QQThinking:
                 {"role": "user", "content": f"请回复 QQ:{identity.user} 本轮消息：\n{request}"},
             ])
             try:
-                text, _, _ = model.run_skill_protocol(conversation, self.runner, source="QQ")
+                text, _, _ = model.run_skill_protocol(
+                    conversation, self.runner, source="QQ", temperature=REPLY_TEMPERATURE,
+                )
             finally:
                 # Keep successful cross-target sends even if a later model/API step fails.
                 for receipt in context.receipts:

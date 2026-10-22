@@ -412,6 +412,9 @@ class Integration(unittest.TestCase):
         self.assertEqual(sends, params)
         self.assertEqual(len(requests), 2)
         self.assertTrue(requests[0]["tools"])
+        from chatBot.config import REPLY_TEMPERATURE
+        self.assertEqual(requests[0]["temperature"], REPLY_TEMPERATURE)
+        self.assertEqual(requests[1]["temperature"], REPLY_TEMPERATURE)
         self.assertNotIn("[[SKILL_CALL]]", requests[0]["messages"][0]["content"])
         self.assertTrue(requests[0]["messages"][-1]["content"].startswith("--- 本轮角色口吻"))
         continuation = requests[1]["messages"]
