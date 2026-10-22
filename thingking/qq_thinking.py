@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 from chatBot.config import DEBOUNCE, MAX_WAIT, WORKERS, GROUP_REPLY_MODE
-from chatBot.messages import segments, readable, SEND_ACTIONS, sent_message, split_qq_text
+from chatBot.messages import segments, readable, SEND_ACTIONS, FORWARD_ACTIONS, sent_message, split_qq_text
 from chatBot.store import MemoryStore
 from chatBot.gateway_client import GatewayClient
 from tools.context import ToolContext, tool_context
@@ -190,7 +190,8 @@ class QQThinking:
                 f"机器人账号={identity.account}，当前用户 QQ={identity.user}，名称={identity.name}，"
                 f"当前群={identity.group or '私聊'}，群角色={identity.group_role}，Bines主人={identity.owner}。\n"
                 "群角色不赋予 Bines 管理权；群聊只读取本群公开上下文。\n"
-                "普通最终文本由网关发送到当前会话；若已通过工具发送则不要再重复发送。\n"
+                "普通最终文本由网关发送到当前会话。只发送图片或表情后仍可回答；"
+                "已通过工具发送的正文不要重复，图文同一条可一次传入消息段数组。\n"
                 + "\n".join(quotes)
             )
             from chatBot.media import describe_images
@@ -205,7 +206,8 @@ class QQThinking:
                 {"role": "user", "content": f"请回复 QQ:{identity.user} 本轮消息：\n{request}"},
             ])
             text, _, _ = model.run_skill_protocol(conversation, self.runner, source="QQ")
-            sent_current = False
+            sent_texts = []
+            forwarded = False
             uncertain = False
             for receipt in context.receipts:
                 action, params, result = receipt["action"], receipt["params"], receipt.get("result") or {}
@@ -215,14 +217,22 @@ class QQThinking:
                     not identity.group and str(params.get("user_id")) == identity.user)
                 if same_target:
                     self.remember_send(identity, params, result)
-                    sent_current |= successful(result)
+                    if successful(result):
+                        forwarded |= action in FORWARD_ACTIONS
+                        sent_texts.extend(str((part.get("data") or {}).get("text", "")).strip()
+                                          for part in segments(sent_message(params))
+                                          if part.get("type") == "text")
                     uncertain |= result.get("status") == "uncertain"
             if uncertain:
                 raise RuntimeError("工具发送结果不确定，已暂停本轮回复，需查询回执")
             if not any(self.should_reply(event, self.store.identity(event)) for event in relevant):
                 self.store.save_turn(turn_id, "done")
                 return
-            if not text or sent_current:
+            # 媒体发送成功不等于文字已经发送；只抑制重复正文和转发的完成回执。
+            final_text = "".join((text or "").split())
+            duplicate = any(final_text == "".join(sent.split())
+                            for sent in [*sent_texts, "".join(sent_texts)] if sent)
+            if not text or duplicate or forwarded:
                 self.store.save_turn(turn_id, "done")
                 return
             if text.strip().startswith("[[SKILL_CALL]]"):

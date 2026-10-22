@@ -27,13 +27,15 @@ _PRIVACY_POLICY = "对方不是管理员：不要透露管理员的私人信息�
 
 _OPERATING_RULES = [
     "需要真实世界操作时，使用本轮启用的本地技能；不要编造执行结果或视觉描述。",
-    "用户问到过去的对话或记忆时，直接根据 <memory_recall> 和对话历史回答。",
+    "用户问过去的对话或记忆时，先读取当前状态、用户画像、<memory_recall> 和对话历史；"
+    "证据不够时用 search_memory 检索主题关键词后回答，不要直接声称忘了，也不要编造。",
     "收到 [System Event: Long Silence] 或 [System Event: Bored] 时，可以随口开启话题，也可以保持安静；只有情境明确需要时才使用技能。",
 ]
 
 _STATE_LABELS = (
     ("current_location", "所在位置"),
     ("relationship_level", "与管理员的关系"),
+    ("relationship_score", "当前会话的好感度数值（范围 -200 到 200）"),
     ("active_quest", "正在进行的约定或任务"),
     ("important_thing", "最近的重要情况"),
 )
@@ -94,7 +96,7 @@ def _state_block(state: Dict[str, Any]) -> str:
     if npc.get("visual_module_status"):
         lines.append(f"- 视觉模块状态：{npc['visual_module_status']}")
     for key, label in _STATE_LABELS:
-        if state.get(key):
+        if state.get(key) is not None and state.get(key) != "":
             lines.append(f"- {label}：{state[key]}")
     if state.get("inventory"):
         lines.append(f"- 持有物品：{'；'.join(map(str, state['inventory']))}")

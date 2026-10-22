@@ -1,8 +1,6 @@
-"""Standalone consolidation service: episode summaries, facts and diaries.
+"""独立记忆服务：后台更新会话状态、摘要、长期事实和日记。
 
-Runs separately from QQ Thinking and desktop Thinking. It talks to the ChatBot
-gateway, which forwards memory RPC to either the embedded MemoryService
-(chatbot profile) or the RAG Server (full profile).
+QQ 与桌面共用；通过 ChatBot 网关访问 Memory Server。
 """
 import logging
 import os
@@ -14,35 +12,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 
-from agents import DynamicMemoryMaintainer
 from chatBot.memory_hub import GatewayMemoryClient
 from common.service_ready import mark_ready
 from memory.worker import MemoryWorker, wait_for_server
 import persona_profile
-from skill_runner import SkillRunner
 from thinking_model_helper import ThinkingModelHelper
-from tools import TOOLS_REGISTRY
 from tools.dependencies import deps
 
 log = logging.getLogger("bines.memory.consolidation")
 
 
-def build_worker(client, model=None, runner=None):
-    """Build the worker with an optional injected model/runner for tests."""
+def build_worker(client, model=None):
+    """构建记忆后台任务，可注入模型以验证完整链路。"""
     model = model or ThinkingModelHelper()
-    runner = runner or SkillRunner(
-        TOOLS_REGISTRY,
-        skills_dir=ROOT / "skills",
-        enabled_actions_path=ROOT / "server" / "skill_actions.json",
-    )
-    maintainer = DynamicMemoryMaintainer(runner, client)
     return MemoryWorker(
         client,
         complete_text=lambda messages: model.complete_text(
             messages, temperature=0.3, max_tokens=1500,
         ),
         diary_system_prompt=persona_profile.diary_system_prompt,
-        on_owner_summary=maintainer.update_from_summary,
+        state_complete_text=lambda messages: model.complete_text(messages, temperature=0.0, max_tokens=500),
+        idle_seconds=2.0,
     )
 
 

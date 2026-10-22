@@ -41,7 +41,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             elif self.path == "/memory":
                 if self.server.memory_hub is None:
                     raise RuntimeError("Memory hub unavailable")
-                result = self.server.memory_hub.call(identity, data["method"], data.get("params", {}))
+                result = self.server.memory_hub.call(identity, data["method"], data.get("params", {}), event_id=event_id)
             elif self.path == "/discover":
                 result = service.catalog.discover(identity, data.get("query", ""), data.get("action"))
             elif self.path == "/catalog":

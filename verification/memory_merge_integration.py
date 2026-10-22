@@ -91,6 +91,53 @@ class MemoryMergeIntegration(unittest.TestCase):
         with tool_context(self.context(event("2", group="10", msg_id=2))):
             self.assertNotIn("群内物品", str(self.memory.get_state("owner")))
 
+    def test_background_worker_updates_state_through_gateway(self):
+        from memory.worker import MemoryWorker
+        self.memory.put_state("owner", {"relationship_score": 133})
+        ctx = self.context(event("1", text="我信任你 我们周五一起听歌"))
+        with tool_context(ctx):
+            self.memory.build_context({}, query="听歌")
+        worker = MemoryWorker(self.memory, lambda m: "", lambda: "",
+            state_complete_text=lambda m: '{"relationship_delta":1,"active_quest":"周五一起听歌"}')
+        self.assertTrue(worker.run_once())
+        state = self.memory.get_state("owner")["data"]
+        self.assertEqual(state["relationship_score"], 134)
+        self.assertEqual(state["active_quest"], "周五一起听歌")
+
+    def test_memory_search_ignores_model_supplied_owner_scope_in_group(self):
+        self.memory.add_memory("semantic", "owner", "主人生日秘密", subject_id="owner")
+        self.memory.add_memory("episode", "qq:99:group:10", "群里的耳机约定")
+        with tool_context(self.context(event("1", group="10"))):
+            hits = self.memory.search("耳机", ["owner"], k=10)
+        self.assertEqual([hit["content"] for hit in hits], ["群里的耳机约定"])
+        with tool_context(self.context(event("1", text="生日"))):
+            hits = self.memory.search("生日", ["qq:99:group:10"], k=10)
+        self.assertEqual([hit["content"] for hit in hits], ["主人生日秘密"])
+
+    def test_manual_state_write_cancels_same_message_background_job(self):
+        from tools.memory_tool import update_status
+        self.memory.put_state("owner", {"relationship_score": 133})
+        ctx = self.context(event("1", text="谢谢你一直陪我"))
+        with tool_context(ctx), patch("chatBot.memory_hub.GatewayMemoryClient", return_value=self.memory):
+            self.memory.build_context({})
+            job = self.hub.service.claim_job(kinds=["update_state"])
+            self.assertIsNotNone(job)
+            update_status(relationship_delta=1)
+        result = self.memory.complete_state_update(job["job"]["id"], {"relationship_delta": 1})
+        self.assertEqual(result["status"], "ignored")
+        self.assertEqual(self.memory.get_state("owner")["data"]["relationship_score"], 134)
+
+    def test_history_import_does_not_reapply_old_relationship_changes(self):
+        ev = event("1", msg_id=456, text="历史问候")
+        self.store.add(self.store.identity(ev), "user", "谢谢你", external_id="99:p:1:455")
+        ctx = self.context(ev)
+        with tool_context(ctx):
+            self.memory.build_context({})
+        jobs = self.hub.service.repo.conn.execute(
+            "SELECT payload FROM jobs WHERE kind='update_state'",
+        ).fetchall()
+        self.assertEqual(len(jobs), 1)
+
     def test_sync_crash_replay_and_recall_cancel_stale_job(self):
         contexts = [self.context(event("2", msg_id=i, text=f"消息{i}")) for i in range(1, 5)]
         self.hub.sync()

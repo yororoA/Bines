@@ -23,6 +23,7 @@ def run_main_agent_rounds(
     final_text = ""
     exited_due_to_interrupt = False
     last_skill_result = ""
+    state_updated = False
 
     def send_text(text: str, segment_state: dict) -> None:
         for char in text:
@@ -120,6 +121,8 @@ def run_main_agent_rounds(
                 if command is None:
                     raise SkillProtocolError("未识别到技能调用块")
                 skill_result = skill_runner.execute(command, source=source)
+                if command["action"] == "update_status" and str(skill_result).startswith("动态状态已更新"):
+                    state_updated = True
                 messages.append({"role": "assistant", "content": directive_text})
                 messages.append({
                     "role": "system",
@@ -150,4 +153,5 @@ def run_main_agent_rounds(
     return {
         "full_raw_response": final_text,
         "exited_due_to_interrupt": exited_due_to_interrupt,
+        "state_updated": state_updated,
     }

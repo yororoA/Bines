@@ -55,7 +55,7 @@ python install.py --profile chatbot
 python bines.py --profile chatbot
 ```
 
-此模式只运行 ChatBot 网关、QQ Thinking 和独立 Memory Worker 三个 Python 进程，NapCat 由 Docker 自动管理。网关内的 MemoryService 使用 SQLite 和词面检索，不下载嵌入模型，不启动 ZMQ、摄像头、麦克风、语音、屏幕或独立 RAG 服务。QQ Thinking 通过鉴权 HTTP 读写记忆；Memory Worker 独立负责摘要、长期事实和日记，避免占用对话进程。首次登录二维码打印在 `python3 napcat.py logs` 的容器日志中；`http://127.0.0.1:6099` 是需要 WebUI token 的管理页，可用 `python3 napcat.py webui` 自动携带 token 打开。令牌位于 `deploy/napcat/.env`，已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
+默认 Docker 模式运行 NapCat、Memory Server、ChatBot、QQ Thinking 和独立 Memory Worker。Memory Server 使用 SQLite、Chroma 向量检索和中文关键词匹配，QQ Thinking 经鉴权 HTTP 网关读写同一套记忆；不会启动桌面摄像头、麦克风、语音或屏幕模块。Memory Worker 负责动态状态、摘要、长期事实和日记，避免占用对话进程。`--host --profile chatbot` 且没有 Memory Server 时，才使用网关内置词面检索。首次登录二维码打印在 `python3 napcat.py logs` 的容器日志中；`http://127.0.0.1:6099` 是需要 WebUI token 的管理页，可用 `python3 napcat.py webui` 自动携带 token 打开。令牌位于 `deploy/napcat/.env`，已有配置保持原样。旧 `start_modules.py` 仍兼容同样参数。
 
 停止服务后，旧 JSON 和 Chroma 记忆可导入新版库；原文件保留，重复执行不会重复写入：
 
@@ -71,7 +71,7 @@ python -m chatBot.migrate_memory
 
 NapCat MCP 列出 **178 个独立 API 工具及 4 个通用工具**，每个独立工具的 `params` 为该 API 的参数 schema；以点号开头的 API 自动映射为合法 MCP 工具名，原始 action 保存在工具 `_meta.napcat_action`。官方目录可使用 `python -m chatBot.update_catalog 版本号` 更新，生成来源与内容哈希 manifest。更新后重启进程使模型索引和目录缓存生效。
 
-常用消息使用 `napcat_send`：支持私聊、群聊、`reply_to` 引用回复，以及 `text`、`image`、`face`、`mface` 消息段。图文要放在同一个消息段数组中一次发送，成功返回一个 message_id；自定义图片表情使用 `image.data.sub_type=1`。多选消息使用 `napcat_forward(message_ids=[...])` 按列表顺序合并转发，成功后不会再自动补发重复文字。
+常用消息使用 `napcat_send`：支持私聊、群聊、`reply_to` 引用回复，以及 `text`、`image`、`face`、`mface` 消息段。图文要放在同一个消息段数组中一次发送，成功返回一个 message_id；自定义图片表情使用 `image.data.sub_type=1`。收藏表情可用 `napcat_send_custom_face(index=0, text="正文")` 携带文本；只发送媒体后仍可补充最终文字，已经发送的相同正文不会重复发送。多选消息使用 `napcat_forward(message_ids=[...])` 按列表顺序合并转发，成功后不会再自动补发重复文字。
 
 普通用户可发送当前会话的图片、base64 图片或 `deploy/napcat/data/media/public/` 公开素材（容器路径 `/bines-media/public/`）；只能引用和转发当前会话中未撤回的消息。本机与主人私聊可按请求跨会话发送。上述参数已对照 [NapCatDocs 4.18.38](https://github.com/NapNeko/NapCatDocs/blob/main/src/api/4.18.38/openapi.json) 和 NapCat 消息处理源码核验；接口可调用不代表每个 QQ 账号、客户端或所有 API 已完成实机验证。
 
@@ -95,7 +95,7 @@ NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网
 ```mermaid
 flowchart TD
     A[统一启动器] --> Q[NapCat Docker → ChatBot 网关 → QQ Thinking]
-    Q --> W[Memory Worker：摘要 / 事实 / 日记]
+    Q --> W[Memory Worker：动态状态 / 摘要 / 事实 / 日记]
     A --> C[ZMQ Bus]
     C --> D[Classification / Display / Speaking / Visual / Hearing]
     A --> M[Memory Server：SQLite + Chroma RAG]
@@ -121,7 +121,9 @@ python bines.py --console
 - 无论完整模式还是纯 QQ 模式，**RAG Server** 都独占 `thingking/memory_data/memory.db` 和 `index/`（可重建的 Chroma 索引），桌面客户端直接使用 `5560`；QQ 客户端经 ChatBot 网关转发到同一个 RAG Server。`--host --profile chatbot` 且本机没有 RAG Server 时，网关才退回内置词面检索，之后切到 RAG 会自动补建向量索引。
 - QQ 原始消息、事件队列和发送回执保存在独立的 `gateway.db`，提交成功后同步到记忆库。启动时自动识别旧 NapCat `memory.db` 的表结构并迁移到 `gateway.db`，不会覆盖新版库；同步可恢复且去重。
 - 本机与 `BINES_OWNER_QQ_IDS` 显式绑定的主人私聊共享 owner 记忆和状态；其他私聊按机器人账号与用户隔离，群聊按账号与群号隔离，个人状态再按发言人区分。群管理员角色不赋予主人身份。
-- 摘要、长期事实提取和每日日记由独立 Memory Worker 统一处理所有渠道，任务状态记在 SQLite，失败会重试。它通过 ChatBot 网关访问记忆，QQ Thinking 只负责对话与工具。
+- 动态状态按真实新消息由独立 Memory Worker 在后台更新，不再等到累计 40 条消息触发摘要。普通问候、记忆查询和假设不改变好感度；明确情感事件才使用小幅增量。状态任务完成和写库在同一事务中提交，重试不重复加分；消息撤回或同消息手动更新后取消自动任务。群聊个人状态按群和用户保存，不改主人私聊状态。
+- 摘要、长期事实提取和每日日记也由 Memory Worker 统一处理所有渠道，任务状态记在 SQLite，失败会重试。后台更新不阻塞 QQ 回复，刚发生的变化可能要等任务完成后才能读到；每次状态任务会调用一次文本模型，可用 `BINES_MEMORY_STATE_UPDATES=false` 关闭自动更新。
+- 当前动态状态（含好感度数值）和用户画像直接注入提示词；原永久画像不再只取前 8 条。旧回忆采用向量与中文关键词联合排序，限制旧重要度 100 的过度加权。上下文不够时模型可以调用 `search_memory` 主动查询，权限边界与自动召回一致。
 - 人格只在 `thingking/persona/persona.yaml` 中维护，修改后运行 `python thingking/persona/render_doc.py` 更新 `PERSONA.md`。
 - 维护命令：`python thingking/memory_admin.py stats | verify | rebuild-index`。离线迁移、校验或重建前停止 RAG Server、ChatBot、QQ Thinking 及其他记忆客户端。迁移快照放在 `legacy_backup/`；`restore-legacy <备份目录>` 可恢复旧文件。
 - 测试：`python -m unittest discover -s thingking/tests`；QQ 回归见上面的 verification 命令。

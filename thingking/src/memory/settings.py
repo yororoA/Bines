@@ -35,6 +35,7 @@ class MemorySettings:
     day_start_hour: int = 4
     job_lease_seconds: int = 300
     job_max_attempts: int = 5
+    state_updates: bool = True
 
     @property
     def db_path(self) -> Path:
@@ -57,4 +58,5 @@ def load_settings() -> MemorySettings:
         data_dir=data_dir,
         owner_qq_ids=_owner_qq_ids_from_env(),
         owner_name=os.environ.get("BINES_OWNER_NAME", "管理员"),
+        state_updates=os.environ.get("BINES_MEMORY_STATE_UPDATES", "true").strip().lower() in {"true", "1", "yes", "on"},
     )

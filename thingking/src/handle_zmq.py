@@ -697,7 +697,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         # 所有渠道统一写入记忆；QQ 只记录实际发出去的回复。
         assistant_memory = sent_qq_reply if qq_ctx else ("" if _is_only_action_or_empty(to_save) else to_save)
         try:
-            memory_client.record_turn(envelope, user_text=memory_text, assistant_text=assistant_memory)
+            memory_client.record_turn(envelope, user_text=memory_text, assistant_text=assistant_memory,
+                                      state_update=not stream_result.get("state_updated", False))
         except Exception as mem_err:
             print(f"[Thinking] 写入记忆失败: {mem_err}", flush=True)
 

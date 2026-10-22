@@ -7,9 +7,25 @@ OWNER_SCOPE = "owner"
 _MAX_CONFLICT_RETRIES = 3
 
 
-def _apply_changes(state, *, current_location, relationship_delta, add_item, remove_item, active_quest,
-                   current_time, npc_name, npc_attire, npc_visual_status, npc_activity, add_memory_highlight,
-                   remove_memory_highlight, important_thing):
+def search_memory(query: str, k: int = 8):
+    """主动检索当前会话可见的历史记忆；关键词可用人名、物品、歌曲或事件。"""
+    from tools.context import CURRENT_CONTEXT
+    identity = CURRENT_CONTEXT.get().identity
+    if identity.local:
+        client = deps.memory_client
+    else:
+        from chatBot.memory_hub import GatewayMemoryClient
+        client = GatewayMemoryClient()
+    if client is None:
+        raise RuntimeError("记忆服务未就绪")
+    k = max(1, min(int(k), 20))
+    hits = client.search(query, [identity.scope], k=k)
+    return [{"content": hit["content"], "kind": hit["kind"], "day_key": hit.get("day_key")} for hit in hits]
+
+
+def _apply_changes(state, *, current_location=None, relationship_delta=None, add_item=None, remove_item=None,
+                   active_quest=None, current_time=None, npc_name=None, npc_attire=None, npc_visual_status=None,
+                   npc_activity=None, add_memory_highlight=None, remove_memory_highlight=None, important_thing=None):
     state = copy.deepcopy(state)
     for key, value in (("current_time", current_time), ("current_location", current_location),
                        ("active_quest", active_quest), ("important_thing", important_thing)):

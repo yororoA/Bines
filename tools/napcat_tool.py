@@ -102,8 +102,8 @@ def napcat_custom_faces(count: int = 20):
 
 
 def napcat_send_custom_face(index: int = 0, group_id: str = "", user_id: str = "",
-                            operation_id: str | None = None):
-    """按索引发送机器人 QQ 账号收藏的自定义表情；默认发送到当前会话。"""
+                            operation_id: str | None = None, text: str = ""):
+    """按索引发送收藏表情；text 可附带正文，与表情一起发送到当前会话。"""
     _custom_face_access()
     index = int(index)
     if not 0 <= index < 100:
@@ -121,8 +121,9 @@ def napcat_send_custom_face(index: int = 0, group_id: str = "", user_id: str = "
             "summary": description or "[自定义表情]",
         },
     }
+    chain = [{"type": "text", "data": {"text": text}}, message] if text else [message]
     result = napcat_send(
-        message, group_id=group_id, user_id=user_id,
+        chain, group_id=group_id, user_id=user_id,
         operation_id=operation_id,
     )
     if isinstance(result, dict):

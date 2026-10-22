@@ -49,8 +49,10 @@ class MemoryClient:
             return False
 
     # ---------- conversation ----------
-    def record_turn(self, envelope: Dict[str, Any], user_text: str = "", assistant_text: str = "") -> Dict[str, Any]:
-        return self.call("record_turn", envelope=envelope, user_text=user_text, assistant_text=assistant_text)
+    def record_turn(self, envelope: Dict[str, Any], user_text: str = "", assistant_text: str = "",
+                    state_update: bool = True) -> Dict[str, Any]:
+        return self.call("record_turn", envelope=envelope, user_text=user_text,
+                         assistant_text=assistant_text, state_update=state_update)
 
     def record_message(self, envelope: Dict[str, Any], role: str, content: str) -> Dict[str, Any]:
         return self.call("record_message", envelope=envelope, role=role, content=content)
@@ -61,15 +63,21 @@ class MemoryClient:
     def get_state(self, scope: str = "owner") -> Dict[str, Any]:
         return self.call("get_state", scope=scope)
 
-    def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None) -> Dict[str, Any]:
-        return self.call("put_state", scope=scope, data=data, expected_version=expected_version)
+    def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
+                  source_ref: Optional[str] = None) -> Dict[str, Any]:
+        return self.call("put_state", scope=scope, data=data, expected_version=expected_version,
+                         **({"source_ref": source_ref} if source_ref else {}))
 
     def activity_snapshot(self, limit: int = 10) -> Dict[str, Any]:
         return self.call("activity_snapshot", limit=limit, timeout_ms=5000)
 
     # ---------- consolidation ----------
-    def claim_job(self) -> Optional[Dict[str, Any]]:
-        return self.call("claim_job")
+    def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
+        return self.call("claim_job", **({"kinds": list(kinds)} if kinds else {}))
+
+    def complete_state_update(self, job_id: int, changes: Dict[str, Any],
+                              expected_version: Optional[int] = None) -> Dict[str, Any]:
+        return self.call("complete_state_update", job_id=job_id, changes=changes, expected_version=expected_version)
 
     def complete_summary(self, job_id: int, summary: str, tags: Sequence[str], facts: Sequence[Dict[str, Any]],
                          importance: float) -> Dict[str, Any]:

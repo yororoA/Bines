@@ -566,6 +566,35 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
             with self.assertRaises(PermissionError):
                 napcat_custom_faces()
 
+    def test_media_send_preserves_final_text_and_combined_text_is_not_duplicated(self):
+        from unittest.mock import patch
+        from tools.napcat_tool import napcat_send, napcat_send_custom_face
+        for group in (None, "10"):
+            for kind in ("custom", "image", "combined"):
+                with self.subTest(group=group, kind=kind):
+                    message = [{"type": "text", "data": {"text": "发个表情并说晚安"}}]
+                    if group:
+                        message.insert(0, {"type": "at", "data": {"qq": "99"}})
+                    ev = event("1", group=group, msg_id=100 + len(self.api.calls), message=message)
+                    self.insert(ev)
+                    rows = self.store.claim("worker", 0, 0)
+                    before = len(self.api.calls)
+                    class Model:
+                        def run_skill_protocol(inner, *args, **kwargs):
+                            if kind in ("custom", "combined"):
+                                napcat_send_custom_face(0, text="晚安" if kind == "combined" else "")
+                            else:
+                                napcat_send({"type": "image", "data": {"file": "base64://R0lG"}})
+                            return "晚安", [], []
+                    with patch("tools.napcat_tool.GatewayClient", return_value=self.client):
+                        QQThinking(self.store, self.client).process(rows, Model())
+                    sends = [p for a, p in self.api.calls[before:] if a.startswith("send_")]
+                    self.assertEqual(len(sends), 1 if kind == "combined" else 2)
+                    self.assertTrue(any(part["type"] == "image" for part in sends[0]["message"]))
+                    texts = [part["data"]["text"] for p in sends for part in p["message"] if part["type"] == "text"]
+                    self.assertEqual(texts, ["晚安"])
+                    self.store.finish([r["id"] for r in rows], "worker")
+
     def test_stale_observed_image_url_is_not_reused(self):
         ev = event("2", group="10", msg_id=33, time=self.service.started_at - 60, message=[
             {"type": "image", "data": {

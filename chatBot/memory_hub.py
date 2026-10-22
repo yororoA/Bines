@@ -73,6 +73,10 @@ class MemoryHub:
                     "SELECT * FROM messages WHERE memory_synced=0 ORDER BY ts,id LIMIT 500"
                 ).fetchall()
             for row in rows:
+                with self.store.connection() as db:
+                    live_event = db.execute(
+                        "SELECT 1 FROM events WHERE id=?", ("message:" + (row["external_id"] or ""),),
+                    ).fetchone() is not None
                 scope = row["scope"]
                 if scope.startswith("qq:"):
                     _, account, kind, target = scope.split(":", 3)
@@ -94,13 +98,14 @@ class MemoryHub:
                     "record_message", envelope=identity_envelope(identity, row["content"], row["ts"]),
                     role=row["role"], content=row["content"],
                     source_ref=self.source + ":" + str(row["id"]), recalled=bool(row["recalled"]),
+                    state_update=live_event,
                 )
                 with self.store.connection() as db:
                     db.execute("UPDATE messages SET memory_synced=1 WHERE id=? AND content=? AND recalled=?",
                                (row["id"], row["content"], row["recalled"]))
             return len(rows)
 
-    def call(self, identity, method, params):
+    def call(self, identity, method, params, event_id=None):
         with self.lock:
             params = dict(params)
             if not identity.local:
@@ -109,11 +114,28 @@ class MemoryHub:
                 elif method in {"get_state", "put_state"}:
                     # A group owner still writes only their own state within that group.
                     params["scope"] = identity.state_scope
+                elif method == "search":
+                    params["scopes"] = [identity.scope]
+                    params["k"] = max(1, min(int(params.get("k", 8)), 20))
                 else:
                     raise PermissionError("当前 QQ 会话只允许读取自身上下文和更新自身状态")
             if method == "build_context":
                 while self.sync() == 500:
                     pass
+            if method == "put_state" and not identity.local:
+                # 服务端从事件推导消息来源，模型不能指定要跳过哪个状态任务。
+                params.pop("source_ref", None)
+                if event_id:
+                    while self.sync() == 500:
+                        pass
+                    with self.store.connection() as db:
+                        event = json.loads(db.execute("SELECT raw FROM events WHERE id=?", (event_id,)).fetchone()[0])
+                        external = f"{identity.account}:{identity.group or 'p:'+identity.user}:{event.get('message_id')}"
+                        row = db.execute(
+                            "SELECT id FROM messages WHERE scope=? AND external_id=?", (identity.scope, external),
+                        ).fetchone()
+                    if row:
+                        params["source_ref"] = self.source + ":" + str(row["id"])
             return self._call(method, **params)
 
     def start(self):

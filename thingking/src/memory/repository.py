@@ -584,6 +584,8 @@ class MemoryRepository:
         job = self.get_job(job_id)
         if not job:
             return "missing"
+        if job["status"] != "running":
+            return job["status"]  # 撤回或手动更新取消的任务不能因迟到的失败通知复活。
         now = self.clock()
         if job["attempts"] >= max_attempts:
             status, available_at = "failed", now

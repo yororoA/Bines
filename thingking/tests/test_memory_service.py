@@ -235,6 +235,108 @@ class StateTest(unittest.TestCase):
             self.fx.service.put_state(OWNER_SCOPE, {"relationship_score": 3}, expected_version=first["version"])
         self.assertEqual(self.fx.service.get_state(OWNER_SCOPE)["data"], {"relationship_score": 2})
 
+    def test_new_message_updates_state_without_summary_and_is_idempotent(self):
+        from dataclasses import replace
+        from memory.worker import MemoryWorker
+        from memory.server import dispatch
+        self.fx.service.settings = replace(self.fx.settings, state_updates=True)
+        service = self.fx.service
+        service.put_state("owner", {"relationship_score": 133})
+        service.record_turn(local_env(), "送你一副夜莺耳机 谢谢你一直陪我", "我收下啦")
+        job = service.claim_job(kinds=["update_state"])
+        self.assertEqual(job["materials"]["state"]["relationship_score"], 133)
+        class Client:
+            def claim_job(inner, kinds=None):
+                return job
+            def complete_state_update(inner, job_id, changes, expected_version=None):
+                return service.complete_state_update(job_id, changes, expected_version)
+            def fail_job(inner, job_id, error):
+                raise AssertionError(error)
+        worker = MemoryWorker(Client(), lambda m: "", lambda: "",
+                              state_complete_text=lambda m: '{"relationship_delta":1,"add_item":"夜莺耳机"}')
+        worker.run_once()
+        self.assertEqual(service.get_state("owner")["data"]["relationship_score"], 134)
+        self.assertEqual(service.get_state("owner")["data"]["inventory"], ["夜莺耳机"])
+        self.assertEqual(dispatch(service, {"method": "complete_state_update",
+            "params": {"job_id": job["job"]["id"], "changes": {"relationship_delta": 1}}})["result"]["status"], "ignored")
+        self.assertEqual(service.get_state("owner")["data"]["relationship_score"], 134)
+
+    def test_group_background_state_is_scoped_to_speaker(self):
+        from dataclasses import replace
+        self.fx.service.settings = replace(self.fx.settings, state_updates=True)
+        service = self.fx.service
+        service.put_state("owner", {"relationship_score": 133})
+        service.record_turn(qq_group_env(OWNER_QQ), "群里约定", "")
+        job = service.claim_job(kinds=["update_state"])
+        self.assertEqual(job["job"]["scope"], f"qq_group:{GROUP_ID}:user:{OWNER_QQ}")
+        service.complete_state_update(job["job"]["id"], {"active_quest": "群里约定", "relationship_delta": 1})
+        self.assertEqual(service.get_state("owner")["data"]["relationship_score"], 133)
+        self.assertNotIn("active_quest", service.build_context(qq_group_env(STRANGER_QQ), "")["state"])
+        self.assertEqual(service.build_context(qq_group_env(OWNER_QQ), "")["state"]["active_quest"], "群里约定")
+
+    def test_legacy_profile_and_score_are_visible_without_vector_results(self):
+        import prompt_builder
+        from unittest.mock import patch
+        for i in range(12):
+            self.fx.repo.add_memory("semantic", "owner", f"关于管理员：稳定事实{i}", subject_id="owner")
+        self.fx.service.put_state("owner", {"relationship_score": 0})
+        with patch.object(self.fx.index, "query", return_value=[]):
+            context = self.fx.service.build_context(local_env(), "稳定事实11")
+        text = str(prompt_builder.build_conversation_messages(context))
+        self.assertIn("稳定事实11", text)
+        self.assertIn("好感度数值（范围 -200 到 200）：0", text)
+
+    def test_old_relevant_memory_beats_new_unrelated_fragment(self):
+        old = {"kind": "episode", "end_ts": self.fx.clock() - 300 * 86400, "importance": 8}
+        recent = {"kind": "episode", "end_ts": self.fx.clock(), "importance": 5}
+        self.assertGreater(self.fx.service._score(old, 0.1, self.fx.clock()),
+                           self.fx.service._score(recent, 0.8, self.fx.clock()))
+
+    def test_keyword_search_finds_name_inside_long_legacy_transcript(self):
+        from unittest.mock import patch
+        target = self.fx.repo.add_memory("episode", "owner", "闲聊。" * 1000 + "竹林鸟夜莺耳机", importance=5)
+        self.fx.repo.add_memory("episode", "owner", "其他聊天", importance=100)
+        with patch.object(self.fx.index, "query", return_value=[]):
+            hits = self.fx.service.search("你还记得竹林鸟夜莺耳机吗", ["owner"])
+        self.assertEqual(hits[0]["id"], target)
+
+    def test_state_job_no_change_and_conflict_do_not_inflate_score(self):
+        from dataclasses import replace
+        self.fx.service.settings = replace(self.fx.settings, state_updates=True)
+        service = self.fx.service
+        service.put_state("owner", {"relationship_score": 133})
+        service.record_turn(local_env(), "你好", "")
+        job = service.claim_job(kinds=["update_state"])
+        service.complete_state_update(job["job"]["id"], {"relationship_delta": 0})
+        self.assertEqual(service.get_state("owner")["version"], 1)
+        service.record_turn(local_env(), "谢谢你", "")
+        job = service.claim_job(kinds=["update_state"])
+        service.put_state("owner", {"relationship_score": 134})
+        with self.assertRaises(StateConflict):
+            service.complete_state_update(job["job"]["id"], {"relationship_delta": 1},
+                                          expected_version=job["materials"]["version"])
+        self.assertEqual(service.get_state("owner")["data"]["relationship_score"], 134)
+        self.assertEqual(self.fx.repo.get_job(job["job"]["id"])["status"], "running")
+
+    def test_recalled_message_cancels_running_state_job(self):
+        from dataclasses import replace
+        self.fx.service.settings = replace(self.fx.settings, state_updates=True)
+        service = self.fx.service
+        service.put_state("owner", {"relationship_score": 133})
+        service.record_message(local_env(), "user", "送你耳机", source_ref="recall-test")
+        job = service.claim_job(kinds=["update_state"])
+        service.record_message(local_env(), "user", "[消息已撤回]", source_ref="recall-test", recalled=True)
+        self.assertEqual(service.complete_state_update(job["job"]["id"], {"relationship_delta": 1})["status"], "ignored")
+        self.assertEqual(service.get_state("owner")["data"]["relationship_score"], 133)
+        self.assertEqual(service.fail_job(job["job"]["id"], "迟到的模型异常")["status"], "done")
+        self.assertIsNone(service.claim_job(kinds=["update_state"]))
+
+    def test_desktop_manual_update_skips_background_state_work(self):
+        from dataclasses import replace
+        self.fx.service.settings = replace(self.fx.settings, state_updates=True)
+        self.fx.service.record_turn(local_env(), "谢谢你", "我知道了", state_update=False)
+        self.assertIsNone(self.fx.service.claim_job(kinds=["update_state"]))
+
 
 class IndexTest(unittest.TestCase):
     def setUp(self):

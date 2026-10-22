@@ -22,6 +22,7 @@ RPC_METHODS = (
     "claim_job",
     "complete_summary",
     "complete_diary",
+    "complete_state_update",
     "fail_job",
     "reconcile_index",
     "rebuild_index",
