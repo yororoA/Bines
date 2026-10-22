@@ -27,7 +27,7 @@ python bines.py --host
 python bines.py --host --profile chatbot
 ```
 
-`python bines.py --profile chatbot` 会构建并启动 NapCat、Memory Server、ChatBot、QQ Thinking、Memory Worker，随后跟随日志；Ctrl+C 停止本次启动的容器并保留数据。首次登录二维码在容器日志中：
+`python bines.py --profile chatbot` 会启动 NapCat、Memory Server、ChatBot、QQ Thinking、Memory Worker，只有源码内容或构建参数变化时才构建镜像。Ctrl+C 删除本次启动的容器及其日志，清理 Bines 旧镜像和专用构建缓存，保留记忆、登录数据、模型和当前镜像。首次登录二维码在容器日志中：
 
 ```bash
 docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs -f napcat
@@ -35,7 +35,9 @@ docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs 
 
 已有外部 NapCat 时使用 `--external-napcat`，会走宿主机模式。仅打开管理器、不自动启动服务使用 `--manager-only`。
 
-停止终端或按 Ctrl+C 会停止本次启动的宿主服务，并停止本次新启动的容器，保留数据；已经在外部运行的容器不受影响。单独在管理页启动 Thinking 会自动补启其依赖，停止前置服务会先停止依赖它的服务。状态显示“启动中 / 已就绪 / 依赖阻塞 / 失败”，失败原因和日志保留。
+按 Ctrl+C 会清理本次启动的宿主服务和容器；已经在外部运行的容器不受影响。强制结束进程可能跳过退出清理，此时运行 `python bines.py --docker-down` 可停止并清理整个 Bines Docker 项目，同时保留记忆和当前镜像。每个容器的 Docker 日志按 10 MB × 3 个文件轮转。Windows Docker/WSL 虚拟磁盘删除文件后可能不会立即缩小，Docker 可复用其中释放的空间；这和容器未删除是两回事。
+
+单独在管理页启动 Thinking 会自动补启其依赖，停止前置服务会先停止依赖它的服务。状态显示“启动中 / 已就绪 / 依赖阻塞 / 失败”，失败原因和日志保留。
 
 Memory Server 在两种模式都会启动并统一持有 SQLite 和 Chroma 向量索引，ChatBot 通过网关使用同一套 RAG；只有 `--host` 且本机 Memory Server 未运行时才退回网关内置的词面检索。完整模式另有 RAG Web。唱歌流水线收到唱歌请求时才运行。
 

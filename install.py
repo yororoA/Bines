@@ -606,7 +606,9 @@ class Installer:
         if not shutil.which("docker"):
             print("  Docker 不可用，跳过镜像构建；python bines.py 将回退宿主机模式", flush=True)
             return
-        from docker_launcher import compose_command, ensure_engine
+        from docker_launcher import (
+            _environment, build_command, cleanup_build_cache, cleanup_images, ensure_builder, ensure_engine,
+        )
 
         try:
             ensure_engine(timeout=self.options.docker_download_timeout)
@@ -615,16 +617,23 @@ class Installer:
             print(f"  Docker 引擎未就绪，跳过镜像构建：{exc}", flush=True)
             return
         env = dict(self.env)
-        env.setdefault("BINES_UID", str(os.getuid() if hasattr(os, "getuid") else 1000))
-        env.setdefault("BINES_GID", str(os.getgid() if hasattr(os, "getgid") else 1000))
+        docker_env = _environment(self.options.profile)
+        for key in ("BINES_PROFILE", "BINES_UID", "BINES_GID", "BINES_CHATBOT_HASH", "BINES_MEMORY_SERVER_HASH",
+                    "BUILDX_CONFIG"):
+            env[key] = docker_env[key]
         services = ["chatbot"]
         if self.options.docker_full:
             services.append("memory-server")
         for service in services:
             try:
-                self.run(compose_command(self.options.profile, "build", service),
-                         f"构建 Docker 镜像 {service}", env=env, timeout=3600)
-            except (InstallError, OSError, subprocess.SubprocessError) as exc:
+                ensure_builder()
+                try:
+                    self.run(build_command(self.options.profile, service),
+                             f"构建 Docker 镜像 {service}", env=env, timeout=3600)
+                finally:
+                    cleanup_build_cache()
+                cleanup_images()
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 self.docker_build_error = str(exc)
                 print(f"  Docker 镜像 {service} 构建失败：{exc}", flush=True)
                 print("  可稍后运行 python bines.py，由启动器自动构建", flush=True)

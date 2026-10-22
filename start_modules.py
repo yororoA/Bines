@@ -85,47 +85,40 @@ def _run_docker(options):
     # The compose network owns NapCat; host services must not start another container.
     os.environ["BINES_NAPCAT_DEPLOY"] = "external"
     os.environ["_BINES_NAPCAT_DEPLOY"] = "external"
-    already_running = docker_launcher.running_services(options.profile)
+    already_running = None
     try:
         print("正在检查 Docker 引擎…", flush=True)
         docker_launcher.ensure_engine()
+        already_running = docker_launcher.running_services("full")
         print("正在启动 Docker 链路…", flush=True)
         docker_launcher.up(options.profile)
         docker_launcher.wait_ready(options.profile)
-    except KeyboardInterrupt:
-        print("启动已取消。", flush=True)
-        if not already_running:
-            try:
-                docker_launcher.down()
-            except Exception:
-                pass
-        return 130
-    except Exception as exc:
-        print(f"Docker 启动失败：{exc}", file=sys.stderr, flush=True)
-        return 1
-    owned = not already_running
-    print("Docker 链路已就绪：" + ", ".join(docker_launcher.REQUIRED_SERVICES[options.profile]), flush=True)
-    try:
+        print("Docker 链路已就绪：" + ", ".join(docker_launcher.REQUIRED_SERVICES[options.profile]), flush=True)
         if options.profile == "chatbot":
-            print(
-                "NapCat 二维码：docker compose --env-file deploy/napcat/.env "
-                "-f deploy/docker/compose.yaml logs -f napcat",
-                flush=True,
-            )
-            print("Ctrl+C 停止本次启动的容器。", flush=True)
+            print("NapCat 二维码：python napcat.py logs", flush=True)
+            print("Ctrl+C 删除本次启动的容器和日志，保留记忆与当前镜像。", flush=True)
+            if already_running:
+                print("启动前已运行的服务将保留：" + ", ".join(sorted(already_running)), flush=True)
             try:
                 docker_launcher.follow(options.profile)
             except KeyboardInterrupt:
                 pass
             return 0
         return _run_host(options)
+    except KeyboardInterrupt:
+        print("启动已取消。", flush=True)
+        return 130
+    except Exception as exc:
+        print(f"Docker 启动失败：{exc}", file=sys.stderr, flush=True)
+        return 1
     finally:
-        if owned:
-            print("正在停止 Docker 链路…", flush=True)
+        if already_running is not None:
+            print("正在停止并清理本次 Docker 链路…", flush=True)
             try:
-                docker_launcher.down()
+                docker_launcher.down(previously_running=already_running)
             except Exception as exc:
-                print(f"Docker 停止失败：{exc}", file=sys.stderr, flush=True)
+                print(f"Docker 清理失败：{exc}", file=sys.stderr, flush=True)
+                return 1
 
 
 def main():
@@ -141,6 +134,8 @@ def main():
     parser.add_argument("--manager-only", action="store_true", help="只打开管理器，按需启动服务")
     parser.add_argument("--external-napcat", action="store_true", help="连接现有 NapCat，不管理 Docker")
     parser.add_argument("--host", action="store_true", help="强制使用本机 venv，不启动 Docker 链路")
+    parser.add_argument("--docker-down", action="store_true",
+                        help="停止并删除 Bines 容器，清理旧镜像与专用构建缓存，保留记忆和当前镜像")
     options = parser.parse_args()
     os.environ["BINES_PROFILE"] = options.profile
     os.environ["_BINES_LAUNCH_PROFILE"] = options.profile
@@ -148,6 +143,15 @@ def main():
         os.environ["BINES_NAPCAT_DEPLOY"] = "external"
         os.environ["_BINES_NAPCAT_DEPLOY"] = "external"
     import docker_launcher
+    if options.docker_down:
+        try:
+            docker_launcher.ensure_engine()
+            docker_launcher.down()
+            print("Bines 容器、日志和可回收缓存已清理，记忆与当前镜像已保留。", flush=True)
+            return 0
+        except Exception as exc:
+            print(f"Docker 清理失败：{exc}", file=sys.stderr, flush=True)
+            return 1
     if not options.host and not options.external_napcat and docker_launcher.available():
         print(f"Bines · Docker · {options.profile}", flush=True)
         return _run_docker(options)

@@ -674,5 +674,131 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
                              for message in self.store.context(self.store.identity(ev))))
 
 
+class DockerLifecycle(unittest.TestCase):
+    def test_source_hash_ignores_timestamps_and_runtime_data(self):
+        import docker_launcher as docker
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            deploy = root / "deploy" / "docker"
+            deploy.mkdir(parents=True)
+            for name in ("Dockerfile.launcher", "Dockerfile.thinking"):
+                (deploy / name).write_text("FROM python:3.12-slim\n")
+            source = root / "bines.py"
+            source.write_text("print('你好')\n")
+            api = root / "chatBot" / "api" / "catalog.json"
+            api.parent.mkdir(parents=True)
+            api.write_text('{"version": 1}')
+            with patch.object(docker, "ROOT", root), patch.object(docker, "COMPOSE_FILE", deploy / "compose.yaml"):
+                expected = docker.source_hashes()
+                os.utime(source, (time.time() + 86400, time.time() + 86400))
+                (root / "presence_state.json").write_text('{"active": true}')
+                self.assertEqual(docker.source_hashes(), expected)
+                api.write_text('{"version": 2}')
+                updated = docker.source_hashes()
+                self.assertNotEqual(updated["chatbot"], expected["chatbot"])
+                self.assertEqual(updated["memory-server"], expected["memory-server"])
+                expected = updated
+                (root / "chatBot" / "gateway.py").write_text("# 网关更新\n")
+                updated = docker.source_hashes()
+                self.assertNotEqual(updated["chatbot"], expected["chatbot"])
+                self.assertEqual(updated["memory-server"], expected["memory-server"])
+                expected = updated
+                (root / "chatBot" / "store.py").write_text("# 共享数据库迁移更新\n")
+                updated = docker.source_hashes()
+                self.assertNotEqual(updated["chatbot"], expected["chatbot"])
+                self.assertNotEqual(updated["memory-server"], expected["memory-server"])
+                expected = updated
+                (deploy / "Dockerfile.thinking").write_text("FROM python:3.12-slim\n# 更新\n")
+                updated = docker.source_hashes()
+                self.assertEqual(updated["chatbot"], expected["chatbot"])
+                self.assertNotEqual(updated["memory-server"], expected["memory-server"])
+
+    def test_unchanged_start_does_not_build(self):
+        import docker_launcher as docker
+        from unittest.mock import patch
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(docker, "_stale_services", return_value=[]), \
+                patch.object(docker, "run", return_value=ok) as run, \
+                patch.object(docker, "ensure_builder") as builder, \
+                patch.object(docker, "cleanup_images"):
+            docker.up("chatbot")
+            run.assert_called_once_with("chatbot", "up", "-d", "--no-build")
+            builder.assert_not_called()
+
+    def test_down_preserves_existing_service_but_removes_new_services(self):
+        import docker_launcher as docker
+        from unittest.mock import patch
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(docker, "run", return_value=ok) as run, \
+                patch.object(docker, "cleanup_containers"), \
+                patch.object(docker, "cleanup_images"), \
+                patch.object(docker, "cleanup_build_cache"):
+            docker.down(previously_running={"napcat"})
+            self.assertEqual([call.args[:2] for call in run.call_args_list], [("full", "stop"), ("full", "rm")])
+            for call in run.call_args_list:
+                self.assertNotIn("napcat", call.args)
+                self.assertIn("chatbot", call.args)
+                self.assertIn("memory-server", call.args)
+
+    def test_cleanup_is_scoped_to_bines_and_keeps_tagged_images_and_volumes(self):
+        import docker_launcher as docker
+        from unittest.mock import patch
+        ok = subprocess.CompletedProcess([], 0, "Driver: docker-container\n", "")
+        with patch.object(docker, "_docker", return_value=ok) as command:
+            docker.cleanup_containers()
+            docker.cleanup_images()
+            docker.cleanup_build_cache()
+            calls = [call.args for call in command.call_args_list]
+            self.assertIn(("container", "prune", "--force", "--filter", "label=com.docker.compose.project=bines"), calls)
+            self.assertIn(("image", "prune", "--force", "--filter", "label=com.docker.compose.project=bines"), calls)
+            self.assertIn(("buildx", "rm", "--force", "bines"), calls)
+            self.assertFalse(any("volume" in args or "system" in args for args in calls))
+
+    def test_failed_build_releases_its_cache(self):
+        import docker_launcher as docker
+        from unittest.mock import patch
+        failed = subprocess.CompletedProcess([], 1, "", "构建失败")
+        with patch.object(docker, "_stale_services", return_value=["chatbot"]), \
+                patch.object(docker, "ensure_builder"), \
+                patch.object(docker, "run", return_value=failed), \
+                patch.object(docker, "cleanup_build_cache") as cleanup:
+            with self.assertRaises(docker.DockerError):
+                docker.up("chatbot")
+            cleanup.assert_called_once()
+
+    def test_startup_failure_and_interrupt_still_clean_new_containers(self):
+        import docker_launcher as docker
+        import start_modules
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        for failure, code in ((RuntimeError("等待超时"), 1), (KeyboardInterrupt(), 130)):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.dict(os.environ), \
+                    patch.object(docker, "ensure_engine"), \
+                    patch.object(docker, "running_services", return_value={"napcat"}), \
+                    patch.object(docker, "up"), \
+                    patch.object(docker, "wait_ready", side_effect=failure), \
+                    patch.object(docker, "down") as down:
+                self.assertEqual(start_modules._run_docker(SimpleNamespace(profile="chatbot")), code)
+                down.assert_called_once_with(previously_running={"napcat"})
+
+    def test_windows_docker_process_isolated_from_console_interrupt(self):
+        import docker_launcher as docker
+        from unittest.mock import patch
+        with patch.object(os, "name", "nt"), patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True):
+            self.assertEqual(docker._process_options(), {"creationflags": 512})
+
+    def test_ps_handles_json_array_and_refuses_failed_status_lookup(self):
+        import docker_launcher as docker
+        from unittest.mock import patch
+        row = {"Service": "napcat", "State": "running"}
+        with patch.object(docker, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps([row]), "")):
+            self.assertEqual(docker.running_services("full"), {"napcat"})
+        with patch.object(docker, "run", return_value=subprocess.CompletedProcess([], 1, "", "连接失败")):
+            with self.assertRaises(docker.DockerError):
+                docker.running_services("full")
+
+
 if __name__ == "__main__":
     unittest.main()

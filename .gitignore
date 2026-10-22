@@ -3,6 +3,11 @@ __pycache__
 envs
 .venv/
 .tools/cache/
+.tools/docker/
+.tools/python/
+.tools/installer/
+.tools/downloads/
+.tools/memory_export/
 singing/singing_venv/
 voiceprints
 /model

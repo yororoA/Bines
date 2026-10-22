@@ -2,6 +2,11 @@ name: bines-napcat
 services:
   napcat:
     image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     environment:
       MODE: ws

@@ -29,6 +29,9 @@ RUN (getent group "${BINES_GID}" >/dev/null || groupadd --gid "${BINES_GID}" bin
 
 COPY --chown=${BINES_UID}:${BINES_GID} . /app
 
+ARG BINES_SOURCE_HASH
+LABEL io.bines.source-hash="${BINES_SOURCE_HASH}"
+
 USER bines
 
 CMD ["python", "chatBot/main.py"]
