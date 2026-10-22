@@ -78,10 +78,32 @@ SOURCE_PATTERNS = (
     "server/skill_actions.json", "deploy/docker/Dockerfile.*", ".dockerignore",
 )
 
+# Rebuild only what the changed file actually ships in. Sharing one pattern set
+# meant a chatBot-only edit marked the 18 GB thinking image stale, so every
+# `up` became a full rebuild of both images.
+_SHARED_SOURCES = (
+    "config.py", "config.example.py", "ark_mcp_client.py", "mcp_runtime.py",
+    "common/**/*.py", "tools/**/*.py",
+    "thingking/*.py", "thingking/src/**/*.py", "thingking/persona/*",
+    "skills/**/*.md", "server/skill_actions.json", ".dockerignore",
+)
+IMAGE_SOURCES = {
+    "bines-launcher:local": _SHARED_SOURCES + (
+        "chatBot/**/*.py",
+        "requirements/launcher.txt", "requirements-chatbot.txt",
+        "deploy/docker/Dockerfile.launcher",
+    ),
+    "bines-thinking:local": _SHARED_SOURCES + (
+        "requirements/thinking.txt", "requirements/launcher.txt",
+        "requirements-chatbot.txt", "requirements/ml-constraints.txt",
+        "deploy/docker/Dockerfile.thinking",
+    ),
+}
 
-def _newest_source() -> float:
+
+def _newest_source(*patterns: str) -> float:
     newest = 0.0
-    for pattern in SOURCE_PATTERNS:
+    for pattern in patterns or SOURCE_PATTERNS:
         for path in ROOT.glob(pattern):
             try:
                 newest = max(newest, path.stat().st_mtime)
@@ -106,15 +128,14 @@ def _image_created(docker: str, image: str) -> float:
 
 
 def _images_ready(profile: str) -> bool:
-    """Require both the image and its embedded source to be current."""
+    """Require both the image and the sources baked into it to be current."""
     docker = docker_executable()
     if not docker:
         return False
-    images = ["bines-launcher:local", "bines-thinking:local"]
-    newest = _newest_source()
-    for image in images:
+    for image in ("bines-launcher:local", "bines-thinking:local"):
         created = _image_created(docker, image)
-        if created < newest:
+        patterns = IMAGE_SOURCES.get(image, SOURCE_PATTERNS)
+        if created < _newest_source(*patterns):
             return False
     return True
 
