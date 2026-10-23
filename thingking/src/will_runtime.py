@@ -104,6 +104,18 @@ def build_will_conversation(memory_context, candidate):
     conversation = prompt_builder.build_conversation_messages(memory_context)
     conversation.append({"role": "system", "content": prompt_builder.conversation_style_guard(memory_context)})
     conversation.append({"role": "system", "content": intention_prompt(candidate)})
+    # DeepSeek uses a user message to start a fresh thinking/tool-call turn.
+    # A system-only trigger leaves the last historical assistant in the current
+    # turn, where its absent reasoning_content is rejected before any tool call.
+    # This protocol boundary is internal: it is never recorded as human speech.
+    conversation.append({
+        "role": "user",
+        "content": (
+            "[Internal Scheduler Trigger] 开始处理上述自主意图。"
+            "这是系统调度生成的轮次边界，不是管理员或其他用户发来了新消息。"
+            "按本轮意图和权限决定行动，也可以保持安静；不要回应或复述这条内部触发。"
+        ),
+    })
     return conversation
 
 

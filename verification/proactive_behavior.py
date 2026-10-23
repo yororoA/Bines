@@ -176,8 +176,9 @@ class QQTests(unittest.TestCase):
     def model(self, execute=None, text="螃蟹横着走的样子真神气"):
         class Model:
             def run_skill_protocol(inner, conversation, runner, **kwargs):
-                self.assertEqual(conversation[-1]["role"], "system")
-                self.assertIn("[System Event: Will]", conversation[-1]["content"])
+                self.assertEqual(conversation[-1]["role"], "user")
+                self.assertIn("[Internal Scheduler Trigger]", conversation[-1]["content"])
+                self.assertIn("[System Event: Will]", conversation[-2]["content"])
                 if execute:
                     execute(runner)
                 return text, [], []
@@ -298,6 +299,71 @@ class QQTests(unittest.TestCase):
         with self.store.connection() as db:
             self.assertEqual(db.execute("SELECT status FROM proactive_runs").fetchone()[0], "skipped")
         self.assertEqual(len(scheduler.policies), 1)
+
+
+class ThinkingTurnTests(unittest.TestCase):
+    def test_scheduler_starts_new_turn_and_preserves_reasoning_across_tool_rounds(self):
+        from copy import deepcopy
+        from types import SimpleNamespace
+        from openai.types.chat import ChatCompletionMessage
+        from thinking_model_helper import ThinkingModelHelper
+        from will_runtime import run_intention
+
+        memory_context = {
+            "envelope": {"channel_type": "qq_private", "scope": "owner", "owner_identity": True},
+            "state": {},
+            "working": [
+                {"role": "user", "content": "先忙一会儿", "ts": time.time()-1800},
+                {"role": "assistant", "content": "好呀", "ts": time.time()-1700},
+            ],
+        }
+        responses = [
+            ChatCompletionMessage(role="assistant", reasoning_content="先确认现在的时间",
+                                  tool_calls=[{"id": "time", "type": "function", "function": {
+                                      "name": "get_time", "arguments": "{}",
+                                  }}]),
+            ChatCompletionMessage(role="assistant", reasoning_content="再查一下可用的资料",
+                                  tool_calls=[{"id": "search", "type": "function", "function": {
+                                      "name": "browser_search", "arguments": '{"query":"螃蟹的步伐"}',
+                                  }}]),
+            ChatCompletionMessage(role="assistant", content="资料查到了，先记下来"),
+        ]
+        requests = []
+        def complete(**kwargs):
+            messages = deepcopy(kwargs["messages"])
+            requests.append(messages)
+            last_user = max(index for index, msg in enumerate(messages) if msg["role"] == "user")
+            self.assertIn("[Internal Scheduler Trigger]", messages[last_user]["content"])
+            # Mirrors DeepSeek's current-turn validation: system messages alone
+            # do not separate ordinary historical replies from a thinking turn.
+            current_assistants = [msg for msg in messages[last_user+1:] if msg["role"] == "assistant"]
+            for msg in current_assistants:
+                self.assertTrue(msg.get("reasoning_content"))
+                self.assertTrue(msg.get("tool_calls"))
+            return SimpleNamespace(choices=[SimpleNamespace(message=responses.pop(0))])
+
+        model = ThinkingModelHelper.__new__(ThinkingModelHelper)
+        model.model = "test"
+        model.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=complete)))
+        runner = Mock()
+        runner.instructions_for_source.return_value = "测试工具目录"
+        runner.function_tools.return_value = []
+        runner.action_to_skill = {"get_time": "system-control", "browser_search": "web-research"}
+        runner.execute.return_value = "读取成功"
+        with patch("prompt_builder.conversation_style_guard", return_value="--- 本轮角色口吻\n保持当前口吻"):
+            text, outcomes = run_intention(model, runner, memory_context, {
+                **intention("curiosity"), "contact_allowed": False,
+            }, lambda: "")
+        self.assertEqual(text, "资料查到了，先记下来")
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(len(requests), 3)
+        assistants = [msg for msg in requests[-1] if msg.get("tool_calls")]
+        self.assertEqual([msg["reasoning_content"] for msg in assistants],
+                         ["先确认现在的时间", "再查一下可用的资料"])
+        self.assertEqual([msg["tool_call_id"] for msg in requests[-1] if msg["role"] == "tool"],
+                         ["time", "search"])
+        self.assertTrue(any(msg["role"] == "assistant" and msg["content"] == "好呀"
+                            and "reasoning_content" not in msg for msg in requests[0]))
 
 
 if __name__ == "__main__":
