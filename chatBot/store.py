@@ -76,6 +76,11 @@ class MemoryStore:
                     status TEXT NOT NULL DEFAULT 'queued', delivered_at REAL DEFAULT 0,
                     error TEXT
                 );
+                CREATE TABLE IF NOT EXISTS activity_handoffs (
+                    turn_id TEXT PRIMARY KEY, conversation TEXT NOT NULL,
+                    checkpoint TEXT NOT NULL, created REAL NOT NULL,
+                    consumed INTEGER NOT NULL DEFAULT 0
+                );
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(events)")}
             if "batch" not in columns:
@@ -275,10 +280,39 @@ class MemoryStore:
             db.execute("INSERT INTO turns VALUES(?,'started',NULL)", (turn_id,))
         return None
 
-    def save_turn(self, turn_id, status, payload=None):
+    def save_turn(self, turn_id, status, payload=None, *, handoff=None):
         with self.connection() as db:
-            db.execute("UPDATE turns SET status=?,payload=? WHERE id=?",
-                       (status, json.dumps(payload, ensure_ascii=False) if payload else None, turn_id))
+            db.execute("UPDATE turns SET status=?,payload=COALESCE(?,payload) WHERE id=?",
+                       (status, json.dumps(payload, ensure_ascii=False) if payload is not None else None, turn_id))
+            if handoff:
+                db.execute(
+                    "INSERT OR IGNORE INTO activity_handoffs VALUES(?,?,?,?,0)",
+                    (turn_id, handoff["conversation"], json.dumps(handoff["checkpoint"], ensure_ascii=False),
+                     time.time()),
+                )
+
+    def current_activity(self, conversation):
+        """Include a finished owner turn that the scheduler has not consumed yet."""
+        with self.connection() as db:
+            row = db.execute(
+                "SELECT checkpoint FROM activity_handoffs WHERE conversation=? AND consumed=0 "
+                "ORDER BY created DESC LIMIT 1", (conversation,),
+            ).fetchone()
+            if row:
+                checkpoint = json.loads(row["checkpoint"])
+                return {} if checkpoint.get("mode") == "finish" else checkpoint
+            row = db.execute("SELECT value FROM proactive_sessions WHERE conversation=?", (conversation,)).fetchone()
+            state = json.loads(row["value"]) if row else {}
+            pending = state.get("pending") or {}
+            turn = db.execute("SELECT payload FROM turns WHERE id=? AND status='done'",
+                              (pending.get("id"),)).fetchone() if pending else None
+            checkpoint = json.loads(turn["payload"] or "{}").get("activity") if turn else None
+            if checkpoint:
+                if checkpoint.get("mode") == "finish":
+                    return {}
+                return {**checkpoint, "kind": pending["kind"], "topic": pending["topic"],
+                        "reason": pending["reason"], "contact_allowed": pending.get("contact_allowed", True)}
+        return state.get("activity") or {}
 
     def drop_turn(self, turn_id):
         """Forget an interrupted turn that never dispatched a write."""
@@ -286,8 +320,16 @@ class MemoryStore:
             db.execute("DELETE FROM turns WHERE id=? AND status='started'", (turn_id,))
 
     def turn_writes(self, turn_id):
-        """Count write operations already dispatched under this turn prefix."""
+        """Also account for journaled browser/MCP actions outside the QQ outbox."""
         with self.connection() as db:
             row = db.execute("SELECT COUNT(*) FROM operations WHERE substr(id,1,?)=?",
                              (len(turn_id)+1, turn_id+":")).fetchone()
-        return int(row[0])
+            count = int(row[0])
+            journal = db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_outbox'").fetchone()
+            if journal:
+                count += db.execute(
+                    "SELECT COUNT(*) FROM memory_outbox WHERE method='record_experience' "
+                    "AND json_extract(params,'$.record.turn_id')=? "
+                    "AND json_extract(params,'$.record.category')='tool'", (turn_id,),
+                ).fetchone()[0]
+        return count

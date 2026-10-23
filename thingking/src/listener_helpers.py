@@ -74,7 +74,7 @@ def bored_event_rejection(event_data, snapshot, now, *, online=True, busy=False,
     owner_ts = float((snapshot.get("last_owner_activity") or {}).get("ts") or 0)
     if owner_ts > float(event_data.get("activity_at") or 0):
         return "owner_active_elsewhere"
-    idle = min(config.min_idle, 15) if event_data.get("activity") else config.min_idle
+    idle = 0 if event_data.get("activity") else config.min_idle
     if now - max(float(user.get("ts") or 0), owner_ts) < idle:
         return "not_idle"
     decision = parse_decision(json.dumps({**event_data, "should_act": True}))

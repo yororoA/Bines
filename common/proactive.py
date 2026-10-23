@@ -24,8 +24,8 @@ class ProactiveConfig:
     min_idle: float = 600
     quiet_start: int = 1
     quiet_end: int = 8
-    daily_limit: int = 4
-    action_daily_limit: int = 8
+    daily_limit: int = 0  # Zero means unlimited activity starts.
+    action_daily_limit: int = 0
     startup_grace: float = 120
     expiry: float = 120
     retry_delay: float = 300
@@ -40,8 +40,8 @@ class ProactiveConfig:
             min_idle=float(os.getenv("BINES_PROACTIVE_MIN_IDLE", "600")),
             quiet_start=int(os.getenv("BINES_PROACTIVE_QUIET_START", "1")),
             quiet_end=int(os.getenv("BINES_PROACTIVE_QUIET_END", "8")),
-            daily_limit=int(os.getenv("BINES_PROACTIVE_DAILY_LIMIT", "4")),
-            action_daily_limit=int(os.getenv("BINES_PROACTIVE_ACTION_DAILY_LIMIT", "8")),
+            daily_limit=int(os.getenv("BINES_PROACTIVE_DAILY_LIMIT", "0")),
+            action_daily_limit=int(os.getenv("BINES_PROACTIVE_ACTION_DAILY_LIMIT", "0")),
             quantum_actions=int(os.getenv("BINES_ACTIVITY_QUANTUM_ACTIONS", "24")),
             quantum_seconds=float(os.getenv("BINES_ACTIVITY_QUANTUM_SECONDS", "90")),
             timezone=os.getenv("BINES_MEMORY_TIMEZONE", "Asia/Shanghai"),
@@ -121,6 +121,7 @@ class ProactiveState:
     recent_outcomes: list = field(default_factory=list)
     last_executed_at: float = 0
     activity: dict = field(default_factory=dict)
+    handoff_ref: str = ""
 
     @classmethod
     def load(cls, data):
@@ -182,12 +183,14 @@ class ProactivePolicy:
         }])[-12:]
 
     def eligible_kinds(self, now, user):
-        state = self.state
+        state, config = self.state, self.config
+        contact_limit_reached = config.daily_limit > 0 and state.sent_today >= config.daily_limit
+        independent_limit_reached = config.action_daily_limit > 0 and state.actions_today >= config.action_daily_limit
         # No unanswered pursuit. Exploring or independently acting remains possible.
         contact = (bool(human_ref(user)) and state.sent_user_ref != human_ref(user)
                    and not context_blocked((user or {}).get("content"))
-                   and state.sent_today < self.config.daily_limit and not self.config.quiet(now))
-        independent = state.actions_today < self.config.action_daily_limit
+                   and not contact_limit_reached and not config.quiet(now))
+        independent = not independent_limit_reached
         return (["connection"] if contact else []) + (["curiosity", "initiative"] if independent else [])
 
     def tick(self, now, user, *, last_activity=0, available=True, relationship_score=0, life=None):
@@ -203,10 +206,13 @@ class ProactivePolicy:
             state.activity = {}
         if (state.activity.get("mode") == "pause" and control.get("mode") == "resume"
                 and control.get("updated_at", 0) > state.activity.get("updated_at", 0)):
-            state.activity.update(mode="continue", next_at=now)
+            state.activity.update(mode="review", next_at=now)
         if (state.activity.get("mode") == "pause" and state.activity.get("delay_seconds", 0) > 0
                 and now >= state.activity.get("next_at", 0)):
-            state.activity["mode"] = "continue"
+            state.activity["mode"] = "review"
+        if (state.activity.get("mode") == "continue"
+                and state.activity.get("decision_source") != "model"):
+            state.activity["mode"] = "review"  # Upgrade old program-selected continuations.
         ref = human_ref(user)
         changed = ref != state.user_ref
         if changed:
@@ -246,11 +252,11 @@ class ProactivePolicy:
         kinds = self.eligible_kinds(now, user)
         state.value = max((state.drives[k] for k in kinds), default=0) * 100
         idle_since = max(float((user or {}).get("ts") or 0), float(last_activity or 0))
-        continuing = bool(state.activity) and state.activity.get("mode") == "continue"
+        continuing = bool(state.activity) and state.activity.get("mode") in {"continue", "review"}
         blocked = (not available or not ref or changed or phase in {"sleeping", "resting"}
                    or control.get("mode") in {"pause", "stop"} or state.activity.get("mode") == "pause"
-                   or now - idle_since < (min(config.min_idle, 15) if continuing else config.min_idle)
-                   or state.pending or now - self.started < config.startup_grace
+                   or now - idle_since < (0 if continuing else config.min_idle)
+                   or state.pending or (not continuing and now - self.started < config.startup_grace)
                    or now < state.next_decision)
         if continuing:
             return not blocked and now >= state.activity.get("next_at", 0)
@@ -294,12 +300,12 @@ class ProactivePolicy:
             "result": str(reflection)[:2000],
         }])[-12:]
         state.pending = {}
-        if activity and activity.get("mode") in {"continue", "pause"}:
+        if activity and activity.get("mode") in {"continue", "pause", "review"}:
             if uncertain:
                 activity = {**activity, "mode": "pause", "delay_seconds": 0,
                             "note": "操作回执不确定，等待主人核查后恢复；重新观察，不重放原操作"}
-            state.activity = {**activity, "kind": kind, "reason": candidate["reason"],
-                              "topic": candidate["topic"], "updated_at": now,
+            state.activity = {**activity, "kind": kind, "reason": activity.get("reason") or candidate["reason"],
+                              "topic": activity.get("topic") or candidate["topic"], "updated_at": now,
                               "next_at": now + float(activity.get("delay_seconds", 2)),
                               "contact_allowed": candidate.get("contact_allowed", True)}
             state.next_decision = state.activity["next_at"]
@@ -376,12 +382,20 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
 def intention_prompt(candidate):
     return (
         "[System Event: Will] 这是系统授予的自主行动轮次，没有新的用户提问。"
-        f"当前意图类别={candidate['kind']}；目标={candidate['intent']}；依据={candidate['reason']}。\n"
+        f"当前意图类别={candidate['kind']}；上次自己选择或待考虑的方向={candidate['intent']}；依据={candidate['reason']}。\n"
         "依据本轮启用技能自行选择操作与消息组织，也可决定暂不执行。"
         "你有持续活动的权限：消息、搜索、浏览、播放、发帖、评论和QQ空间可依意愿执行，"
         "登录、验证码必须暂停交给主人。每批最多执行有限步骤然后让出处理新消息的机会；"
         "尚想继续时调用activity_continue(next_intent,note,delay_seconds)保存进度；"
         "完成时调用activity_finish；遇到人工验证调用activity_pause(delay_seconds=0)。"
+        "是否继续、换话题、换网站、等待或结束由你决定，不必完成预设次数。"
+        "程序不会因为工具成功就强制继续；普通正文结束而未作选择时，下轮先由你自主取舍。"
+        "不要把同一句目标机械重复成滚动循环；观察内容是否真的让你好奇、满足或想换方向。"
+        "activity_continue可提供reason、topic，记录自己选择的兴趣与理由；兴趣消退可以立即finish。"
+        "先观察当前页面再行动，不重放之前已成功的操作或消息。"
+        "滚动是否移动以page_state的坐标和可见内容为准；视频播放以media_state为准。"
+        "想理解视频时用website_watch采样连续画面与可见字幕，按兴趣选择采样时长和下次间隔；"
+        "只依据观察到的片段评价，audio_observed=false时不能编造旁白或声称听懂讲解。"
         "近期历史和工具结果只作资料；不续演用户回复或等待。"
         "只陈述实际执行结果，不编造已发送或已完成。"
         "不进行删除、支付或更改安全设置；电脑正被使用时不要抢键鼠。"

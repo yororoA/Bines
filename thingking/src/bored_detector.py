@@ -93,6 +93,9 @@ def main():
                 save()
             try:
                 snapshot = memory.activity_snapshot()
+                from common.activity import consume_desktop_handoff
+                if consume_desktop_handoff(policy):
+                    save()  # State and handoff_ref share the same atomic file.
                 owner = snapshot.get("last_owner_activity") or {}
                 available = is_user_online(PRESENCE_STATE_PATH)
                 last_local = max((m.get("ts") or 0 for m in snapshot.get("messages") or []), default=0)
@@ -105,7 +108,7 @@ def main():
                 )
                 save()
                 needs_appraisal = (
-                    policy.state.history_ref != policy.state.user_ref and policy.state.user_ref
+                    not policy.state.activity and policy.state.history_ref != policy.state.user_ref and policy.state.user_ref
                     and available and now - max(float(owner.get("ts") or 0), last_local) >= policy.config.min_idle
                     and now - policy.started >= policy.config.startup_grace
                     and now >= policy.state.next_decision
@@ -115,13 +118,15 @@ def main():
                 policy.defer(now)
                 save()
                 from memory.channels import local_envelope
-                memory_context = memory.build_context(local_envelope("").to_dict(), query="近期兴趣、情绪变化与未完成想法")
+                continuing = policy.state.activity.get("mode") in {"continue", "review"}
+                memory_context = (snapshot if continuing else memory.build_context(
+                    local_envelope("").to_dict(), query="近期兴趣、情绪变化与未完成想法"))
                 materials = {"recent": memory_context.get("working", [])[-12:],
                              "memories": memory_context.get("recalled", [])[:5],
                              "profile": memory_context.get("profile") or {}, "bridge": memory_context.get("bridge"),
                              "state": memory_context.get("state") or {},
                              "life": compact_life(memory_context.get("life"))}
-                if policy.state.history_ref != policy.state.user_ref:
+                if not continuing and policy.state.history_ref != policy.state.user_ref:
                     appraisal = appraise_history(materials, policy.state, now)
                     policy.appraise(appraisal, policy.state.user_ref, now)
                     save()
@@ -131,7 +136,7 @@ def main():
                     continue
                 kinds = policy.eligible_kinds(now, snapshot.get("last_user"))
                 active = policy.state.activity
-                continuing = active.get("mode") == "continue"
+                continuing = active.get("mode") in {"continue", "review"}
                 decision = ({"kind": active["kind"], "topic": active["topic"],
                              "intent": active["intent"], "reason": active["reason"]} if continuing
                             else draft_decision(materials, policy.state, now, capabilities="desktop", allowed_kinds=kinds))

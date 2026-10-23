@@ -244,6 +244,53 @@ class WebsiteServiceTests(unittest.TestCase):
         self.assertEqual(len(browser.calls), calls)
         self.assertEqual(sum(args[0] == "click" for _, args, _ in browser.calls), 1)
 
+    def test_stale_ref_is_rejected_before_dispatch_and_fresh_snapshot_recovers(self):
+        tree = '- textbox "搜索" [ref=e1]'
+        browser = FakeBrowser(lambda _platform, args, _timeout: tree if args[0] == "snapshot" else "ok")
+        service = self.service(browser)
+        service.snapshot("bilibili")
+        tree = '- textbox "搜索" [ref=e2]\n- button "评论" [ref=e1]'
+        with self.assertRaisesRegex(ValueError, "含义已变化"):
+            service.interact("bilibili", "fill", "@e1", "螃蟹", operation_id="stale")
+        self.assertFalse(any(args[0] == "fill" for _, args, _ in browser.calls))
+        service.snapshot("bilibili")
+        result = service.interact("bilibili", "fill", "@e2", "螃蟹", operation_id="fresh")
+        self.assertEqual(result["status"], "ok")
+
+    def test_navigation_error_requires_observation_but_public_click_is_uncertain(self):
+        def callback(_platform, args, _timeout):
+            if args[0] == "snapshot":
+                return '- button "发表评论" [ref=e1]'
+            if args[0] in {"back", "click"}:
+                raise BrowserCommandError("browser timeout", timeout=True)
+            return "ok"
+        service = self.service(FakeBrowser(callback))
+        service.snapshot("bilibili")
+        navigation = service.interact("bilibili", "back", operation_id="nav")
+        self.assertEqual(navigation["status"], "failed")
+        self.assertTrue(navigation["reobserve_required"])
+        public = service.interact("bilibili", "click", "@e1", operation_id="public")
+        self.assertEqual(public["status"], "uncertain")
+        self.assertFalse(public["retry_allowed"])
+
+    def test_successful_write_receipt_survives_later_snapshot_failure(self):
+        clicks = []
+        def callback(_platform, args, _timeout):
+            if args[0] == "snapshot":
+                if clicks:
+                    raise BrowserCommandError("observation timeout", timeout=True)
+                return '- button "发表评论" [ref=e1]'
+            if args[0] == "click":
+                clicks.append(1)
+            return "ok"
+        service = self.service(FakeBrowser(callback))
+        service.snapshot("bilibili")
+        result = service.interact("bilibili", "click", "@e1", operation_id="public")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["reobserve_required"])
+        self.assertEqual(service.interact("bilibili", "click", "@e1", operation_id="public"), result)
+        self.assertEqual(len(clicks), 1)
+
     def test_silent_activity_can_search_but_cannot_fill_comment(self):
         tree = '- textbox "搜索" [ref=e1]\n- textbox "发表评论" [ref=e2]'
         browser = FakeBrowser(lambda _platform, args, _timeout: tree if args[0] == "snapshot" else "ok")
@@ -317,6 +364,110 @@ class WebsiteServiceTests(unittest.TestCase):
         _, duplicate_id = self.create(service)
         self.assertEqual(plan_id, duplicate_id)
         self.assertEqual(service.get_plan(duplicate_id)["plan_status"], "uncertain")
+
+
+class WebsiteWatchTests(unittest.TestCase):
+    setUp = WebsiteServiceTests.setUp
+    tearDown = WebsiteServiceTests.tearDown
+    service = WebsiteServiceTests.service
+
+    def browser(self, *, paused=False, changed_at=0, challenge="", no_video=False):
+        count = 0
+        def callback(_platform, args, _timeout):
+            nonlocal count
+            if args[0] == "screenshot":
+                from PIL import Image
+                Image.new("RGB", (640, 480), "green").save(args[1])
+                return "captured"
+            if args[0] == "eval":
+                count += 1
+                changed = changed_at and count >= changed_at
+                return json.dumps({
+                    "url": "https://www.bilibili.com/video/" + ("BV2" if changed else "BV1"),
+                    "title": "观察片段", "challenge": challenge,
+                    "viewport": {"width": 640, "height": 480},
+                    "video": None if no_video else {
+                        "index": 0, "source": "https://media.example/video?token=private",
+                        "paused": paused, "ended": False, "ready_state": 4, "duration": 100,
+                        "current_time": 12 if paused else 12 + count,
+                        "rect": {"left": 0, "top": 0, "right": 640, "bottom": 360},
+                    },
+                    "captions": ["海鸟正在捕食", "海鸟正在捕食"],
+                })
+            return "ok"
+        return FakeBrowser(callback)
+
+    def test_continuous_frames_preserve_captions_progress_and_no_raw_media(self):
+        from common.activity import activity_checkpoint
+        browser = self.browser()
+        with patch("vlm_client.call_vision", return_value="画面展示海鸟俯冲捕食") as vision:
+            with patch("common.website_watch.time.sleep"):
+                result = self.service(browser).watch("bilibili", "看到了什么", 1, 3)
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["audio_observed"])
+        self.assertTrue(result["playback_advanced"])
+        self.assertEqual(len(result["frames"]), 3)
+        self.assertEqual(result["frames"][0]["media_time"], 13)
+        self.assertIn("海鸟正在捕食", result["frames"][0]["captions"])
+        self.assertEqual(len(vision.call_args.args[0]), 3)
+        self.assertIn("播放13.00秒", vision.call_args.kwargs["image_labels"][0])
+        self.assertNotIn("base64", json.dumps(result))
+        self.assertNotIn("token=private", json.dumps(result))
+        paths = [Path(args[1]) for _, args, _ in browser.calls if args[0] == "screenshot"]
+        self.assertTrue(all(not path.exists() for path in paths))
+        checkpoint = activity_checkpoint({"intent": "看视频"}, {}, [{
+            "action": "website_watch", "result": json.dumps(result), "status": "succeeded",
+        }])
+        self.assertIn("海鸟俯冲捕食", str(checkpoint))
+        self.assertIn("audio_observed", str(checkpoint))
+
+    def test_paused_video_is_observed_as_still_frames(self):
+        with patch("vlm_client.call_vision", return_value="视频暂停，画面重复") as vision:
+            with patch("common.website_watch.time.sleep"):
+                result = self.service(self.browser(paused=True)).watch("bilibili", frames=2)
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["playback_advanced"])
+        self.assertTrue(all(row["paused"] for row in result["frames"]))
+        self.assertIn("paused=True", vision.call_args.kwargs["image_labels"][0])
+
+    def test_switching_video_stops_sampling_and_never_mixes_content(self):
+        for changed_at in (2, 3):
+            with patch("vlm_client.call_vision") as vision:
+                with patch("common.website_watch.time.sleep"):
+                    result = self.service(self.browser(changed_at=changed_at)).watch("bilibili", frames=2)
+            self.assertEqual(result["status"], "interrupted")
+            self.assertEqual(result["source_url"], "https://www.bilibili.com/video/BV1")
+            self.assertNotIn("analysis", result)
+            vision.assert_not_called()
+
+    def test_navigation_during_inference_preserves_original_source(self):
+        with patch("vlm_client.call_vision", return_value="原视频中的海鸟"):
+            with patch("common.website_watch.time.sleep"):
+                result = self.service(self.browser(changed_at=5)).watch("bilibili", frames=2)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["page_changed"])
+        self.assertEqual(result["source_url"], "https://www.bilibili.com/video/BV1")
+
+    def test_no_video_challenge_and_vision_failure_are_not_success(self):
+        with patch("vlm_client.call_vision") as vision:
+            absent = self.service(self.browser(no_video=True)).watch("bilibili")
+            blocked = self.service(self.browser(challenge="请先登录并完成验证码")).watch("bilibili")
+            vision.assert_not_called()
+        self.assertEqual(absent["reason"], "no_media")
+        self.assertEqual(blocked["status"], "blocked_human")
+        with patch("vlm_client.call_vision", return_value="[VLM 请求失败 HTTP 500]"):
+            with patch("common.website_watch.time.sleep"):
+                failed = self.service(self.browser()).watch("bilibili", frames=2)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["reason"], "vision_failed")
+        self.assertNotIn("analysis", failed)
+
+    def test_sampling_arguments_are_bounded(self):
+        service = self.service(self.browser())
+        for kwargs in ({"frames": 20}, {"frames": True}, {"duration_seconds": float("nan")},
+                       {"duration_seconds": 31}, {"question": "a" * 1001}):
+            with self.assertRaises(ValueError):
+                service.watch("bilibili", **kwargs)
 
 
 class AgentBrowserTests(unittest.TestCase):
@@ -441,6 +592,38 @@ class WebsiteRuntimeTests(unittest.TestCase):
 
 
 class WebsiteSpoolTests(unittest.TestCase):
+    def test_owner_request_can_run_during_video_observation(self):
+        from website_bridge import SpoolWorker
+        from tools import website_tool
+        entered, release = threading.Event(), threading.Event()
+        class Service:
+            def watch(self, *args):
+                entered.set()
+                release.wait(3)
+                return {"status": "ok", "analysis": "测试帧"}
+            def status(self, *args):
+                return {"status": "ok", "runtime": "ready"}
+        with tempfile.TemporaryDirectory() as temp:
+            worker = SpoolWorker(Service(), temp, "test-token")
+            worker.start()
+            with patch.dict(os.environ, {
+                "BINES_WEBSITE_BRIDGE_SPOOL": temp, "BINES_WEBSITE_BRIDGE_TOKEN": "test-token",
+            }):
+                results = []
+                observer = threading.Thread(target=lambda: results.append(
+                    website_tool._request("/v1/watch", {"platform": "bilibili"}, timeout=3)))
+                observer.start()
+                try:
+                    self.assertTrue(entered.wait(1))
+                    status = json.loads(website_tool._request("/v1/status", {}, timeout=1))
+                    self.assertEqual(status["runtime"], "ready")
+                    self.assertFalse(release.is_set())
+                finally:
+                    release.set()
+                    observer.join(3)
+                    worker.close()
+                self.assertEqual(json.loads(results[0])["analysis"], "测试帧")
+
     def test_second_bridge_cannot_replace_active_heartbeat(self):
         from website_bridge import SpoolWorker
         with tempfile.TemporaryDirectory() as temp:
@@ -561,6 +744,23 @@ class WebsiteToolAuthorityTests(unittest.TestCase):
             with tool_context(ToolContext(identity, "event", "turn")):
                 with self.assertRaises(PermissionError):
                     self.tool.website_status()
+                with self.assertRaises(PermissionError):
+                    self.tool.website_watch("bilibili")
+
+    def test_video_observation_checks_owner_interruption_before_and_after(self):
+        from unittest.mock import Mock
+        check = Mock(side_effect=["", "主人发来新消息"])
+        context = ToolContext(LOCAL_IDENTITY, autonomous=True, check=check)
+        with patch.object(self.tool, "_request", return_value=self.fake_result) as request:
+            with tool_context(context), self.assertRaisesRegex(RuntimeError, "新消息"):
+                self.tool.website_watch("bilibili")
+        self.assertEqual(request.call_args.args[0], "/v1/watch")
+        check = Mock(return_value="已暂停")
+        with patch.object(self.tool, "_request") as request:
+            with tool_context(ToolContext(LOCAL_IDENTITY, check=check)):
+                with self.assertRaisesRegex(RuntimeError, "已暂停"):
+                    self.tool.website_watch("bilibili")
+        request.assert_not_called()
 
     def test_authorized_autonomous_turn_can_draft_and_publish(self):
         context = ToolContext(
@@ -628,6 +828,17 @@ class WebsiteToolAuthorityTests(unittest.TestCase):
         self.assertFalse(result["retry_allowed"])
         self.assertEqual(context.receipts[0]["result"], result)
 
+    def test_known_predispatch_rejection_is_recoverable_and_execute_has_params(self):
+        context = ToolContext(LOCAL_IDENTITY, turn_id="test", autonomous=True)
+        error = self.tool.WebsiteRequestError("元素含义已变化，请刷新 snapshot", rejected=True)
+        with patch.object(self.tool, "_request", side_effect=error), tool_context(context):
+            result = json.loads(self.tool.website_interact("bilibili", "fill", "@e1", "螃蟹"))
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["reobserve_required"])
+        with patch.object(self.tool, "_request", return_value=self.fake_result), tool_context(context):
+            self.tool.website_execute("ABC123")
+        self.assertEqual(context.receipts[-1]["params"], {"plan_id": "ABC123"})
+
 
 class WebsiteSkillRunnerTests(unittest.TestCase):
     def test_qq_exposes_website_only_to_owner_private_chat(self):
@@ -647,11 +858,13 @@ class WebsiteSkillRunnerTests(unittest.TestCase):
             actions = runner.actions_for_source("QQ")
             self.assertIn("website_open", actions)
             self.assertIn("website_execute", actions)
+            self.assertIn("website_watch", actions)
         for identity in (owner_group, stranger):
             with tool_context(ToolContext(identity, "event", "turn")):
                 actions = runner.actions_for_source("QQ")
                 self.assertNotIn("website_open", actions)
                 self.assertNotIn("website_execute", actions)
+                self.assertNotIn("website_watch", actions)
 
 
 if __name__ == "__main__":

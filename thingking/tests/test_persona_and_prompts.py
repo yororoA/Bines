@@ -149,6 +149,9 @@ class PromptBuilderTest(unittest.TestCase):
     def test_owner_qq_scene_is_owner_scope(self):
         text, messages = self._system_text(qq_private_env(OWNER_QQ))
         self.assertIn("管理员正在通过 QQ 私聊找你", text)
+        self.assertIn("website_watch", text)
+        self.assertIn("不采集声音", text)
+        self.assertNotIn("禁止调用视觉", text)
         self.assertIn("管理员的生日是二月五日", text)
         self.assertIn("本轮关系口吻：非常亲密", messages[0]["content"])
         self.assertIn("本轮关系口吻：非常亲密", messages[-1]["content"])

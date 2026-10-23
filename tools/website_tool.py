@@ -24,6 +24,20 @@ load_env()
 _HTTP = build_opener(ProxyHandler({}))
 
 
+class WebsiteRequestError(RuntimeError):
+    def __init__(self, message, *, rejected=False):
+        super().__init__(message)
+        self.rejected = rejected
+
+
+def _operation_error(exc, **identifiers):
+    rejected = isinstance(exc, WebsiteRequestError) and exc.rejected
+    return json.dumps({
+        "status": "failed" if rejected else "uncertain", **identifiers,
+        "message": str(exc), "retry_allowed": False, "reobserve_required": rejected,
+    }, ensure_ascii=False)
+
+
 def _authorize(*, human=False, plan_id=""):
     context = CURRENT_CONTEXT.get()
     if not context.identity.privileged:
@@ -70,7 +84,7 @@ def _request(route, payload, timeout=90):
     )
     token = os.environ.get("BINES_WEBSITE_BRIDGE_TOKEN", "")
     if not url or not token:
-        raise RuntimeError("网站浏览器桥未启动；请通过 python bines.py 启动 Bines")
+        raise WebsiteRequestError("网站浏览器桥未启动；请通过 python bines.py 启动 Bines", rejected=True)
     encoded = json.dumps(payload, ensure_ascii=False).encode()
     request = Request(
         url.rstrip("/") + route,
@@ -89,18 +103,18 @@ def _request(route, payload, timeout=90):
             detail = json.load(exc)["error"]
         except Exception:
             detail = f"HTTP {exc.code}"
-        raise RuntimeError(detail) from None
+        raise WebsiteRequestError(detail, rejected=exc.code in {400, 401, 403, 404, 408}) from None
     except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"网站浏览器桥不可用：{exc}") from None
+        raise WebsiteRequestError(f"网站浏览器桥不可用：{exc}") from None
     if result.get("status") == "error":
-        raise RuntimeError(result.get("error") or "网站操作失败")
+        raise WebsiteRequestError(result.get("error") or "网站操作失败")
     return json.dumps(result, ensure_ascii=False)
 
 
 def _spool_request(root, route, payload, timeout):
     token = os.environ.get("BINES_WEBSITE_BRIDGE_TOKEN", "")
     if not token:
-        raise RuntimeError("网站浏览器桥令牌缺失")
+        raise WebsiteRequestError("网站浏览器桥令牌缺失", rejected=True)
     try:
         current = read_json(root / "heartbeat.json")
         ready = verify_envelope(token, "heartbeat", current)
@@ -108,7 +122,7 @@ def _spool_request(root, route, payload, timeout):
     except (OSError, TypeError, ValueError):
         ready = fresh = False
     if not ready or not fresh:
-        raise RuntimeError("网站浏览器桥未运行；请通过 python bines.py 启动 Bines")
+        raise WebsiteRequestError("网站浏览器桥未运行；请通过 python bines.py 启动 Bines", rejected=True)
     request_id = uuid.uuid4().hex
     fields = {
         "id": request_id,
@@ -140,7 +154,8 @@ def _spool_request(root, route, payload, timeout):
         if not isinstance(result, dict):
             raise RuntimeError("网站浏览器桥响应格式无效")
         if int(response.get("status_code") or 500) >= 400 or result.get("status") == "error":
-            raise RuntimeError(result.get("error") or "网站操作失败")
+            raise WebsiteRequestError(result.get("error") or "网站操作失败",
+                                      rejected=int(response.get("status_code") or 500) in {400, 401, 403, 404, 408})
         return json.dumps(result, ensure_ascii=False)
     (root / "requests" / f"{request_id}.json").unlink(missing_ok=True)
     if route in {"/v1/plans/execute", "/v1/interact"}:
@@ -201,8 +216,7 @@ def website_interact(platform: str, action: str, ref: str = "", value: str = "",
             "contact_allowed": context.contact_allowed,
         }, timeout=330 if action == "upload" else 90)
     except RuntimeError as exc:
-        result = json.dumps({"status": "uncertain", "operation_id": stable_id,
-                             "message": str(exc), "retry_allowed": False}, ensure_ascii=False)
+        result = _operation_error(exc, operation_id=stable_id)
     context.receipts.append({"action": "website_interact", "operation_id": stable_id,
                              "params": {"platform": platform, "action": action},
                              "result": json.loads(result)})
@@ -212,6 +226,27 @@ def website_media_status(platform: str) -> str:
     """观察真实视频/音频是否播放、进度、时长和加载状态；不能据标题猜视频内容。"""
     _authorize()
     return _request("/v1/media-status", {"platform": platform})
+
+def website_watch(platform: str, question: str = "", duration_seconds: float = 6,
+                  frames: int = 3) -> str:
+    """观察当前可见视频的连续画面和字幕；采样1–30秒、2–6帧，不采集声音或控制播放。"""
+    _authorize()
+    context = CURRENT_CONTEXT.get()
+    def check():
+        reason = context.check() if context.check else ""
+        if reason:
+            raise RuntimeError(f"自主行动已取消：{reason}")
+    check()
+    try:
+        result = _request("/v1/watch", {
+            "platform": platform, "question": question,
+            "duration_seconds": duration_seconds, "frames": frames,
+        }, timeout=180)
+    except RuntimeError as exc:
+        result = json.dumps({"status": "failed", "audio_observed": False,
+                             "message": str(exc), "reobserve_required": True}, ensure_ascii=False)
+    check()
+    return result
 
 def website_tabs(platform: str) -> str:
     """列出当前平台标签页及稳定tN编号；链接在新标签打开时可switch_tab返回原页。"""
@@ -266,8 +301,8 @@ def website_execute(plan_id: str) -> str:
     try:
         result = _request("/v1/plans/execute", {"plan_id": plan_id, "autonomous": authorized}, timeout=600)
     except RuntimeError as exc:
-        result = json.dumps({"status": "uncertain", "plan_id": plan_id,
-                             "message": str(exc), "retry_allowed": False}, ensure_ascii=False)
+        result = _operation_error(exc, plan_id=plan_id)
     CURRENT_CONTEXT.get().receipts.append({"action": "website_execute", "plan_id": plan_id,
+                                           "params": {"plan_id": plan_id},
                                            "result": json.loads(result)})
     return result

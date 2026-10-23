@@ -23,7 +23,7 @@ _MODULES = {
     "website_tool": {name: name for name in (
         "website_status", "website_open", "website_snapshot", "website_scroll",
         "website_create_draft", "website_plan", "website_approve", "website_execute", "website_interact",
-        "website_media_status", "website_tabs",
+        "website_media_status", "website_watch", "website_tabs",
     )},
     "activity_tool": {name: name for name in (
         "activity_continue", "activity_pause", "activity_finish", "autonomy_control",

@@ -33,7 +33,7 @@ QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | QQ_GROUP_OWNER_ACTIONS | {
     "website_status", "website_open", "website_snapshot", "website_scroll",
     "website_create_draft", "website_plan", "website_approve", "website_execute",
     "website_interact", "activity_continue", "activity_pause", "activity_finish", "autonomy_control",
-    "website_media_status", "website_tabs",
+    "website_media_status", "website_watch", "website_tabs",
 }
 
 

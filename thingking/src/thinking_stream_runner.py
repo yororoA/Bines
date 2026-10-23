@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable, Dict
 
 from skill_runner import CALL_END, CALL_START, SkillProtocolError, SkillRunner
+from will_runtime import ActivityYield
 
 
 def run_main_agent_rounds(
@@ -142,6 +143,12 @@ def run_main_agent_rounds(
                 messages.append({"role": "system", "content": f"<skill_result>{skill_result}</skill_result>"})
                 last_skill_result = skill_result
                 continue
+            except ActivityYield:
+                # An activity checkpoint ends this batch without speaking a
+                # synthetic tool receipt or starting another model request.
+                final_text = ""
+                last_skill_result = ""
+                break
 
         if segment_state["buffer"].strip():
             segment = segment_state["buffer"].strip()

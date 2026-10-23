@@ -84,7 +84,7 @@ def guard(store, event, now=None, *, config=None, central_activity=0):
     # A desktop or group interaction after this candidate also cancels it.
     if max(owner_activity(store), central_activity) > float(candidate.get("activity_at") or 0):
         return "owner_active_elsewhere"
-    idle = min(config.min_idle, 15) if candidate.get("activity") else config.min_idle
+    idle = 0 if candidate.get("activity") else config.min_idle
     if now - max(float(user["ts"]), central_activity) < idle:
         return "not_idle"
     return ""
@@ -154,6 +154,29 @@ class QQProactive:
             return
         self._recover(policy, now)
 
+    def consume_handoffs(self, conversation, policy, now):
+        """Scheduler owns policy state; owner workers only append durable handoffs."""
+        if policy.state.pending:
+            return
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT * FROM activity_handoffs WHERE conversation=? AND consumed=0 ORDER BY created,rowid",
+                (conversation,),
+            ).fetchall()
+            if not rows:
+                return
+            checkpoint = json.loads(rows[-1]["checkpoint"])
+            policy.state.activity = {} if checkpoint.get("mode") == "finish" else checkpoint
+            policy.state.next_decision = checkpoint.get("next_at", now)
+            # Persist state and acknowledgment in one commit, even across a restart.
+            db.execute("INSERT OR REPLACE INTO proactive_sessions VALUES(?,?)",
+                       (conversation, json.dumps(policy.dump(), ensure_ascii=False)))
+            db.executemany("UPDATE activity_handoffs SET consumed=1 WHERE turn_id=?",
+                           [(row["turn_id"],) for row in rows])
+        log.info("活动进度已接手 · %s · 第%s批", checkpoint.get("topic", ""),
+                 checkpoint.get("sequence", 0))
+
     def _recover(self, policy, now):
         candidate = policy.state.pending
         with self.store.connection() as db:
@@ -194,10 +217,18 @@ class QQProactive:
             policy.resolve(now, activity=checkpoint)
         elif now - candidate["timestamp"] > self.config.expiry:
             # Dispatch already began but never committed a receipt: don't chase/replay.
-            policy.resolve(now, uncertain=bool(operations))
+            interrupted = bool(self.store.turn_writes(candidate["id"]))
+            if not checkpoint and (candidate.get("activity") or interrupted):
+                from common.activity import activity_checkpoint
+                checkpoint = activity_checkpoint(candidate, {
+                    "mode": "pause" if interrupted else "review",
+                    "delay_seconds": 0 if interrupted else 15,
+                    "note": "批次中断，重新观察；已有操作需先核查回执，禁止重放",
+                }, [])
+            policy.resolve(now, uncertain=interrupted, activity=checkpoint)
             with self.store.connection() as db:
                 db.execute("UPDATE proactive_runs SET status=? WHERE id=?",
-                           ("uncertain" if operations else "skipped", candidate["id"]))
+                           ("uncertain" if interrupted else "skipped", candidate["id"]))
 
     def tick(self):
         now = self.clock()
@@ -216,6 +247,7 @@ class QQProactive:
                     now, self.config, json.loads(row["value"]) if row else None,
                 )
             self.recover(policy, now)
+            self.consume_handoffs(conversation, policy, now)
             with self.store.connection() as db:
                 busy = db.execute(
                     "SELECT 1 FROM events WHERE conversation=? AND status IN ('pending','working')",
@@ -230,7 +262,7 @@ class QQProactive:
             )
             self.save(conversation, policy)  # Save observation even during cooldown/quiet.
             needs_appraisal = (
-                policy.state.history_ref != human_ref(user) and connected and not busy
+                not policy.state.activity and policy.state.history_ref != human_ref(user) and connected and not busy
                 and now - max(activity, float(last["ts"] or 0)) >= self.config.min_idle
                 and now - policy.started >= self.config.startup_grace
                 and now >= policy.state.next_decision
@@ -240,7 +272,9 @@ class QQProactive:
             policy.defer(now)  # Failed model calls also back off, rather than retrying every tick.
             self.save(conversation, policy)
             from chatBot.memory_hub import identity_envelope
-            memory_context = self.memory.build_context(identity_envelope(identity), query="近期兴趣、情绪变化与未完成的想法")
+            continuing = policy.state.activity.get("mode") in {"continue", "review"}
+            memory_context = (snapshot if continuing else self.memory.build_context(
+                identity_envelope(identity), query="近期兴趣、情绪变化与未完成的想法"))
             materials = {
                 "recent": memory_context.get("working", [])[-12:],
                 "memories": memory_context.get("recalled", [])[:5],
@@ -249,7 +283,7 @@ class QQProactive:
                 "state": memory_context.get("state") or {},
                 "life": compact_life(memory_context.get("life")),
             }
-            if policy.state.history_ref != human_ref(user):
+            if not continuing and policy.state.history_ref != human_ref(user):
                 appraisal = self.appraise(materials, policy.state, now)
                 policy.appraise(appraisal, human_ref(user), now)
                 if not appraisal:
@@ -259,7 +293,7 @@ class QQProactive:
                 continue
             kinds = policy.eligible_kinds(now, user)
             saved_activity = policy.state.activity
-            continuing = saved_activity.get("mode") == "continue"
+            continuing = saved_activity.get("mode") in {"continue", "review"}
             if continuing:
                 decision = {"kind": saved_activity["kind"], "topic": saved_activity["topic"],
                             "intent": saved_activity["intent"], "reason": saved_activity["reason"]}

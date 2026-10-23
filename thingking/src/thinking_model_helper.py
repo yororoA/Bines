@@ -135,15 +135,27 @@ class ThinkingModelHelper:
         for _ in range(max_iterations):
             request_messages = [*conversation, *([{"role": "system", "content": voice}] if voice else [])]
             request_messages = with_current_time(request_messages)
-            response = self.client.chat.completions.create(
-                model=self.model, messages=request_messages, tools=tools or None,
-                temperature=temperature, max_tokens=max_tokens, stream=False,
-            )
-            if not response.choices:
-                return "", history, []
+            budget = max_tokens
+            for attempt in range(2):
+                response = self.client.chat.completions.create(
+                    model=self.model, messages=request_messages, tools=tools or None,
+                    temperature=temperature, max_tokens=budget, stream=False,
+                )
+                if not response.choices:
+                    raise ModelCompletionError(f"model {self.model} returned no choices")
+                choice = response.choices[0]
+                if getattr(choice, "finish_reason", None) != "length":
+                    break
+                # No tool from a truncated response has run yet. Retry only this
+                # request, preserving all receipts/results from earlier rounds.
+                if attempt or budget >= _MAX_TEXT_RETRY_TOKENS:
+                    raise ModelCompletionError("QQ 工具响应被截断，未执行本次返回的工具")
+                budget = min(_MAX_TEXT_RETRY_TOKENS, max(8192, budget * 4))
             message = response.choices[0].message
             calls = message.tool_calls or []
             if not calls:
+                if not (message.content or "").strip():
+                    raise ModelCompletionError("QQ 模型没有返回正文或工具调用")
                 return (message.content or "").strip(), history, []
             assistant = {"role": "assistant", "content": message.content or "",
                          "tool_calls": [call.model_dump(exclude_none=True) for call in calls]}

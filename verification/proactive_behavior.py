@@ -1,6 +1,7 @@
 """Willingness and fake-NapCat regression; no real outbound calls."""
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -16,6 +17,7 @@ from common.proactive import (
 from chatBot.proactive import QQProactive, guard
 from verification.napcat_integration import Integration, event
 from thingking.qq_thinking import QQThinking
+from chatBot.messages import LOCAL_IDENTITY
 from tools.context import ToolContext, tool_context
 from will_runtime import WillSkillRunner
 
@@ -40,6 +42,37 @@ class PolicyTests(unittest.TestCase):
     def candidate(self, kind="connection"):
         return {**intention(kind), "id": "candidate", "based_on_user": human_ref(self.user),
                 "timestamp": self.now, "contact_allowed": True}
+
+    def test_unset_limits_allow_activity_after_large_persisted_counts(self):
+        with patch.dict(os.environ):
+            os.environ.pop("BINES_PROACTIVE_DAILY_LIMIT", None)
+            os.environ.pop("BINES_PROACTIVE_ACTION_DAILY_LIMIT", None)
+            config = ProactiveConfig.from_env()
+        self.assertEqual((config.daily_limit, config.action_daily_limit), (0, 0))
+        restored = ProactivePolicy(self.now, config, {
+            "user_ref": human_ref(self.user), "sent_today": 1000, "actions_today": 1000,
+        })
+        self.assertEqual(restored.eligible_kinds(self.now, self.user),
+                         ["connection", "curiosity", "initiative"])
+
+    def test_positive_limits_apply_only_to_their_activity_kind(self):
+        with patch.dict(os.environ, {
+            "BINES_PROACTIVE_DAILY_LIMIT": "2",
+            "BINES_PROACTIVE_ACTION_DAILY_LIMIT": "3",
+        }):
+            policy = ProactivePolicy(self.now, ProactiveConfig.from_env())
+        policy.state.sent_today, policy.state.actions_today = 2, 2
+        self.assertEqual(policy.eligible_kinds(self.now, self.user), ["curiosity", "initiative"])
+        policy.state.sent_today, policy.state.actions_today = 1, 3
+        self.assertEqual(policy.eligible_kinds(self.now, self.user), ["connection"])
+        policy.state.sent_today = 2
+        self.assertEqual(policy.eligible_kinds(self.now, self.user), [])
+
+    def test_negative_limits_remain_invalid(self):
+        for name in ("BINES_PROACTIVE_DAILY_LIMIT", "BINES_PROACTIVE_ACTION_DAILY_LIMIT"):
+            with patch.dict(os.environ, {name: "-1"}):
+                with self.assertRaisesRegex(ValueError, "次数配置无效"):
+                    ProactiveConfig.from_env()
 
     def test_willingness_is_bounded_and_approaches_targets_not_timer_100(self):
         for step in range(1, 501):
@@ -150,7 +183,17 @@ class WillToolsTests(unittest.TestCase):
 
 
 class QQTests(unittest.TestCase):
-    setUp = Integration.setUp
+    def setUp(self):
+        # Real wall-clock time must not turn a transport/recovery test into a
+        # quiet-hours or sleep test when the suite runs after midnight.
+        environment = patch.dict(os.environ, {
+            "BINES_PROACTIVE_QUIET_START": "0", "BINES_PROACTIVE_QUIET_END": "0",
+            "BINES_LIFE_SLEEP_START": "0", "BINES_LIFE_WAKE_HOUR": "0",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        Integration.setUp(self)
+
     tearDown = Integration.tearDown
     insert = Integration.insert
 
@@ -296,7 +339,8 @@ class QQTests(unittest.TestCase):
             self.insert(event("1", msg_id=509, text="模型思考时又说话了"))
             return intention()
         scheduler = QQProactive(self.store, memory, self.client, clock=lambda: now[0],
-                                config=ProactiveConfig(interval=1, min_idle=0, startup_grace=0),
+                                config=ProactiveConfig(interval=1, min_idle=0, startup_grace=0,
+                                                       quiet_start=0, quiet_end=0),
                                 decide=decide, appraise=appraisal)
         scheduler.tick()
         now[0] += 310
@@ -356,7 +400,9 @@ class ThinkingTurnTests(unittest.TestCase):
         runner.function_tools.return_value = []
         runner.action_to_skill = {"get_time": "system-control", "browser_search": "web-research"}
         runner.execute.return_value = "读取成功"
-        with patch("prompt_builder.conversation_style_guard", return_value="--- 本轮角色口吻\n保持当前口吻"):
+        with tool_context(ToolContext(LOCAL_IDENTITY, autonomous=True)), patch(
+            "prompt_builder.conversation_style_guard", return_value="--- 本轮角色口吻\n保持当前口吻",
+        ):
             text, outcomes = run_intention(model, runner, memory_context, {
                 **intention("curiosity"), "contact_allowed": False,
             }, lambda: "")

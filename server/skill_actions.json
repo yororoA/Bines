@@ -351,6 +351,11 @@
       "enabled": true
     },
     {
+      "name": "website_watch",
+      "description": "采样当前可见视频的连续画面和字幕，返回视觉理解、播放时间和证据；不采集声音。",
+      "enabled": true
+    },
+    {
       "name": "website_tabs",
       "description": "列出平台标签及稳定编号，支持切换回搜索结果或原页面。",
       "enabled": true

@@ -33,6 +33,11 @@ class UnknownRoute(ValueError):
 
 
 def dispatch(service, route, body):
+    if route == "/v1/watch":
+        # Only individual frame captures lock the browser; waiting/inference
+        # must leave room for a new owner action.
+        return service.watch(body.get("platform"), body.get("question", ""),
+                             body.get("duration_seconds", 6), body.get("frames", 3))
     lock = getattr(service, "execute_lock", None)
     with lock if lock is not None else nullcontext():
         return _dispatch(service, route, body)
@@ -161,6 +166,7 @@ class SpoolWorker:
         self.stop = threading.Event()
         self.thread = None
         self.heartbeat_thread = None
+        self.watch_thread = None
         self.owner_lock = None
 
     def acquire(self):
@@ -263,9 +269,19 @@ class SpoolWorker:
                 if self.stop.is_set():
                     break
                 try:
-                    self._process(path)
+                    if read_json(path).get("route") == "/v1/watch":
+                        if self.watch_thread and self.watch_thread.is_alive():
+                            continue
+                        self.watch_thread = threading.Thread(
+                            target=self._process, args=(path,), name="WebsiteWatch", daemon=True,
+                        )
+                        self.watch_thread.start()
+                    else:
+                        self._process(path)
                 except OSError:
                     pass
+                except (ValueError, AttributeError):
+                    self._process(path)  # Normal signed-envelope validation owns errors.
             for path in self.responses.glob("*.json"):
                 try:
                     if now - path.stat().st_mtime > 3600:
@@ -282,6 +298,9 @@ class SpoolWorker:
         if self.thread:
             self.thread.join(timeout=5)
             self.thread = None
+        if self.watch_thread:
+            self.watch_thread.join(timeout=5)
+            self.watch_thread = None
         if self.owner_lock:
             (self.root / "heartbeat.json").unlink(missing_ok=True)
             self.owner_lock.close()

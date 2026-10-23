@@ -77,7 +77,13 @@ def _scene_policy(envelope: Dict[str, Any], scene: str) -> str:
     if scene == SCENE_LOCAL:
         return f"--- 当前场景 ---\n你正在电脑前和{owner_title}直接聊天（语音或文字）。"
     if scene == SCENE_OWNER_QQ:
-        return f"--- 当前场景 ---\n{owner_title}正在通过 QQ 私聊找你。{_QQ_TOOL_POLICY}"
+        return (
+            f"--- 当前场景 ---\n{owner_title}正在通过 QQ 私聊找你。"
+            "你无法通过屏幕或摄像头看到对方。可使用本轮启用的 QQ、搜索、记忆、"
+            "动态和网站技能；独立 Chrome 网站浏览器可观察视频，用 website_watch "
+            "读取连续画面与可见字幕。它不采集声音，不能据标题或静态快照编造视频讲解。"
+            "QQ 容器不直接操作本机键鼠或全桌面。按内容自然回答，自主决定发送接口、篇幅和分段。"
+        )
     if scene == SCENE_QQ_PRIVATE:
         return f"--- 当前场景 ---\nQQ 用户「{name}」正在私聊你。{_PRIVACY_POLICY}{_QQ_TOOL_POLICY}"
     identity_policy = (

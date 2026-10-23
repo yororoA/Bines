@@ -696,6 +696,27 @@ class WebsiteService:
             "plans": [self.public_plan(plan) for plan in plans],
         }
 
+    def page_state(self, config):
+        """Observe the viewport; a successful scroll command alone proves no movement."""
+        script = """JSON.stringify({url:location.href,title:document.title,
+            scroll_x:window.scrollX,scroll_y:window.scrollY,viewport_height:innerHeight,
+            document_height:document.scrollingElement?.scrollHeight,
+            scrollers:Array.from(document.querySelectorAll('*')).filter(
+                e=>e.scrollTop>0&&e.scrollHeight>e.clientHeight).slice(0,5).map(
+                e=>({tag:e.tagName,scroll_y:e.scrollTop,height:e.clientHeight})),
+            visible_links:Array.from(document.querySelectorAll('a[href]')).filter(
+                a=>{const r=a.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight&&
+                    r.width>0&&r.height>0&&a.innerText.trim()}).slice(0,12).map(
+                a=>({text:a.innerText.trim().slice(0,100),url:a.href}))})"""
+        try:
+            output = self.browser.run(config, ["eval", script]).strip()
+            if output.startswith("--- AGENT_BROWSER_PAGE_CONTENT "):
+                output = "\n".join(output.splitlines()[1:-1])
+            state = json.loads(output)
+            return json.loads(state) if isinstance(state, str) else state
+        except (BrowserCommandError, TypeError, ValueError) as exc:
+            return {"observation_error": str(exc)[:300]}
+
     def open(self, platform, url="", snapshot=True):
         config = platform_config(platform)
         selected = validate_url(config, url) if url else config.entry_url
@@ -709,6 +730,7 @@ class WebsiteService:
         return {
             "status": "ok", "platform": config.key, "url": current or selected,
             "output": output[-2000:], "snapshot": tree,
+            "page_state": self.page_state(config),
             "human_action_required": bool(CHALLENGE_PATTERN.search(tree + "\n" + output)),
         }
 
@@ -725,6 +747,7 @@ class WebsiteService:
         }
         return {
             "status": "ok", "platform": config.key, "snapshot": output,
+            "page_state": self.page_state(config),
             "human_action_required": bool(CHALLENGE_PATTERN.search(output)),
         }
 
@@ -735,13 +758,20 @@ class WebsiteService:
         pixels = int(pixels)
         if not 1 <= pixels <= 5000:
             raise ValueError("pixels 必须为 1–5000")
+        before = self.page_state(config)
         output = self.browser.run(config, ["scroll", direction, pixels])
-        return {"status": "ok", "platform": config.key, "output": output[-2000:]}
+        return {"status": "ok", "platform": config.key, "output": output[-2000:],
+                "page_state_before": before, "page_state": self.page_state(config)}
 
     def tabs(self, platform):
         config = platform_config(platform)
         return {"status": "ok", "platform": config.key,
                 "tabs": self.browser.run(config, ["tab", "list"])[:10000]}
+
+    def watch(self, platform, question="", duration_seconds=6, frames=3):
+        """Read a short sequence of visible video frames and captions."""
+        from common.website_watch import watch
+        return watch(self, platform, question, duration_seconds, frames)
 
     def media_status(self, platform):
         """Read actual HTML media state without inventing video content."""
@@ -817,12 +847,12 @@ class WebsiteService:
                 raise PermissionError("静默活动仅可阅读与导航，不公开互动")
             if action == "press" and value not in {"Enter", "Tab", "Space", "Escape", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"}:
                 raise ValueError("仅允许常用页面与播放控制按键")
+            paths = self._media([value]) if action == "upload" else []
             fresh, cached = self.store.begin_action(action_id, payload)
             if not fresh:
                 return cached
             try:
                 if action == "upload":
-                    paths = self._media([value])
                     args = ["upload", ref, paths[0]]
                 elif action == "switch_tab":
                     args = ["tab", value]
@@ -835,6 +865,16 @@ class WebsiteService:
                 else:
                     args = [action, ref, *([value] if action in {"fill", "select"} else [])]
                 output = self.browser.run(config, args, timeout=300 if action == "upload" else 60)
+            except BrowserCommandError as exc:
+                public_write = (action in {"click", "check", "upload", "select"}
+                                or (action == "press" and value == "Enter" and not search_input))
+                result = {"status": "uncertain" if public_write else "failed", "operation_id": action_id,
+                          "message": str(exc)[:1500], "retry_allowed": False,
+                          "reobserve_required": not public_write}
+                return self.store.finish_action(action_id, result)
+            # The interaction succeeded. An observation failure must not erase its
+            # known receipt or pretend that a publication may need repeating.
+            try:
                 after = self.browser.run(config, ["snapshot", "-i", "-c"])
                 self.observed_refs[config.key] = {
                     match.group(1): line
@@ -844,10 +884,11 @@ class WebsiteService:
                 current = self.browser.run(config, ["get", "url"])
                 result = {"status": "ok", "operation_id": action_id, "url": current,
                           "output": output[-2000:], "snapshot": after,
+                          "page_state": self.page_state(config),
                           "human_action_required": bool(CHALLENGE_PATTERN.search(after))}
             except BrowserCommandError as exc:
-                result = {"status": "uncertain", "operation_id": action_id,
-                          "message": str(exc)[:1500], "retry_allowed": False}
+                result = {"status": "ok", "operation_id": action_id, "output": output[-2000:],
+                          "observation_error": str(exc)[:1500], "reobserve_required": True}
             return self.store.finish_action(action_id, result)
 
     def create_plan(

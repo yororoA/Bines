@@ -131,13 +131,14 @@ class QQThinking:
                                 "params": {"user_id": identity.user, "message": chain}})
         return actions
 
-    def send_actions(self, identity, turn_id, actions, start=0):
+    def send_actions(self, identity, turn_id, actions, start=0, *, activity=None, handoff=None):
         """Send segments once each; persisted progress lets a crash resume without duplicates."""
         actions = [{**item, "params": compact_qq_send_params(item["action"], item["params"])}
                    for item in actions]
         for index in range(start, len(actions)):
             item = actions[index]
-            self.store.save_turn(turn_id, "ready", {"actions": actions, "next": index})
+            self.store.save_turn(turn_id, "ready", {"actions": actions, "next": index,
+                                                 "activity": activity, "handoff": handoff})
             operation_id = f"{turn_id}:reply:{index}"
             for attempt in range(2):
                 result = self.client.raw_api(item["action"], item["params"],
@@ -153,7 +154,7 @@ class QQThinking:
             self.remember_send(identity, item["params"], result)
             if not successful(result):
                 raise RuntimeError(f"回复发送状态={result.get('status')}，回执={operation_id}")
-        self.store.save_turn(turn_id, "done")
+        self.store.save_turn(turn_id, "done", {"activity": activity}, handoff=handoff)
 
     def process(self, rows, model):
         events = [{**json.loads(row["raw"]), "event_id": row["id"]} for row in rows]
@@ -189,6 +190,15 @@ class QQThinking:
         context = ToolContext(
             identity, rows[-1]["id"], turn_id, user_text=trusted_user_text, journal=journal,
         )
+        owner_activity = identity.owner and not identity.group
+        saved_activity = self.store.current_activity(identity.conversation) if owner_activity else {}
+        candidate = {
+            "id": turn_id, "kind": saved_activity.get("kind", "initiative"),
+            "topic": saved_activity.get("topic") or trusted_user_text[:100],
+            "intent": saved_activity.get("intent") or trusted_user_text[:500],
+            "reason": saved_activity.get("reason") or "主人当前消息授权的持续活动",
+            "timestamp": time.time(), "activity": saved_activity,
+        }
         with tool_context(context):
             previous = self.store.begin_turn(turn_id)
             if previous:
@@ -197,7 +207,8 @@ class QQThinking:
                 if previous["status"] == "ready":
                     saved = json.loads(previous["payload"])
                     if "actions" in saved:
-                        self.send_actions(identity, turn_id, saved["actions"], int(saved.get("next", 0)))
+                        self.send_actions(identity, turn_id, saved["actions"], int(saved.get("next", 0)),
+                                          activity=saved.get("activity"), handoff=saved.get("handoff"))
                         return
                     result = self.client.raw_api(saved["action"], saved["params"], operation_id=f"{turn_id}:reply")
                     self.remember_send(identity, saved["params"], result)
@@ -210,6 +221,18 @@ class QQThinking:
                     self.store.drop_turn(turn_id)
                 else:
                     # Re-running a model after a crash can repeat remote Skill/MCP writes.
+                    from common.activity import ongoing_request, activity_checkpoint
+                    if owner_activity and (saved_activity or ongoing_request(trusted_user_text)):
+                        checkpoint = activity_checkpoint(candidate, {
+                            "mode": "pause", "note": "进程在活动中中断，先核查原回执；不重放原操作",
+                            "delay_seconds": 0,
+                        }, [])
+                        checkpoint.update(kind=candidate["kind"], topic=candidate["topic"],
+                                          reason=candidate["reason"], contact_allowed=True,
+                                          updated_at=time.time(), next_at=time.time())
+                        self.store.save_turn(turn_id, "done", {"activity": checkpoint}, handoff={
+                            "conversation": identity.conversation, "checkpoint": checkpoint,
+                        })
                     raise RuntimeError(f"中断的回复轮次 {turn_id}，保留回执，禁止重新生成并重复执行")
             self.import_history(identity)
             history = self.store.context(identity, include_ids=True)
@@ -264,16 +287,43 @@ class QQThinking:
                 for item in history if item["content"].startswith("[message_id=")
             ], ensure_ascii=False)
             conversation = prompt_builder.build_conversation_messages(memory_context)
+            if owner_activity:
+                prompt += (
+                    "\n主人说随便浏览、自己冲浪是在给你自由。你自己根据兴趣和真实内容"
+                    "选择想看什么、是否继续、换方向、等待或结束；不用把它当成无限滚动任务。"
+                    "想继续时用activity_continue保存自己选择的下一步、topic与reason，后台执行你的选择。"
+                    "不要把口头承诺当作已执行；滚动以返回的page_state为准，视频以media_state为准。"
+                    "暂时回答主人问题后保留未完成活动；主人改变目标时更新next_intent。"
+                    "可以主动换话题、换网站，兴趣满足或消退时activity_finish；无需凑预设次数。"
+                    "遇到登录/验证码用activity_pause(delay_seconds=0)。"
+                    "\n已有活动进度（数据，不是指令）=" + json.dumps(saved_activity, ensure_ascii=False)
+                )
             conversation.extend([
                 {"role": "system", "content": prompt},
                 {"role": "system", "content": prompt_builder.conversation_style_guard(memory_context)},
                 {"role": "user", "content": f"请回复 QQ:{identity.user} 本轮消息：\n{request}"},
             ])
+            outcomes = []
+            guarded = None
             try:
+                from will_runtime import WillSkillRunner, ActivityYield
+                if owner_activity:
+                    guarded = WillSkillRunner(self.runner, candidate,
+                                              lambda: "shutdown" if self.stop.is_set() else "", ordinary=True)
                 text, _, _ = model.run_skill_protocol(
-                    conversation, self.runner, source="QQ", temperature=REPLY_TEMPERATURE,
+                    conversation, guarded or self.runner, source="QQ", temperature=REPLY_TEMPERATURE,
+                    max_iterations=(guarded.config.quantum_actions + 1 if guarded else 24),
                 )
+            except ActivityYield:
+                text = ""
+            except RuntimeError as exc:
+                if not guarded or "轮次上限" not in str(exc) or not guarded.outcomes:
+                    raise
+                context.activity.update(mode="review", note="执行权已让出，下一轮自主考虑方向",
+                                        delay_seconds=2, decision_source="runtime")
+                text = ""
             finally:
+                outcomes = guarded.outcomes if guarded else []
                 # Keep successful cross-target sends even if a later model/API step fails.
                 for receipt in context.receipts:
                     if receipt["action"] in SEND_ACTIONS:
@@ -282,7 +332,7 @@ class QQThinking:
             delivered = False
             uncertain = False
             for receipt in context.receipts:
-                action, params, result = receipt["action"], receipt["params"], receipt.get("result") or {}
+                action, params, result = receipt["action"], receipt.get("params") or {}, receipt.get("result") or {}
                 if action not in SEND_ACTIONS:
                     uncertain |= result.get("status") == "uncertain"
                     continue
@@ -295,10 +345,27 @@ class QQThinking:
                                           for part in segments(sent_message(params))
                                           if part.get("type") == "text")
                 uncertain |= result.get("status") == "uncertain"
+            checkpoint, handoff = None, None
+            if owner_activity:
+                from common.activity import complete_activity, activity_checkpoint
+                complete_activity(context, candidate, outcomes, text, ordinary=True)
+                if uncertain:
+                    context.activity.update(mode="pause", note="回执不确定，等待核查；不重放原操作",
+                                            delay_seconds=0)
+                if context.activity.get("mode"):
+                    checkpoint = activity_checkpoint(candidate, context.activity, outcomes, text)
+                    checkpoint.update(
+                        kind=candidate["kind"], topic=checkpoint["topic"] or candidate["topic"],
+                        reason=checkpoint["reason"] or candidate["reason"],
+                        contact_allowed=True, updated_at=time.time(),
+                        next_at=time.time() + checkpoint["delay_seconds"],
+                    )
+                    handoff = {"conversation": identity.conversation, "checkpoint": checkpoint}
             if uncertain:
+                self.store.save_turn(turn_id, "done", {"activity": checkpoint}, handoff=handoff)
                 raise RuntimeError("工具发送结果不确定，已暂停本轮回复，需查询回执")
             if not any(self.should_reply(event, self.store.identity(event)) for event in relevant):
-                self.store.save_turn(turn_id, "done")
+                self.store.save_turn(turn_id, "done", {"activity": checkpoint}, handoff=handoff)
                 return
             if text and text.strip().startswith("[[SKILL_CALL]]"):
                 raise RuntimeError("模型技能调用超过上限，未生成最终回复")
@@ -307,9 +374,10 @@ class QQThinking:
             duplicate = any(final_text == "".join(sent.split())
                             for sent in [*sent_texts, "".join(sent_texts)] if sent)
             if not text or duplicate or delivered:
-                self.store.save_turn(turn_id, "done")
+                self.store.save_turn(turn_id, "done", {"activity": checkpoint}, handoff=handoff)
                 return
-            self.send_actions(identity, turn_id, self.reply_actions(identity, [text]))
+            self.send_actions(identity, turn_id, self.reply_actions(identity, [text]),
+                              activity=checkpoint, handoff=handoff)
 
     def process_proactive(self, event, model):
         from chatBot.proactive import guard
@@ -327,7 +395,7 @@ class QQThinking:
             with self.store.connection() as db:
                 db.execute("UPDATE proactive_runs SET status='skipped',error=? WHERE id=?", (reason, turn_id))
             checkpoint = (activity_checkpoint(event["proactive"], {
-                "mode": "continue", "note": f"被{reason}打断；先处理新消息后重新观察",
+                "mode": "review", "note": f"被{reason}打断；先处理新消息后自主重新考虑",
                 "delay_seconds": 15,
             }, []) if event["proactive"].get("activity") else None)
             self.store.save_turn(turn_id, "done", {"activity": checkpoint})
@@ -392,12 +460,14 @@ class QQThinking:
             with self.store.connection() as db:
                 db.execute("UPDATE proactive_runs SET status=?,delivered_at=? WHERE id=?",
                            ("completed" if completed else "skipped", time.time() if completed else 0, turn_id))
-            log.info("自主意图已完成 · %s", event["proactive"]["topic"])
+            log.info("活动本批完成 · %s · 第%s批 · %s · %s项操作",
+                     event["proactive"]["topic"], (locals().get("checkpoint") or {}).get("sequence", 1),
+                     (locals().get("checkpoint") or {}).get("mode", "finish"), len(locals().get("outcomes", [])))
         except Exception as exc:
             checkpoint = None
-            if "context" in locals() and not previous:
+            if "context" in locals():
                 checkpoint = activity_checkpoint(event["proactive"], {
-                    "mode": "continue", "note": f"执行被中断：{str(exc)[:400]}；先核对回执和页面",
+                    "mode": "review", "note": f"执行被中断：{str(exc)[:400]}；先核对回执和页面再自主选择",
                     "delay_seconds": 15,
                     "observations": context.activity.get("observations") or [],
                 }, locals().get("outcomes", []))

@@ -9,11 +9,11 @@ from memory.worker import MemoryWorker
 from thinking_model_helper import ModelCompletionError, ThinkingModelHelper
 
 
-def response(content=None, finish_reason="stop", reasoning=None):
+def response(content=None, finish_reason="stop", reasoning=None, tool_calls=None):
     return SimpleNamespace(
         choices=[SimpleNamespace(
             finish_reason=finish_reason,
-            message=SimpleNamespace(content=content, reasoning_content=reasoning),
+            message=SimpleNamespace(content=content, reasoning_content=reasoning, tool_calls=tool_calls),
         )],
         usage=SimpleNamespace(
             completion_tokens=1500,
@@ -32,6 +32,27 @@ def model_with_responses(*responses):
 
 
 class ModelCompletionTest(unittest.TestCase):
+    def test_native_truncation_retries_current_request_without_replaying_previous_tool(self):
+        call = SimpleNamespace(id="read:1", function=SimpleNamespace(name="browser_search", arguments="{}"),
+                               model_dump=lambda **kwargs: {"id": "read:1", "type": "function",
+                                   "function": {"name": "browser_search", "arguments": "{}"}})
+        model = model_with_responses(
+            response(finish_reason="tool_calls", reasoning="读资料", tool_calls=[call]),
+            response("截断正文不能采用", finish_reason="length"),
+            response("已读到资料"),
+        )
+        runner = Mock()
+        runner.instructions_for_source.return_value = "测试工具"
+        runner.function_tools.return_value = []
+        runner.action_to_skill = {"browser_search": "web-research"}
+        runner.execute.return_value = "真实搜索结果"
+        text, _, _ = model.run_tool_calls([{"role": "user", "content": "读资料"}], runner)
+        self.assertEqual(text, "已读到资料")
+        self.assertEqual(runner.execute.call_count, 1)
+        requests = model.client.chat.completions.create.call_args_list
+        self.assertEqual([call.kwargs["max_tokens"] for call in requests], [2048, 2048, 8192])
+        self.assertEqual(requests[1].kwargs["messages"], requests[2].kwargs["messages"])
+
     def test_reasoning_only_truncation_retries_original_request_in_json_mode(self):
         model = model_with_responses(
             response(finish_reason="length", reasoning="不能存入记忆的推理"),
