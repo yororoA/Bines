@@ -63,8 +63,10 @@ def compose_command(profile: str, *args: str) -> List[str]:
 
 
 def _environment(profile: str) -> Dict[str, str]:
+    from common.clock import timezone
     env = dict(os.environ)
     env["BINES_PROFILE"] = profile
+    env["BINES_MEMORY_TIMEZONE"] = timezone().key
     env["BUILDX_CONFIG"] = str(BUILDX_CONFIG)
     env.setdefault("BINES_UID", str(os.getuid() if hasattr(os, "getuid") else 1000))
     env.setdefault("BINES_GID", str(os.getgid() if hasattr(os, "getgid") else 1000))

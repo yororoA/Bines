@@ -5,6 +5,7 @@ import math
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from common.clock import clock_message, now
 
 import persona_profile
 from relationship_state import collapse_relationship_level, compute_relationship_weights
@@ -141,7 +142,7 @@ def _profile_block(context: Dict[str, Any], scene: str) -> str:
 def _fmt_time(ts: Optional[float], with_date: bool = True) -> str:
     if not ts:
         return ""
-    return datetime.fromtimestamp(float(ts)).strftime("%Y/%m/%d %H:%M" if with_date else "%H:%M")
+    return now(ts).strftime("%Y/%m/%d %H:%M" if with_date else "%H:%M")
 
 
 def _channel_label(conversation_id: str) -> str:
@@ -274,6 +275,7 @@ def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]
         _profile_block(context, scene),
     ]
     messages = [{"role": "system", "content": "\n\n".join(s for s in system_sections if s)}]
+    messages.append(clock_message())
     recall = _memory_recall_block(context)
     if recall:
         messages.append({"role": "system", "content": recall})
@@ -283,6 +285,9 @@ def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]
 
 
 def format_current_input(user_input: str, now: datetime) -> str:
+    from common.clock import timezone
+    if now.tzinfo is not None:
+        now = now.astimezone(timezone())
     return f"[{now.strftime('%Y/%m/%d %H:%M')}]: [{user_input}]"
 
 

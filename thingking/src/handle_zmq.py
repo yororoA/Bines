@@ -612,7 +612,8 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
         global CURRENT_VISUAL_INFO
         CURRENT_VISUAL_INFO = img_descr if img_descr else "当前眼前一片漆黑，什么也看不见。"
 
-        current_date_obj = datetime.datetime.now()
+        from common.clock import now
+        current_date_obj = now()
         formatted_user_input = prompt_builder.format_current_input(user_input, current_date_obj)
 
         # 本机与 NapCat 消息统一成同一种会话信封；作用域由 Memory Server 按身份映射判定。

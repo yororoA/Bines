@@ -2,6 +2,7 @@
 
 - 人格：唯一来源是 [`thingking/persona/persona.yaml`](thingking/persona/persona.yaml)，生成的可读版本是 [`thingking/persona/PERSONA.md`](thingking/persona/PERSONA.md)。
 - 对话提示词：[`thingking/src/prompt_builder.py`](thingking/src/prompt_builder.py) 按「人格 + 场景约束（本机 / 管理员 QQ 私聊 / 其他私聊 / 群聊）+ 作用域内记忆」组装。
+- 真实时间：[`common/clock.py`](common/clock.py) 统一时间工具、对话时间戳与自主评估；`BINES_MEMORY_TIMEZONE` 默认 `Asia/Shanghai`，启动器同步配置容器 `TZ`。每次对话或工具续轮请求刷新带星期、时区和 UTC 偏移的当前时间；历史消息、日记、网页日期和旧 `current_time` 不作为现在。记忆写入仍使用原始 Unix 时间戳，不改动历史记录。
 - 记忆整合提示词（情节摘要、日记）：[`thingking/src/memory/worker.py`](thingking/src/memory/worker.py)。
 - 自主意愿：[`common/proactive.py`](common/proactive.py) 维护交流、好奇和行动倾向；[`thingking/src/bored_detector.py`](thingking/src/bored_detector.py) 接入桌面，[`chatBot/proactive.py`](chatBot/proactive.py) 接入 QQ；执行复用现有技能。
 

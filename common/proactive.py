@@ -270,8 +270,9 @@ def parse_decision(text, previous_topics=()):
 
 def _complete(system, data, model=None, max_tokens=4096):
     from thinking_model_helper import ThinkingModelHelper
+    from common.clock import clock_message
     return (model or ThinkingModelHelper()).complete_text(
-        [{"role": "system", "content": system},
+        [clock_message(data.get("now")), {"role": "system", "content": system},
          {"role": "user", "content": json.dumps(data, ensure_ascii=False)}],
         temperature=0.7, max_tokens=max_tokens, response_format={"type": "json_object"},
     )

@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
-from zoneinfo import ZoneInfo
+from common.clock import timezone
 
-ZONE = ZoneInfo(os.getenv("BINES_MEMORY_TIMEZONE", "Asia/Shanghai"))
+ZONE = timezone()
 
 CHANNEL_LOCAL = "local"
 CHANNEL_QQ_PRIVATE = "qq_private"

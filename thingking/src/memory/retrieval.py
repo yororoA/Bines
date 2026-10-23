@@ -8,7 +8,7 @@ from datetime import datetime
 
 from .evidence import EvidenceStore, _tokens
 from .lexical_index import query_terms
-from .models import MEMORY_KINDS
+from .models import MEMORY_KINDS, ZONE
 
 log = logging.getLogger("bines.memory.retrieval")
 
@@ -29,7 +29,7 @@ def time_intent(query):
     when = None
     if match:
         try:
-            when = datetime(int(match[1]), int(match[2]), int(match[3] or 1)).timestamp()
+            when = datetime(int(match[1]), int(match[2]), int(match[3] or 1), tzinfo=ZONE).timestamp()
         except ValueError:
             pass
     history = any(word in query for word in ("以前", "曾经", "之前", "历史", "当时", "变化", "为什么"))
@@ -116,7 +116,7 @@ class HybridRetriever:
                 continue
             # 默认透明、确定性的局部重排；可选 CrossEncoder 在有限候选内做语义重排。
             score = scores[key_id] + coverage / (self.settings.retrieval_rrf_constant + 1)
-            if date is not None and datetime.fromtimestamp(date).strftime("%Y-%m") in content:
+            if date is not None and datetime.fromtimestamp(date, ZONE).strftime("%Y-%m") in content:
                 score += 0.002
             row = {**row, "rrf_score": scores[key_id], "score": score,
                    "retrieval_channels": channels[key_id]}

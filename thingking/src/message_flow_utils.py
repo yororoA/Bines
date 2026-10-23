@@ -54,7 +54,10 @@ def build_time_gap_instruction(last_user_ts: Optional[float], user_input: str, c
     try:
         if not last_user_ts:
             return ""
-        last_date_obj = datetime.datetime.fromtimestamp(float(last_user_ts))
+        from common.clock import now
+        last_date_obj = now(last_user_ts)
+        if current_date_obj.tzinfo is not None:
+            current_date_obj = current_date_obj.astimezone(last_date_obj.tzinfo)
         delta_days = (current_date_obj.date() - last_date_obj.date()).days
         wakeup_words = ["你好", "在吗", "醒醒", "启动", "喂", "hi", "hello"]
         is_wakeup = any(w in user_input.lower() for w in wakeup_words)
