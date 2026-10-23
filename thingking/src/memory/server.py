@@ -14,6 +14,8 @@ RPC_METHODS = (
     "ping",
     "record_turn",
     "record_message",
+    "record_experience",
+    "complete_experience_summary",
     "import_gateway_snapshot",
     "build_context",
     "get_state",

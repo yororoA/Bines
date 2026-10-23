@@ -121,11 +121,34 @@ class QQProactive:
         with self.store.connection() as db:
             db.execute("INSERT OR REPLACE INTO proactive_sessions VALUES(?,?)",
                        (conversation, json.dumps(policy.dump(), ensure_ascii=False)))
+        from common.memory_journal import MemoryOutbox, MemoryJournal
+        from chatBot.messages import Identity
+        from chatBot.memory_hub import identity_envelope
+        import hashlib
+        if ":p:u:" not in conversation:
+            return
+        account, user = conversation[3:].split(":p:u:", 1)
+        identity = Identity(account, user, owner=user in self.store.owners)
+        outbox = MemoryOutbox(self.store.path)
+        for outcome in policy.state.recent_outcomes:
+            digest = hashlib.sha256(json.dumps(outcome, sort_keys=True).encode()).hexdigest()
+            ref = "qq-feedback:" + conversation + ":" + digest
+            with outbox.connection() as db:
+                exists = db.execute("SELECT 1 FROM memory_outbox WHERE source_ref=?", (ref,)).fetchone()
+            if not exists:
+                journal = MemoryJournal(outbox, identity_envelope(identity, timestamp=outcome.get("at")),
+                                        ref, autonomous=True, candidate={"topic": outcome.get("topic", "")})
+                journal.capture("autonomous_feedback", {}, outcome, category="feedback",
+                                status="completed", key=ref)
 
     def recover(self, policy, now):
         candidate = policy.state.pending
         if not candidate:
             return
+        self._recover(policy, now)
+
+    def _recover(self, policy, now):
+        candidate = policy.state.pending
         with self.store.connection() as db:
             run = db.execute("SELECT * FROM proactive_runs WHERE id=?", (candidate["id"],)).fetchone()
             operations = db.execute("SELECT * FROM operations WHERE id LIKE ?",

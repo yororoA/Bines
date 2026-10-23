@@ -24,7 +24,8 @@ def search_memory(query: str, k: int = 8):
         "content": hit["content"], "kind": hit["kind"], "day_key": hit.get("day_key"),
         "evidence": [
             {"source_type": ev.get("source_type"), "source_ref": ev.get("source_ref"),
-             "role": ev.get("role"), "content": ev.get("content"), "ts": ev.get("ts")}
+             "role": ev.get("role"), "content": ev.get("content"), "ts": ev.get("ts"),
+             "action": ev.get("action"), "status": ev.get("status"), "urls": ev.get("urls", [])}
             for ev in (hit.get("evidence") or [])[:3]
         ],
     } for hit in hits]
@@ -89,6 +90,11 @@ def update_status(current_location=None, relationship_level=None, relationship_d
     except (TypeError, ValueError):
         return f"状态更新失败：relationship_delta 必须是整数（收到 {relationship_delta!r}）。"
     last_error = ""
+    context = CURRENT_CONTEXT.get()
+    if context.journal and context.identity.local:
+        source_ref = context.journal.prefix + ":user" if not context.autonomous else context.journal.prefix + ":turn"
+    else:
+        source_ref = None
     for _ in range(_MAX_CONFLICT_RETRIES):
         current = client.get_state(scope)
         if expected_version is not None and expected_version != current.get("version"):
@@ -101,7 +107,8 @@ def update_status(current_location=None, relationship_level=None, relationship_d
             important_thing=important_thing,
         )
         try:
-            result = client.put_state(scope, updated, expected_version=current.get("version"))
+            result = client.put_state(scope, updated, expected_version=current.get("version"),
+                                      **({"source_ref": source_ref} if source_ref else {}))
         except RuntimeError as exc:
             if "StateConflict" not in str(exc):
                 raise

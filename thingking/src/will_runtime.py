@@ -6,6 +6,7 @@ import subprocess
 import ast
 
 from common.proactive import intention_prompt
+from common.memory_journal import outcome_status
 
 READ_ACTIONS = {
     "get_time", "search_memory", "browser_search", "web_fetch",
@@ -76,26 +77,35 @@ class WillSkillRunner:
         return getattr(self.runner, name)
 
     def execute(self, command, **kwargs):
+        from tools.context import CURRENT_CONTEXT
+        journal = CURRENT_CONTEXT.get().journal
+        def refused(result):
+            if journal:
+                journal.capture(command.get("action"), command.get("args"), result,
+                                category="tool", status="skipped")
+            return result
         self.called += 1
         if self.called > 8:
-            return "自主行动未执行：本轮操作额度已用完，请结束"
+            return refused("自主行动未执行：本轮操作额度已用完，请结束")
         reason = self.check()
         if reason:
+            refused(f"自主行动已取消：{reason}")
             raise RuntimeError(f"自主行动已取消：{reason}")
         action = command.get("action")
         if not self.candidate.get("contact_allowed") and action in CONTACT_ACTIONS | {"mcp_call"}:
-            return "自主行动未执行：当前只允许不打扰他人的查询或观察"
+            return refused("自主行动未执行：当前只允许不打扰他人的查询或观察")
         if action in DESKTOP_ACTIONS:
             import time
             idle = desktop_idle_seconds() if self.desktop else None
             last_input = time.time() - idle if idle is not None else time.time()
             owned_input = self.last_desktop_action and last_input <= self.last_desktop_action + 0.5
             if idle is None or (idle < 60 and not owned_input):
-                return "自主行动未执行：电脑正在使用或无法确认键鼠空闲"
+                return refused("自主行动未执行：电脑正在使用或无法确认键鼠空闲")
         result = self.runner.execute(command, **kwargs)
         if action in DESKTOP_ACTIONS:
             self.last_desktop_action = time.time()
-        self.outcomes.append({"action": action, "result": str(result)[:2000]})
+        self.outcomes.append({"action": action, "args": command.get("args", {}),
+                              "result": str(result), "status": outcome_status(result)})
         return result
 
 
@@ -127,4 +137,8 @@ def run_intention(model, runner, memory_context, candidate, check, *, source="QQ
     )
     if text and text.startswith("[[SKILL_CALL]]"):
         raise RuntimeError("自主行动轮次未完成，已保留实际操作记录")
+    from tools.context import CURRENT_CONTEXT
+    journal = CURRENT_CONTEXT.get().journal
+    if journal:
+        journal.turn_result = text or ""
     return text or "", guarded.outcomes

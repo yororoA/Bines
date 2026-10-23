@@ -82,6 +82,10 @@ class MemoryService:
         # 时态历史与检索键都是派生层：服务显式挂载，独立仓库使用时不强制迁移。
         self.repo.temporal = TemporalStore(repo)
         self.retriever = HybridRetriever(repo, index, settings)
+        self.repo.conn.execute("""CREATE TABLE IF NOT EXISTS experiences (
+            source_ref TEXT PRIMARY KEY, memory_id TEXT NOT NULL, scope TEXT NOT NULL,
+            record TEXT NOT NULL, revision INTEGER NOT NULL, recorded_at REAL NOT NULL
+        )""")
 
     # ---------- identity ----------
     def sync_identities(self) -> None:
@@ -113,6 +117,88 @@ class MemoryService:
         return start.timestamp(), (start + timedelta(days=1)).timestamp()
 
     # ---------- recording ----------
+    def record_experience(self, envelope: Dict[str, Any], source_ref: str, record: Dict[str, Any],
+                          revision: int = 1) -> Dict[str, Any]:
+        from .experience import normalize, summary, urls
+        record = normalize(record)
+        if not source_ref or type(revision) is not int or revision < 1:
+            raise ValueError("经历需要稳定来源和正整数 revision")
+        with self.repo.transaction():
+            env = self.resolve(envelope)
+            old = self.repo.conn.execute("SELECT * FROM experiences WHERE source_ref=?", (source_ref,)).fetchone()
+            if old:
+                if old["scope"] != env.scope:
+                    raise ValueError("经历来源不可跨作用域重用")
+                if old["revision"] >= revision:
+                    return {"id": old["memory_id"], "status": "duplicate"}
+                if self.repo.get_memory(old["memory_id"])["deleted"]:
+                    return {"id": old["memory_id"], "status": "deleted"}
+            ts = float(record.get("finished_at") or record.get("started_at") or env.timestamp or self.clock())
+            if not math.isfinite(ts):
+                raise ValueError("经历时间必须有限")
+            action = record.get("action") or ""
+            # Retrieval itself is retained as an audit, without duplicating the
+            # returned old memories as new knowledge on every recall.
+            audit_only = action in {"search_memory", "get_time", "update_status", "napcat_discover",
+                                    "napcat_catalog", "mcp_discover"}
+            meta = {"experience_ref": source_ref, "experience_revision": revision,
+                    "source_experience_refs": [source_ref], "turn_id": record.get("turn_id"),
+                    "autonomous": bool(record.get("autonomous")), "action": action,
+                    "status": record["status"], "urls": urls(record), "audit_only": audit_only,
+                    "retrieval": {"keywords": [action, (record.get("candidate") or {}).get("topic", "")]},
+                    "source_message_ids": [], "source_message_refs": record.get("source_message_refs") or []}
+            for ref in record.get("source_message_refs") or []:
+                message = self.repo.conn.execute("SELECT id,origin FROM messages WHERE source_ref=? AND scope=?",
+                                                 (ref, env.scope)).fetchone()
+                if message:
+                    if message["origin"] in {"recalled", "withdrawn", "deleted", "retracted"}:
+                        return {"status": "retracted"}
+                    meta["source_message_ids"].append(message["id"])
+            content = summary(record)
+            if old:
+                memory_id = old["memory_id"]
+                self.repo.update_memory(memory_id, content=content, meta=meta)
+                self.repo.conn.execute("UPDATE memories SET end_ts=? WHERE id=?", (ts, memory_id))
+            else:
+                memory_id = self.repo.add_memory(
+                    KIND_EPISODE, env.scope, content, conversation_id=env.conversation_id,
+                    origin="experience", importance=4 if record["status"] in {"failed", "started"} else 5,
+                    start_ts=float(record.get("started_at") or ts), end_ts=ts, day_key=self._day(ts),
+                    meta=meta, source_ref=source_ref,
+                )
+            self.repo.conn.execute("""INSERT INTO experiences VALUES(?,?,?,?,?,?)
+                ON CONFLICT(source_ref) DO UPDATE SET record=excluded.record,revision=excluded.revision""",
+                (source_ref, memory_id, env.scope, json.dumps(record, ensure_ascii=False), revision, self.clock()))
+            if record["status"] != "started" and not audit_only:
+                self.repo.enqueue_job("summarize_experience", env.scope,
+                    {"source_ref": source_ref, "revision": revision},
+                    dedupe_key=f"experience:{source_ref}:{revision}", conversation_id=env.conversation_id)
+        # Indexing is recoverable and asynchronous; lexical keys work immediately.
+        self.retriever.sync()
+        return {"id": memory_id, "status": "recorded"}
+
+    def complete_experience_summary(self, job_id: int, summary: str, tags: Sequence[str] = ()) -> Dict[str, Any]:
+        job = self._running_job(job_id, "summarize_experience")
+        if not job:
+            return {"status": "ignored"}
+        if not summary.strip():
+            raise ValueError("经历摘要不能为空")
+        with self.repo.transaction():
+            row = self.repo.conn.execute("SELECT * FROM experiences WHERE source_ref=?",
+                                        (job["payload"]["source_ref"],)).fetchone()
+            memory = self.repo.get_memory(row["memory_id"]) if row else None
+            if not row or row["revision"] != job["payload"]["revision"] or memory["deleted"]:
+                self.repo.finish_job(job_id)
+                return {"status": "ignored"}
+            record = json.loads(row["record"])
+            # Action/status remain machine-supplied even if a model misstates the receipt.
+            content = f"Bines经历 · {record.get('action')} · 状态={record['status']}\n{summary.strip()[:2400]}"
+            self.repo.update_memory(memory["id"], content=content, tags=list(tags)[:5])
+            self.repo.finish_job(job_id)
+            self.enqueue_due_diaries()
+        self._index_ids([memory["id"]])
+        return {"status": "done", "id": memory["id"]}
+
     def record_turn(self, envelope: Dict[str, Any], user_text: str = "", assistant_text: str = "",
                     state_update: bool = True) -> Dict[str, Any]:
         with self.repo.transaction():
@@ -181,6 +267,7 @@ class MemoryService:
         invalid = {
             m["id"] for m in memories
             if message["id"] in (m["meta"].get("source_message_ids") or [])
+            or message.get("source_ref") in (m["meta"].get("source_message_refs") or [])
         }
         if message["episode_id"]:
             invalid.add(message["episode_id"])
@@ -292,6 +379,7 @@ class MemoryService:
                 continue
             overlaps_window = (
                 row["kind"] == KIND_EPISODE
+                and row.get("origin") != "experience"
                 and row.get("conversation_id") == conversation_id
                 and window_start is not None
                 and (row.get("end_ts") or 0) >= window_start
@@ -456,6 +544,7 @@ class MemoryService:
         return [
             e for e in self.repo.episodes_for_day(scope, day)
             if e["content"].strip() and not is_system_event(e["content"])
+            and not e["meta"].get("audit_only") and e["meta"].get("status") != "started"
             and e["origin"] not in ("recalled", "withdrawn", "retracted", "deleted", "system", "archived")
         ]
 
@@ -503,8 +592,10 @@ class MemoryService:
             self._last_diary_check = now
             self.enqueue_due_summaries()
             self.enqueue_due_diaries()
+            self.reconcile_index()
         while True:
-            job = self.repo.claim_job(self.settings.job_lease_seconds, kinds=kinds or [JOB_SUMMARIZE, JOB_DIARY])
+            job = self.repo.claim_job(self.settings.job_lease_seconds,
+                                     kinds=kinds or [JOB_SUMMARIZE, JOB_DIARY, "summarize_experience"])
             if job is None:
                 return None
             materials = self._job_materials(job)
@@ -547,6 +638,20 @@ class MemoryService:
         return {} if unsafe else snapshot["data"]
 
     def _job_materials(self, job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if job["kind"] == "summarize_experience":
+            row = self.repo.conn.execute("SELECT * FROM experiences WHERE source_ref=?",
+                                        (job["payload"]["source_ref"],)).fetchone()
+            if not row or row["revision"] != job["payload"]["revision"]:
+                return None
+            memory = self.repo.get_memory(row["memory_id"])
+            if not memory or memory["deleted"]:
+                return None
+            record = json.loads(row["record"])
+            from .experience import text
+            raw = text(record.get("result", ""))
+            # Bound model context; the independently indexed full evidence remains intact.
+            record["result"] = raw if len(raw) <= 18000 else raw[:12000] + "\n[中段省略]\n" + raw[-6000:]
+            return {"scope": row["scope"], "record": record}
         if job["kind"] == JOB_STATE:
             message = self.repo.get_message(int(job["payload"]["message_id"]))
             if not message or not consolidation_candidate(message["role"], message["content"], message["origin"]):
@@ -657,7 +762,18 @@ class MemoryService:
             if not messages:
                 self.repo.finish_job(job["id"])
                 return {"status": "done", "episode_id": None, "scope": scope}
-            fresh_facts = self._fresh_facts(scope, facts)
+            valid_facts = []
+            for fact in facts or ():
+                # A new personal fact requires a real participant's source message.
+                # Legacy callers without predicates remain compatible in ordinary
+                # dialogue; tool/observation-only chunks cannot produce user facts.
+                source_id = fact.get("source_message_id")
+                has_human = any(m["role"] == ROLE_USER and m["origin"] == ORIGIN_LIVE for m in messages)
+                source = next((m for m in messages if str(m["id"]) == str(source_id)
+                               and m["role"] == ROLE_USER and m["origin"] == ORIGIN_LIVE), None)
+                if has_human and (source_id is None or source):
+                    valid_facts.append(fact)
+            fresh_facts = self._fresh_facts(scope, valid_facts)
             message_ids = [m["id"] for m in messages]
             day = messages[0]["day_key"]
             end_ts = max(m["ts"] for m in messages)
@@ -671,7 +787,7 @@ class MemoryService:
             )
             new_ids.append(episode_id)
             self.repo.mark_consolidated_ids(conversation_id, message_ids, episode_id)
-            actors = {m["actor_id"] for m in messages if m["role"] in (ROLE_USER, ROLE_OBSERVED)}
+            actors = {m["actor_id"] for m in messages if m["role"] == ROLE_USER}
             for fact in fresh_facts:
                 subject = str(fact.get("subject") or "").strip()
                 if scope == OWNER_SCOPE and subject in ("", "user"):
@@ -887,6 +1003,7 @@ class MemoryService:
         with self.repo.transaction():
             self.repo.temporal.delete_memory(memory_id)
             deleted = self.repo.delete_memory(memory_id)
+            self.repo.conn.execute("UPDATE experiences SET record='{}' WHERE memory_id=?", (memory_id,))
             self.retriever.sync()
         if deleted and getattr(self.index, "persistent", True):
             try:
@@ -906,7 +1023,14 @@ class MemoryService:
         memories: List[Dict[str, Any]] = []
         for batch in self.repo.all_active_memories():
             memories.extend(m for m in batch if not scopes or m["scope"] in scopes)
-        return {"memories": memories, "state": self.repo.get_state(OWNER_SCOPE), "exported_at": self.clock()}
+        experiences = [
+            {**dict(row), "record": json.loads(row["record"])}
+            for row in self.repo.conn.execute(
+                "SELECT e.* FROM experiences e JOIN memories m ON m.id=e.memory_id WHERE m.deleted=0")
+            if not scopes or row["scope"] in scopes
+        ]
+        return {"memories": memories, "experiences": experiences,
+                "state": self.repo.get_state(OWNER_SCOPE), "exported_at": self.clock()}
 
     def ping(self) -> Dict[str, Any]:
         return {"ok": True, "index_count": self.index.count()}

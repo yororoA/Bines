@@ -222,6 +222,9 @@ context = zmq.Context()
 # 记忆统一由 Memory Server 持有；QQ Thinking 负责所有渠道的整合任务。
 MEMORY_SETTINGS = load_memory_settings()
 memory_client = MemoryClient(HOST, ZMQ_PORTS["RAG_SERVER_REQREP"], context)
+from common.memory_journal import MemoryOutbox, MemoryJournal
+memory_outbox = MemoryOutbox(MEMORY_SETTINGS.data_dir / "desktop_outbox.db")
+memory_outbox.start(memory_client)
 
 # PUB socket 由 Thinking 的监听线程持有；工作线程通过队列递交消息。
 _ZMQ_OUTBOUND_QUEUE = queue.Queue()
@@ -548,6 +551,28 @@ def _qq_merge_enqueue(user_input: str, img_descr: str, source: str, qq_context: 
 
 
 def process_message(user_input, img_descr, source=None, extra_data=None):
+    from tools.context import ToolContext, tool_context
+    from chatBot.messages import LOCAL_IDENTITY
+    import uuid
+    if str(source).lower() == "qq":
+        raise RuntimeError("QQ 对话仅由 qq_thinking.py 处理")
+    turn_id = "desktop:" + uuid.uuid4().hex
+    envelope = envelope_for_turn(source, extra_data, user_input, owner_name=MEMORY_SETTINGS.owner_name).to_dict()
+    journal = MemoryJournal(memory_outbox, envelope, turn_id)
+    user_ref = journal.prefix + ":user"
+    journal.source_message_refs = [user_ref]
+    memory_outbox.record_message(envelope, "user", user_input, user_ref, state_update=False)
+    try:
+        with tool_context(ToolContext(LOCAL_IDENTITY, turn_id=turn_id, journal=journal)):
+            return _process_message(user_input, img_descr, source, extra_data)
+    finally:
+        memory_outbox.record_message(envelope, "user", user_input, user_ref,
+                                     state_update=not getattr(journal, "state_updated", False))
+
+
+def _process_message(user_input, img_descr, source=None, extra_data=None):
+    from tools.context import CURRENT_CONTEXT
+    journal = CURRENT_CONTEXT.get().journal
     if str(source).lower() == "qq":
         raise RuntimeError("QQ 对话仅由 qq_thinking.py 处理")
     # 【新增】设置全局状态标签：开始处理对话
@@ -652,6 +677,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         is_realtime_screen_active = False
         rt_text = read_realtime_screen_analysis_if_enabled(REALTIME_SCREEN_PATHS)
         if rt_text:
+            if journal:
+                journal.capture("realtime_screen_observation", {}, rt_text)
             # 【修改】强化 Prompt，明确告知模型已获得最新画面，无需再次调用工具
             context_messages.append({"role": "system", "content": f"【实时屏幕分析（已是最新画面）】\n{rt_text}\n(系统提示：上述内容就是本轮最新屏幕结果。不要重复调用屏幕或视觉技能，直接使用这些信息回答。)"})
             is_realtime_screen_active = True
@@ -662,6 +689,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         if is_realtime_screen_active:
             current_content = f"{formatted_user_input}"
         elif img_descr and len(img_descr.strip()) > 1 and "暂无" not in img_descr:
+             if journal:
+                 journal.capture("cached_environment_observation", {"cached": True}, img_descr)
              current_content = f"{formatted_user_input}。(注意：系统提供的[用户当前环境解析]是基于历史画面的缓存，可能已过时。如果用户要求你此时观看、确认或描述，请务必调用视觉工具重新获取实时画面！\n缓存环境解析:{img_descr})"
         else:
              current_content = f"{formatted_user_input}"
@@ -706,8 +735,11 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         # 所有渠道统一写入记忆；QQ 只记录实际发出去的回复。
         assistant_memory = sent_qq_reply if qq_ctx else ("" if _is_only_action_or_empty(to_save) else to_save)
         try:
-            memory_client.record_turn(envelope, user_text=memory_text, assistant_text=assistant_memory,
-                                      state_update=not stream_result.get("state_updated", False))
+            journal.state_updated = bool(stream_result.get("state_updated", False))
+            journal.turn_result = assistant_memory
+            journal.turn_status = ("failed" if stream_result.get("error") else
+                                   "interrupted" if exited_due_to_interrupt else "completed")
+            memory_outbox.record_message(envelope, "assistant", assistant_memory, journal.prefix + ":assistant")
         except Exception as mem_err:
             print(f"[Thinking] 写入记忆失败: {mem_err}", flush=True)
 
@@ -728,6 +760,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             pass
 
     except Exception as e:
+        if journal:
+            journal.turn_status, journal.turn_result = "failed", str(e)
         print(f"[Thinking] [Error] {str(e)}", flush=True)
         traceback.print_exc()
         # 发生错误时，务必发送结束信号
@@ -974,6 +1008,8 @@ def start_zmq_listener():
                                             LOCAL_IDENTITY, turn_id="will:" + candidate["id"],
                                             autonomous=True, contact_allowed=candidate.get("contact_allowed", True),
                                             check=check,
+                                            journal=MemoryJournal(memory_outbox, envelope, "will:" + candidate["id"],
+                                                                  autonomous=True, candidate=candidate),
                                         )
                                         with tool_context(will_context):
                                             text, outcomes = run_intention(
@@ -987,23 +1023,31 @@ def start_zmq_listener():
                                             for receipt in will_context.receipts)
                                         if contacted:
                                             status = "sent"
-                                        elif candidate["kind"] == "connection" and text and not check():
+                                        desktop_spoken = False
+                                        if not contacted and candidate["kind"] == "connection" and text and not check():
                                             zmq_send(text, enable_audio=True)
                                             zmq_send("", cough="end", origin=text)
                                             status = "sent"
-                                        elif any(outcome_succeeded(item) for item in outcomes):
+                                            desktop_spoken = True
+                                        elif not contacted and any(outcome_succeeded(item) for item in outcomes):
                                             status = "completed"
                                         # Internal opportunity is never recorded as a person's speech.
                                         try:
-                                            memory_client.record_turn(
-                                                envelope, user_text="", assistant_text=text if status == "sent" else "",
-                                                state_update=False,
-                                            )
+                                            if desktop_spoken:
+                                                memory_outbox.record_message(
+                                                    envelope, "assistant", text,
+                                                    will_context.journal.prefix + ":assistant", state_update=False)
                                         except Exception as mem_err:
                                             logger.warning("主动消息记忆写入失败: %s", mem_err)
                                 except Exception as exc:
                                     reason = str(exc)
+                                    status = "failed"
                                 finally:
+                                    envelope = envelope_for_turn(None, None, "", owner_name=MEMORY_SETTINGS.owner_name).to_dict()
+                                    journal = MemoryJournal(memory_outbox, envelope, "will:" + str(candidate.get("id")),
+                                                            autonomous=True, candidate=candidate)
+                                    journal.capture("autonomous_turn", {}, {"reflection": text, "reason": reason},
+                                                    category="turn", status=status, key=journal.prefix + ":turn")
                                     result = {"id": candidate.get("id"), "timestamp": time.time(),
                                               "status": status, "reason": reason, "reflection": text[:2000]}
                                     # The acknowledgement follows the output on the same listener

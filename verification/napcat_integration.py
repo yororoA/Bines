@@ -858,8 +858,9 @@ assert not any(m in sys.modules for m in ['cv2','torch','zmq','selenium','pyauto
                 action, payload = self.api.calls[-1]
                 self.assertEqual(action, "send_group_msg" if group else "send_private_msg")
                 self.assertEqual(payload["message"], [{"type": "reply", "data": {"id": "21"}}, *chain])
-                self.assertEqual(len(self.store.context(identity, include_ids=True)), 1)
+                self.assertEqual(len(self.store.context(identity, include_ids=True)), 2)
                 self.assertIn("message_id=21", str(self.store.context(identity, include_ids=True)))
+                self.assertIn("图片和说明", self.store.context(identity, include_ids=True)[-1]["content"])
 
     def test_custom_image_sticker_and_market_face(self):
         for group in (None, "10"):

@@ -24,6 +24,7 @@ def run_main_agent_rounds(
     exited_due_to_interrupt = False
     last_skill_result = ""
     state_updated = False
+    error = ""
 
     def send_text(text: str, segment_state: dict) -> None:
         for char in text:
@@ -102,6 +103,7 @@ def run_main_agent_rounds(
                     pending_prefix = ""
 
         if exited_due_to_interrupt:
+            final_text = "".join(full_response).strip() if normal_mode else ""
             if normal_mode and segment_state["buffer"].strip():
                 segment = segment_state["buffer"].strip()
                 if not is_only_action_or_empty(segment):
@@ -110,6 +112,8 @@ def run_main_agent_rounds(
             break
 
         raw_response = "".join(full_response)
+        if holder.get("error"):
+            error = str(holder["error"])
         if not normal_mode and not directive_mode:
             # Short response was a prefix of the marker, but never completed it.
             normal_mode = True
@@ -154,4 +158,5 @@ def run_main_agent_rounds(
         "full_raw_response": final_text,
         "exited_due_to_interrupt": exited_due_to_interrupt,
         "state_updated": state_updated,
+        "error": error,
     }

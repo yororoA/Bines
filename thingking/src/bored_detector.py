@@ -42,6 +42,18 @@ def main():
     except (OSError, ValueError):
         saved = {}
     policy = ProactivePolicy(time.time(), state=saved)
+    from common.memory_journal import MemoryOutbox, MemoryJournal
+    from memory.channels import local_envelope
+    outbox = MemoryOutbox(directory / "desktop_outbox.db")
+    outbox.start(memory)
+    for index, outcome in enumerate(saved.get("recent_outcomes") or []):
+        ref = f"desktop-feedback:{outcome.get('at')}:{index}"
+        with outbox.connection() as db:
+            exists = db.execute("SELECT 1 FROM memory_outbox WHERE source_ref=?", (ref,)).fetchone()
+        if not exists:
+            journal = MemoryJournal(outbox, local_envelope("", timestamp=outcome.get("at")).to_dict(),
+                                    ref, autonomous=True, candidate={"topic": outcome.get("topic", "")})
+            journal.capture("autonomous_feedback", {}, outcome, status="completed", category="feedback", key=ref)
 
     def save():
         temporary = path.with_suffix(".tmp")
@@ -56,6 +68,10 @@ def main():
                 frames = results.recv_multipart()
                 result = json.loads(frames[1])
                 if result.get("id") == policy.state.pending.get("id"):
+                    journal = MemoryJournal(outbox, local_envelope("").to_dict(), result["id"],
+                                            autonomous=True, candidate=policy.state.pending)
+                    journal.capture("autonomous_feedback", {}, result, status="completed",
+                                    category="feedback", key=journal.prefix + ":feedback")
                     if result.get("status") == "sent":
                         policy.state.pending["contacted"] = True
                     policy.resolve(float(result.get("timestamp") or time.time()),

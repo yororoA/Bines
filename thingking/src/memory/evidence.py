@@ -119,7 +119,10 @@ def _short_evidence(text: str, query: str, limit: int = 480) -> str:
     terms = set(_tokens(query))
     pieces = list(_chunks(text))
     selected = max(pieces, key=lambda part: len(terms.intersection(_tokens(part)))) if pieces else text
-    return selected[:limit]
+    matching = sorted((term for term in terms if len(term) > 1 and term in selected.lower()), key=len, reverse=True)
+    position = selected.lower().find(matching[0]) if matching else 0
+    start = max(0, min(position - limit // 3, len(selected) - limit))
+    return selected[start:start + limit]
 
 
 def _expansions(meta: Mapping[str, Any]) -> List[Tuple[str, str]]:
@@ -146,6 +149,8 @@ def _expansions(meta: Mapping[str, Any]) -> List[Tuple[str, str]]:
 def _active(row: Mapping[str, Any], source_type: str, *, include_archived: bool = False) -> bool:
     text = row.get("content") or ""
     meta = _object(row.get("meta"))
+    if source_type == "memory" and meta.get("audit_only"):
+        return False
     if not text.strip() or text.strip().lower() in _RECALLED or is_system_event(text):
         return False
     if source_type == "message" and row.get("role") not in ROLES:
@@ -233,7 +238,12 @@ class EvidenceStore:
             if isinstance(tags, list):
                 context.extend(tag for tag in tags if isinstance(tag, str))
         prefix = "m" if source_type == "memory" else "u"
-        for chunk_index, chunk in enumerate(_chunks(row["content"])):
+        source_text = row["content"]
+        experience = self._experience_record(row) if source_type == "memory" else None
+        if experience:
+            from .experience import text
+            source_text += "\n" + text(experience.get("args", {})) + "\n" + text(experience.get("result", ""))
+        for chunk_index, chunk in enumerate(_chunks(source_text)):
             yield {
                 "id": f"{prefix}:{row['id']}:{chunk_index}",
                 "scope": row["scope"],
@@ -252,6 +262,53 @@ class EvidenceStore:
                     "expansion_sources": sorted({path for path, _ in expansions}),
                 }),
             }
+
+    def _experience_record(self, memory):
+        ref = _object(memory.get("meta")).get("experience_ref")
+        if not ref:
+            return None
+        row = self.conn.execute("SELECT record FROM experiences WHERE source_ref=? AND scope=?",
+                                (ref, memory["scope"])).fetchone()
+        return json.loads(row["record"]) if row else None
+
+    def _experience_evidence(self, memory, query, limit):
+        from .experience import text, urls
+        scope = memory["scope"]
+        pending, seen, evidence = [memory], set(), []
+        while pending:
+            current = pending.pop()
+            if current["id"] in seen:
+                continue
+            seen.add(current["id"])
+            meta = _object(current.get("meta"))
+            refs = list(meta.get("source_experience_refs") or [])
+            if meta.get("experience_ref"):
+                refs.append(meta["experience_ref"])
+            for ref in dict.fromkeys(refs):
+                row = self.conn.execute(
+                    "SELECT e.* FROM experiences e JOIN memories m ON m.id=e.memory_id "
+                    "WHERE e.source_ref=? AND e.scope=? AND m.scope=? AND m.deleted=0", (ref, scope, scope),
+                ).fetchone()
+                if not row:
+                    continue
+                record = json.loads(row["record"])
+                evidence.append({
+                    "source_type": "experience", "source_id": row["memory_id"], "source_ref": ref,
+                    "role": None, "actor_id": "assistant", "scope": scope,
+                    "action": record.get("action"), "status": record.get("status"),
+                    "args": record.get("args"), "urls": urls(record),
+                    "content": _short_evidence(text(record.get("result", "")), query),
+                    "ts": record.get("finished_at") or record.get("started_at"),
+                    "autonomous": record.get("autonomous", False),
+                })
+            for ref in [*(meta.get("episode_ids") or []), *(meta.get("source_memory_ids") or [])]:
+                linked = self.conn.execute("SELECT * FROM memories WHERE id=? AND scope=? AND deleted=0",
+                                           (ref, scope)).fetchone()
+                if linked:
+                    pending.append(dict(linked))
+        terms = set(_tokens(query))
+        evidence.sort(key=lambda row: -len(terms.intersection(_tokens(row["content"]))))
+        return list({row["source_ref"]: row for row in evidence}.values())[:limit]
 
     def sync(self) -> Dict[str, int]:
         """Incrementally upsert/prune keys and repair FTS from current sources.
@@ -473,14 +530,18 @@ class EvidenceStore:
                     clause += " AND conversation_id = ?"
                     params.append(conversation_id)
                 clauses.append(f"({clause})")
-            if not clauses:
-                continue
-            for raw in self.conn.execute(
-                f"SELECT * FROM messages WHERE scope = ? AND ({' OR '.join(clauses)})", params,
-            ):
-                message = dict(raw)
-                if _active(message, "message", include_archived=True):
-                    messages[message["id"]] = message
+            if clauses:
+                for raw in self.conn.execute(
+                    f"SELECT * FROM messages WHERE scope = ? AND ({' OR '.join(clauses)})", params,
+                ):
+                    message = dict(raw)
+                    if _active(message, "message", include_archived=True):
+                        messages[message["id"]] = message
+            for ref in [*(meta.get("episode_ids") or []), *(meta.get("source_memory_ids") or [])]:
+                linked = self.conn.execute("SELECT * FROM memories WHERE id=? AND scope=? AND deleted=0",
+                                           (ref, scope)).fetchone()
+                if linked and _active(dict(linked), "memory"):
+                    pending.append(dict(linked))
         return list(messages.values())
 
     def evidence(
@@ -505,18 +566,25 @@ class EvidenceStore:
             source = dict(self.conn.execute(
                 f"SELECT * FROM {table} WHERE id = ? AND scope = ?", (current[field], current["scope"]),
             ).fetchone())
+            experience_evidence = (self._experience_evidence(source, query, limit)
+                                   if source_type == "memory" else [])
             messages = [source] if source_type == "message" else self._memory_messages(source)
             if messages:
                 terms = set(_tokens(query))
                 messages.sort(key=lambda row: (
                     -len(terms.intersection(_tokens(row["content"]))), row["ts"], row["id"],
                 ))
-                return [{
+                message_evidence = [{
                     "source_type": "message", "source_id": row["id"],
                     "source_ref": row.get("source_ref") or f"messages:{row['id']}",
                     "role": row["role"], "actor_id": row["actor_id"], "content": _short_evidence(row["content"], query),
                     "ts": row["ts"], "scope": row["scope"],
                 } for row in messages[:limit]]
+                combined = message_evidence + experience_evidence
+                combined.sort(key=lambda ev: -len(terms.intersection(_tokens(ev["content"]))))
+                return combined[:limit]
+            if experience_evidence:
+                return experience_evidence
             return [{
                 "source_type": "legacy_memory" if source.get("origin") == ORIGIN_LEGACY else "summary",
                 "source_id": source["id"],

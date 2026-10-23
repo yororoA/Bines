@@ -20,7 +20,7 @@ def query_terms(text):
     text = re.sub(r"([唱听看玩])过", r"\1 ", text)
     text = re.sub(r"[的了呢吗啊？?！!]", " ", text)
     words = re.findall(r"[\w]+", text)
-    return set().union(*(_terms(word) for word in words)) if words else set()
+    return set().union(*(set([word]) if word.isascii() else _terms(word) for word in words)) if words else set()
 
 
 class LexicalIndex:

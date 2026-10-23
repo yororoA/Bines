@@ -379,6 +379,12 @@ class SkillRunner:
         source: str | None = None,
         allowed_skills: Iterable[str] | None = None,
     ) -> str:
+        from tools.context import CURRENT_CONTEXT
+        journal = CURRENT_CONTEXT.get().journal
+        execute = lambda: self._execute(command, source=source, allowed_skills=allowed_skills)
+        return journal.execute(command, execute) if journal else execute()
+
+    def _execute(self, command, *, source=None, allowed_skills=None):
         skill_name = command.get("skill")
         action = command.get("action")
         args = command.get("args")

@@ -61,8 +61,31 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     ).get("last_owner_activity") or {}
                     dispatch_allowed(service.store, event, data["action"], data.get("params", {}),
                                      data.get("operation_id"), central_activity=float(activity.get("ts") or 0))
-                result = service.call(identity, data["action"], data.get("params", {}),
-                                      data.get("operation_id"), data.get("timeout", 30))
+                journal, entry = None, None
+                if self.server.memory_hub and data["action"] not in {"get_friend_msg_history", "get_group_msg_history"}:
+                    from common.memory_journal import MemoryJournal
+                    from chatBot.memory_hub import identity_envelope
+                    turn_id = data.get("operation_id") or event_id or "local-api"
+                    if ":tool:" in turn_id:
+                        turn_id = turn_id.split(":tool:", 1)[0]
+                    elif ":reply:" in turn_id:
+                        turn_id = turn_id.split(":reply:", 1)[0]
+                    journal = MemoryJournal(self.server.memory_hub.outbox, identity_envelope(identity),
+                        turn_id, autonomous=event.get("post_type") == "bines_proactive",
+                        candidate=event.get("proactive"), event_ids=[event_id] if event_id else [])
+                    operation_id = data.get("operation_id")
+                    entry = journal.begin({"action": data["action"], "args": data.get("params", {})},
+                        key=journal.prefix + ":native:" + operation_id if operation_id else None)
+                try:
+                    result = service.call(identity, data["action"], data.get("params", {}),
+                                          data.get("operation_id"), data.get("timeout", 30))
+                except BaseException as exc:
+                    if journal:
+                        journal.finish(entry, str(exc), status="uncertain")
+                    raise
+                if journal:
+                    journal.finish(entry, result)
+                    self.server.memory_hub.remember_receipt(identity, data["action"], data.get("params", {}), result)
             elif self.path == "/quoted_message":
                 result = service.quoted_message(identity, event_id, data.get("message_id"))
             elif self.path == "/operation":

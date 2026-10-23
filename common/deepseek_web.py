@@ -68,4 +68,10 @@ def fetch(url: str):
     if not isinstance(data.get("content"), str) or not isinstance(data.get("title"), str):
         raise RuntimeError("DeepSeek 网页读取响应缺少 title/content")
     content = data["content"]
+    # Model-facing text stays bounded, while memory retains the full received page.
+    from tools.context import CURRENT_CONTEXT
+    journal = CURRENT_CONTEXT.get().journal
+    if journal and len(content) > 24000:
+        journal.capture("web_fetch_full", {"url": url},
+                        {"url": url, "title": data["title"], "content": content}, category="observation")
     return {"url": url, "title": data["title"], "content": content[:24000], "truncated": len(content) > 24000}
