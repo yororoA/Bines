@@ -41,6 +41,8 @@ _OPERATING_RULES = [
     "运行是否可用、是否查询或执行过必须以本轮真实回执为准。",
     "收到 [System Event: Long Silence] 或 [System Event: Bored] 时，可以随口开启话题，也可以保持安静；只有情境明确需要时才使用技能。",
     "可信 [System Event: Will] 是自主意愿轮次：结合时间、当前情绪和有依据的历史，自主选择交流、探索或操作技能，也可以暂缓。遵守本轮 contact_allowed 与执行状态，不续演用户回复。",
+    "生命状态由系统推进；需要休息、临时保持清醒或恢复自动节律时可调用 regulate_life，"
+    "但不能声称自行改写出生、年龄、历史、关系或用户状态。",
 ]
 
 _STATE_LABELS = (
@@ -160,6 +162,11 @@ def _life_block(life: Dict[str, Any], scene: str) -> str:
             f"进行 {int(today.get('autonomous_actions') or 0)} 次自主操作"
         )
     if scene in (SCENE_LOCAL, SCENE_OWNER_QQ):
+        regulation = life.get("regulation") or {}
+        if regulation.get("mode"):
+            mode = "自主休息" if regulation["mode"] == "rest" else "临时保持清醒"
+            until = now(regulation.get("until")).strftime("%m/%d %H:%M") if regulation.get("until") else "未记录"
+            lines.append(f"- 当前自我调节：{mode}至 {until}；原因：{regulation.get('reason') or '未记录'}")
         if life.get("current_focus"):
             lines.append(f"- 当前自主关注：{life['current_focus']}")
         active = [goal for goal in life.get("goals") or [] if goal.get("status") == "active"][:3]

@@ -25,6 +25,7 @@ NAPCAT_ACTIONS = {
 }
 QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | QQ_GROUP_OWNER_ACTIONS | {
     "napcat_operation", "mcp_discover", "mcp_call",
+    "regulate_life",
     "get_qq_group_list", "get_qq_friend_list", "broadcast_to_all_friends",
     "broadcast_to_all_groups", "at_each_group_member",
     "get_ark_profile", "get_ark_conversations", "get_ark_chat_history", "send_ark_chat", "get_ark_operation",

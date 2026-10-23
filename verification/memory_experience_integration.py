@@ -154,6 +154,32 @@ class ExperienceIntegration(MemoryMergeIntegration):
             owner = self.memory.life_snapshot("qq:99:group:10")
         self.assertIn("管理员私密生命目标", json.dumps(owner, ensure_ascii=False))
 
+    def test_life_regulation_is_owner_private_event_bound_and_woken_by_message(self):
+        owner_context = self.context(event("1", msg_id=124, text="你可以休息一下"))
+        with tool_context(owner_context):
+            first = self.memory.regulate_life(
+                "qq:forged:group:999", "rest", 30, "连续处理任务后自主休息", "model-forged"
+            )
+            duplicate = self.memory.regulate_life(
+                "owner", "rest", 120, "重试不能延长", "different-model-ref"
+            )
+        self.assertEqual(first["status"], "updated")
+        self.assertEqual(first["life"]["phase"], "resting")
+        self.assertEqual(duplicate["status"], "duplicate")
+        self.assertEqual(duplicate["life"]["regulation"]["until"],
+                         first["life"]["regulation"]["until"])
+        for ev in (event("2", msg_id=125), event("1", group="10", msg_id=126)):
+            with tool_context(self.context(ev)), self.assertRaises(RuntimeError):
+                self.memory.regulate_life(
+                    "owner", "wake", 30, "不应获得全局生命周期权限", "forged"
+                )
+        self.context(event("1", msg_id=127, text="现在醒醒"))
+        self.hub.sync()
+        with tool_context(self.context(event("1", msg_id=128))):
+            life = self.memory.life_snapshot("owner")
+        self.assertNotEqual(life["phase"], "resting")
+        self.assertEqual(life["regulation"], {})
+
     def test_retrieval_audit_does_not_duplicate_old_memory(self):
         journal, _ = self.journal()
         journal.capture("search_memory", {"query": "麒麟座"}, [{"content": "麒麟座旧资料"}], category="tool")

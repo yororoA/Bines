@@ -83,7 +83,7 @@ def compact_life(life):
     return {
         key: life.get(key)
         for key in ("day_number", "phase", "phase_label", "energy", "sleep_pressure",
-                    "today", "current_focus")
+                    "today", "current_focus", "regulation")
         if life.get(key) not in (None, "")
     } | {
         "active_goals": [
@@ -230,7 +230,7 @@ class ProactivePolicy:
         kinds = self.eligible_kinds(now, user)
         state.value = max((state.drives[k] for k in kinds), default=0) * 100
         idle_since = max(float((user or {}).get("ts") or 0), float(last_activity or 0))
-        blocked = (not available or not ref or changed or phase == "sleeping"
+        blocked = (not available or not ref or changed or phase in {"sleeping", "resting"}
                    or now - idle_since < config.min_idle
                    or state.pending or now - self.started < config.startup_grace
                    or now < state.next_decision)
@@ -324,7 +324,7 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
         f"角色基础性格：{persona_profile.brief()}\n"
         "这是可信自主意愿评估，没有新用户提问。结合意愿强度、时间、情绪、历史兴趣及行动结果，"
         "决定现在是否真想做一件具体的事，也可以继续安静。生命状态包含真实昼夜阶段、精力、"
-        "睡眠压力、当天经历和未完成目标；睡眠阶段保持休息，不制造行动。"
+        "睡眠压力、当天经历和未完成目标；睡眠或自主休息阶段保持安静，不制造行动。"
         "connection=主动交流；curiosity=自主探索或查资料；initiative=主动操作可用应用或NapCat。"
         "无人回复、告别或夜间时，不通过其他类别绕过联系限制；可以不打扰地查资料或观察。"
         "QQ轻量环境没有桌面键鼠能力；desktop环境可使用当前启用的桌面技能。"

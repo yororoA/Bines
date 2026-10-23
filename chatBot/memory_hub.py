@@ -247,6 +247,16 @@ class MemoryHub:
                     params["scope"] = identity.state_scope
                 elif method == "life_snapshot":
                     params["scope"] = identity.scope
+                elif method == "regulate_life":
+                    if not identity.privileged or not event_id:
+                        raise PermissionError("生命周期自我调节仅允许本机或主人私聊的可信轮次")
+                    params = {
+                        "scope": identity.scope,
+                        "mode": params.get("mode"),
+                        "duration_minutes": params.get("duration_minutes", 0),
+                        "reason": params.get("reason", ""),
+                        "source_ref": f"{self.source}:life-regulation:{event_id}",
+                    }
                 elif method == "search":
                     params["scopes"] = [identity.scope]
                     params["k"] = max(1, min(int(params.get("k", 8)), 20))

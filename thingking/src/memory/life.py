@@ -33,6 +33,7 @@ _SCHEMA = (
 
 _PHASE_LABELS = {
     "sleeping": "睡眠",
+    "resting": "自主休息",
     "night_awake": "夜间清醒",
     "waking": "苏醒",
     "active": "清醒活动",
@@ -51,6 +52,12 @@ class LifeConfig:
     wake_hour: int = 8
     wake_window_hours: int = 2
     wind_down_hours: int = 2
+    auto_rest_energy: float = 0.18
+    auto_rest_pressure: float = 0.88
+    auto_rest_minutes: int = 90
+    max_rest_minutes: int = 480
+    max_wake_minutes: int = 240
+    regulation_cooldown_seconds: int = 300
 
     @classmethod
     def from_env(cls):
@@ -61,11 +68,27 @@ class LifeConfig:
                                     os.getenv("BINES_PROACTIVE_QUIET_END", "8"))),
             wake_window_hours=int(os.getenv("BINES_LIFE_WAKE_WINDOW", "2")),
             wind_down_hours=int(os.getenv("BINES_LIFE_WIND_DOWN", "2")),
+            auto_rest_energy=float(os.getenv("BINES_LIFE_AUTO_REST_ENERGY", "0.18")),
+            auto_rest_pressure=float(os.getenv("BINES_LIFE_AUTO_REST_PRESSURE", "0.88")),
+            auto_rest_minutes=int(os.getenv("BINES_LIFE_AUTO_REST_MINUTES", "90")),
+            max_rest_minutes=int(os.getenv("BINES_LIFE_MAX_REST_MINUTES", "480")),
+            max_wake_minutes=int(os.getenv("BINES_LIFE_MAX_WAKE_MINUTES", "240")),
+            regulation_cooldown_seconds=int(os.getenv("BINES_LIFE_REGULATION_COOLDOWN", "300")),
         )
         if any(not 0 <= value < 24 for value in (config.sleep_start, config.wake_hour)):
             raise ValueError("生命作息小时必须在 0 到 23 之间")
         if not 1 <= config.wake_window_hours <= 6 or not 1 <= config.wind_down_hours <= 6:
             raise ValueError("苏醒与准备休息窗口必须在 1 到 6 小时之间")
+        if not 0.05 <= config.auto_rest_energy <= 0.5:
+            raise ValueError("自动休息精力阈值必须在 0.05 到 0.5 之间")
+        if not 0.5 <= config.auto_rest_pressure <= 0.98:
+            raise ValueError("自动休息压力阈值必须在 0.5 到 0.98 之间")
+        if not 5 <= config.auto_rest_minutes <= config.max_rest_minutes <= 12 * 60:
+            raise ValueError("自动/最长休息时长配置无效")
+        if not 5 <= config.max_wake_minutes <= 8 * 60:
+            raise ValueError("最长清醒时长配置无效")
+        if not 0 <= config.regulation_cooldown_seconds <= 3600:
+            raise ValueError("生命周期调节冷却必须在 0 到 3600 秒之间")
         return config
 
 
@@ -103,6 +126,7 @@ def _energy_delta(phase: str, seconds: float) -> tuple[float, float]:
     hours = seconds / 3600
     rates = {
         "sleeping": (0.11, -0.13),
+        "resting": (0.085, -0.105),
         "night_awake": (-0.07, 0.09),
         "waking": (0.035, -0.025),
         "active": (-0.026, 0.035),
@@ -161,6 +185,9 @@ class LifeLedger:
             "last_sleep_at": now if phase == "sleeping" else 0,
             "last_wake_at": now if phase != "sleeping" else 0,
             "wake_cycles": 0 if phase == "sleeping" else 1,
+            "regulation": {},
+            "last_regulation_at": 0,
+            "last_regulation_source": "",
             "transitions": [{"phase": phase, "at": now}],
             "_version": 0,
         }
@@ -191,6 +218,31 @@ class LifeLedger:
         ).fetchone()
         return float(row["ts"] or 0)
 
+    @staticmethod
+    def _regulation_at(state: Dict[str, Any], moment: float, last_human: float) -> Dict[str, Any]:
+        regulation = state.get("regulation") or {}
+        try:
+            active = float(regulation.get("set_at") or 0) <= moment < float(regulation.get("until") or 0)
+        except (TypeError, ValueError):
+            return {}
+        if not active:
+            return {}
+        # A real incoming message wakes Bines from either automatic or chosen
+        # rest. A wake override remains valid while talking.
+        if (regulation.get("mode") == "rest"
+                and float(regulation.get("set_at") or 0) < last_human <= moment):
+            return {}
+        return regulation
+
+    def _effective_phase(self, moment: float, last_human: float,
+                         state: Dict[str, Any]) -> str:
+        regulation = self._regulation_at(state, moment, last_human)
+        if regulation.get("mode") == "rest":
+            return "resting"
+        if regulation.get("mode") == "wake":
+            return "active"
+        return _phase(moment, last_human, self.config)
+
     def _advance(self, now: float, *, force: bool = False) -> Dict[str, Any]:
         state = self._load(now)
         old_born_at = float(state.get("born_at") or now)
@@ -204,28 +256,55 @@ class LifeLedger:
         pressure = _number(state.get("sleep_pressure"), 0.28)
         last_human = self._last_human_at(now)
         last_action = self._last_action_at(now)
+        regulation_before = dict(state.get("regulation") or {})
         while cursor < now:
             end = min(now, cursor + 3600)
-            phase = _phase((cursor + end) / 2, last_human, self.config)
+            phase = self._effective_phase((cursor + end) / 2, last_human, state)
             energy_delta, pressure_delta = _energy_delta(phase, end - cursor)
             energy = _number(energy + energy_delta, energy)
             pressure = _number(pressure + pressure_delta, pressure)
             cursor = end
-        previous = state.get("phase") or _phase(last_tick, last_human, self.config)
-        current = _phase(now, last_human, self.config)
+        regulation = self._regulation_at(state, now, last_human)
+        if (regulation.get("source") == "automatic" and regulation.get("mode") == "rest"
+                and energy >= 0.75 and pressure <= 0.25):
+            regulation = {}
+        base_phase = _phase(now, last_human, self.config)
+        human_is_active = 0 <= now - last_human < 20 * 60
+        if (not regulation and base_phase != "sleeping" and not human_is_active
+                and (energy <= self.config.auto_rest_energy
+                     or pressure >= self.config.auto_rest_pressure)):
+            regulation = {
+                "mode": "rest",
+                "source": "automatic",
+                "reason": "精力过低或睡眠压力过高，自动进入恢复性休息",
+                "set_at": now,
+                "until": now + self.config.auto_rest_minutes * 60,
+                "source_ref": f"auto-rest:{int(now // 300)}",
+            }
+            state["last_regulation_at"] = now
+            state["last_regulation_source"] = "automatic"
+            self._put_event(
+                "life-regulation:" + regulation["source_ref"], OWNER_SCOPE, "regulation", now,
+                {"mode": "rest", "source": "automatic", "reason": regulation["reason"],
+                 "until": regulation["until"]},
+            )
+        state["regulation"] = regulation
+        previous = state.get("phase") or self._effective_phase(last_tick, last_human, state)
+        current = self._effective_phase(now, last_human, state)
         if current != previous:
             transitions = list(state.get("transitions") or [])
             transitions.append({"phase": current, "at": now})
             state["transitions"] = transitions[-24:]
-            if previous == "sleeping" and current != "sleeping":
+            if previous in {"sleeping", "resting"} and current not in {"sleeping", "resting"}:
                 state["last_wake_at"] = now
                 state["wake_cycles"] = int(state.get("wake_cycles") or 0) + 1
-            elif current == "sleeping":
+            elif current in {"sleeping", "resting"}:
                 state["last_sleep_at"] = now
         state.update(last_tick=now, phase=current, energy=energy,
                      sleep_pressure=pressure, last_human_at=last_human,
                      last_action_at=last_action)
-        if force or current != previous or born_at != old_born_at or now - last_tick >= 300:
+        if (force or current != previous or regulation != regulation_before
+                or born_at != old_born_at or now - last_tick >= 300):
             self._save(state, now)
         return state
 
@@ -279,6 +358,69 @@ class LifeLedger:
             return
         self._put_event("life:" + source_ref, row["scope"], "experience", row["ts"],
                         {"record": {"status": "retracted"}}, int(row["revision"]) + 1)
+
+    def regulate(self, scope: str, mode: str, duration_minutes: int, reason: str,
+                 source_ref: str, now: float | None = None) -> Dict[str, Any]:
+        """Apply one bounded self-regulation request without rewriting history."""
+        if scope != OWNER_SCOPE:
+            raise PermissionError("生命周期自我调节只属于 Bines 的主人私域")
+        mode = str(mode or "").strip().lower()
+        if mode not in {"rest", "wake", "auto"}:
+            raise ValueError("mode 必须为 rest、wake 或 auto")
+        if not isinstance(source_ref, str) or not source_ref.strip() or len(source_ref) > 300:
+            raise ValueError("生命周期调节需要稳定来源")
+        reason = str(reason or "").strip()
+        if not 2 <= len(reason) <= 300:
+            raise ValueError("reason 必须为 2 到 300 个字符")
+        if isinstance(duration_minutes, bool):
+            raise ValueError("duration_minutes 必须是整数")
+        try:
+            duration_minutes = int(duration_minutes)
+        except (TypeError, ValueError):
+            raise ValueError("duration_minutes 必须是整数") from None
+        if mode == "rest" and not 5 <= duration_minutes <= self.config.max_rest_minutes:
+            raise ValueError(f"rest 时长必须为 5 到 {self.config.max_rest_minutes} 分钟")
+        if mode == "wake" and not 5 <= duration_minutes <= self.config.max_wake_minutes:
+            raise ValueError(f"wake 时长必须为 5 到 {self.config.max_wake_minutes} 分钟")
+        now = self.clock() if now is None else float(now)
+        event_ref = "life-regulation:" + source_ref.strip()
+        old = self.repo.conn.execute(
+            "SELECT 1 FROM life_events WHERE source_ref=?", (event_ref,)
+        ).fetchone()
+        if old:
+            return {"status": "duplicate", "life": self.snapshot(scope, now)}
+        state = self._advance(now)
+        last_regulation = float(state.get("last_regulation_at") or 0)
+        last_source = state.get("last_regulation_source")
+        human_after_regulation = float(state.get("last_human_at") or 0) > last_regulation
+        if (mode != "auto" and last_source == "self" and not human_after_regulation and last_regulation
+                and now - last_regulation < self.config.regulation_cooldown_seconds):
+            remaining = math.ceil(
+                (self.config.regulation_cooldown_seconds - (now - last_regulation)) / 60
+            )
+            raise ValueError(f"生命周期刚调整过，请约 {remaining} 分钟后再调整")
+        regulation = {}
+        if mode != "auto":
+            regulation = {
+                "mode": mode,
+                "source": "self",
+                "reason": reason,
+                "set_at": now,
+                "until": now + duration_minutes * 60,
+                "source_ref": source_ref.strip(),
+            }
+        self._put_event(event_ref, scope, "regulation", now, {
+            "mode": mode, "source": "self", "reason": reason,
+            "duration_minutes": 0 if mode == "auto" else duration_minutes,
+            "until": regulation.get("until", now),
+        })
+        state["regulation"] = regulation
+        state["last_regulation_at"] = now
+        state["last_regulation_source"] = "self"
+        self._save(state, now)
+        life = self._advance(now, force=True)
+        return {"status": "updated", "life": self.snapshot(scope, now),
+                "version": int(life.get("_version") or 0)}
 
     def bootstrap(self) -> None:
         with self.repo.transaction():
@@ -452,12 +594,15 @@ class LifeLedger:
                 "last_sleep_at": float(state.get("last_sleep_at") or 0),
                 "last_wake_at": float(state.get("last_wake_at") or 0),
                 "wake_cycles": int(state.get("wake_cycles") or 0),
+                "self_regulation_enabled": True,
                 "today": self._today(now, viewer_scope),
                 "current_focus": next((goal["title"] for goal in goals if goal["status"] == "active"), ""),
             }
             if viewer_scope == OWNER_SCOPE:
                 result.update(goals=goals, milestones=self._milestones(state, now),
-                              transitions=list(state.get("transitions") or []))
+                              transitions=list(state.get("transitions") or []),
+                              regulation=dict(state.get("regulation") or {}),
+                              last_regulation_at=float(state.get("last_regulation_at") or 0))
             return result
 
     def event_count(self) -> int:

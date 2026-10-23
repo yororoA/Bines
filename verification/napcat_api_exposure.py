@@ -96,6 +96,7 @@ class APIExposure(unittest.TestCase):
         with tool_context(ToolContext(owner, "trusted-test-event", "owner")):
             instructions = self.runner.instructions_for_source("QQ")
             self.assertIn("napcat_catalog", self.runner.actions_for_source("QQ"))
+            self.assertIn("regulate_life", self.runner.actions_for_source("QQ"))
             for action in expected:
                 self.assertIn(f"- {action}:", instructions)
         stranger_group = Identity("99", "2", "10")
@@ -103,6 +104,7 @@ class APIExposure(unittest.TestCase):
             instructions = self.runner.instructions_for_source("QQ")
             self.assertIn(f"- send_group_msg:", instructions)
             self.assertNotIn("Action `napcat_send_custom_face`", instructions)
+            self.assertNotIn("Action `regulate_life`", instructions)
             self.assertNotIn("- get_credentials:", instructions)
         discovered = self.catalog.discover(stranger_group)
         self.assertEqual({row["action"] for row in discovered}, expected & SCOPED)
@@ -111,6 +113,7 @@ class APIExposure(unittest.TestCase):
         with tool_context(ToolContext(owner_group, "trusted-owner-group", "owner-group")):
             instructions = self.runner.instructions_for_source("QQ")
             self.assertIn("napcat_send_custom_face", instructions)
+            self.assertNotIn("Action `regulate_life`", instructions)
             self.assertIn("- get_credentials:", instructions)
         discovered = self.catalog.discover(owner_group)
         self.assertEqual(

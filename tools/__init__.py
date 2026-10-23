@@ -32,6 +32,7 @@ _MODULES = {
         "left_click", "left_double_click", "right_click", "left_drag", "right_drag", "type_text", "hotkey")},
     "game_mode_tool": {name: name for name in ("enable_game_mode", "disable_game_mode")},
     "memory_tool": {"update_status": "update_status", "search_memory": "search_memory"},
+    "life_tool": {"regulate_life": "regulate_life"},
     "visual_tool": {"get_visual_info": "get_visual_info"},
     "sing_tool": {name: name for name in ("sing", "list_songs")},
     "qq_tool": {name: name for name in (

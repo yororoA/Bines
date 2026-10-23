@@ -74,6 +74,12 @@ class MemoryClient:
     def life_snapshot(self, scope: str = "owner") -> Dict[str, Any]:
         return self.call("life_snapshot", scope=scope)
 
+    def regulate_life(self, scope: str, mode: str, duration_minutes: int,
+                      reason: str, source_ref: str) -> Dict[str, Any]:
+        return self.call("regulate_life", scope=scope, mode=mode,
+                         duration_minutes=duration_minutes, reason=reason,
+                         source_ref=source_ref)
+
     # ---------- consolidation ----------
     def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
         return self.call("claim_job", **({"kinds": list(kinds)} if kinds else {}))

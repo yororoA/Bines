@@ -498,6 +498,13 @@ class MemoryService:
     def life_snapshot(self, scope: str = OWNER_SCOPE) -> Dict[str, Any]:
         return self.life.snapshot(scope)
 
+    def regulate_life(self, scope: str, mode: str, duration_minutes: int = 0,
+                      reason: str = "", source_ref: str = "") -> Dict[str, Any]:
+        with self.repo.transaction():
+            return self.life.regulate(
+                scope, mode, duration_minutes, reason, source_ref, now=self.clock()
+            )
+
     # ---------- consolidation jobs ----------
     def _cancel_state_for_message(self, message_id: int) -> None:
         self.repo.conn.execute(

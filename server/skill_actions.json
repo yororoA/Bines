@@ -156,6 +156,11 @@
       "enabled": true
     },
     {
+      "name": "regulate_life",
+      "description": "有边界地调节 Bines 自身生命周期：临时休息、保持清醒或恢复自动节律；不能改写出生与历史。",
+      "enabled": true
+    },
+    {
       "name": "get_visual_info",
       "description": "观察周围环境，获取视觉信息。调用时必须由调用方提供 focus 作为分析提示。",
       "enabled": false
