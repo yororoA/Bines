@@ -245,6 +245,8 @@ class MemoryHub:
                 elif method in {"get_state", "put_state"}:
                     # A group owner still writes only their own state within that group.
                     params["scope"] = identity.state_scope
+                elif method == "life_snapshot":
+                    params["scope"] = identity.scope
                 elif method == "search":
                     params["scopes"] = [identity.scope]
                     params["k"] = max(1, min(int(params.get("k", 8)), 20))

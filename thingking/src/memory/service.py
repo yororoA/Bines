@@ -34,6 +34,7 @@ from .settings import MemorySettings
 from .vector_index import VectorIndex
 from .temporal import TemporalStore
 from .retrieval import HybridRetriever, time_intent
+from .life import LifeLedger
 
 logger = logging.getLogger("bines.memory.service")
 
@@ -86,6 +87,7 @@ class MemoryService:
             source_ref TEXT PRIMARY KEY, memory_id TEXT NOT NULL, scope TEXT NOT NULL,
             record TEXT NOT NULL, revision INTEGER NOT NULL, recorded_at REAL NOT NULL
         )""")
+        self.life = LifeLedger(repo, clock)
 
     # ---------- identity ----------
     def sync_identities(self) -> None:
@@ -169,6 +171,7 @@ class MemoryService:
             self.repo.conn.execute("""INSERT INTO experiences VALUES(?,?,?,?,?,?)
                 ON CONFLICT(source_ref) DO UPDATE SET record=excluded.record,revision=excluded.revision""",
                 (source_ref, memory_id, env.scope, json.dumps(record, ensure_ascii=False), revision, self.clock()))
+            self.life.record_experience(env.scope, source_ref, record, revision)
             if record["status"] != "started" and not audit_only:
                 self.repo.enqueue_job("summarize_experience", env.scope,
                     {"source_ref": source_ref, "revision": revision},
@@ -206,16 +209,20 @@ class MemoryService:
             ts = float(env.timestamp or self.clock())
             message_ids: List[int] = []
             if user_text.strip() and not is_system_event(user_text):
-                message_ids.append(self.repo.add_message(
+                message_id = self.repo.add_message(
                     env.conversation_id, env.scope, ROLE_USER, user_text.strip(), ts, self._day(ts),
                     actor_id=env.actor_id, actor_name=env.actor_name,
-                ))
+                )
+                message_ids.append(message_id)
+                self.life.record_message(message_id)
             if assistant_text.strip():
                 reply_ts = max(ts, self.clock())
-                message_ids.append(self.repo.add_message(
+                message_id = self.repo.add_message(
                     env.conversation_id, env.scope, ROLE_ASSISTANT, assistant_text.strip(), reply_ts,
                     self._day(reply_ts), actor_id=ASSISTANT_ACTOR,
-                ))
+                )
+                message_ids.append(message_id)
+                self.life.record_message(message_id)
             self._maybe_enqueue_summary(env.conversation_id, env.scope)
             if state_update and message_ids and user_text.strip() and not is_system_event(user_text):
                 self._enqueue_state(env, message_ids[0])
@@ -257,6 +264,7 @@ class MemoryService:
                 source_ref=source_ref,
                 origin="recalled" if recalled else ORIGIN_LIVE,
             )
+            self.life.record_message(message_id)
             self._maybe_enqueue_summary(env.conversation_id, env.scope)
             if state_update and role == ROLE_USER and not recalled and not is_system_event(content):
                 self._enqueue_state(env, message_id)
@@ -341,6 +349,7 @@ class MemoryService:
             "recalled": episodes + diaries,
             "profile": self._profile(env, scopes, recall_query),
             "state": visible_state,
+            "life": self.life.snapshot(env.scope),
             "last_user_ts": last_user["ts"] if last_user else None,
         }
 
@@ -483,7 +492,11 @@ class MemoryService:
             "messages": [_message_view(m) for m in messages],
             "last_user": last_user, "last_owner_activity": last_owner,
             "state": self.repo.get_state(OWNER_SCOPE)["data"],
+            "life": self.life.snapshot(OWNER_SCOPE),
         }
+
+    def life_snapshot(self, scope: str = OWNER_SCOPE) -> Dict[str, Any]:
+        return self.life.snapshot(scope)
 
     # ---------- consolidation jobs ----------
     def _cancel_state_for_message(self, message_id: int) -> None:
@@ -698,6 +711,7 @@ class MemoryService:
                 "episodes": [e["content"] for e in episodes],
                 **signature,
                 "state": self._diary_state(job["scope"], day),
+                "life": self.life.day_summary(day, job["scope"]),
             }
         return None
 
@@ -953,6 +967,8 @@ class MemoryService:
                 stats[table] = int(self.repo.conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"])
             except Exception:
                 stats[table] = 0
+        stats["life_events"] = self.life.event_count()
+        stats["life"] = self.life.snapshot(OWNER_SCOPE)
         return stats
 
     def list_memories(self, **filters: Any) -> Dict[str, Any]:
@@ -1001,6 +1017,11 @@ class MemoryService:
 
     def delete_memory(self, memory_id: str) -> Dict[str, Any]:
         with self.repo.transaction():
+            experience = self.repo.conn.execute(
+                "SELECT source_ref FROM experiences WHERE memory_id=?", (memory_id,)
+            ).fetchone()
+            if experience:
+                self.life.retract_experience(experience["source_ref"])
             self.repo.temporal.delete_memory(memory_id)
             deleted = self.repo.delete_memory(memory_id)
             self.repo.conn.execute("UPDATE experiences SET record='{}' WHERE memory_id=?", (memory_id,))
@@ -1030,6 +1051,7 @@ class MemoryService:
             if not scopes or row["scope"] in scopes
         ]
         return {"memories": memories, "experiences": experiences,
+                "life": self.life.snapshot(OWNER_SCOPE),
                 "state": self.repo.get_state(OWNER_SCOPE), "exported_at": self.clock()}
 
     def ping(self) -> Dict[str, Any]:

@@ -6,7 +6,7 @@ import time
 import uuid
 
 from common.proactive import (
-    ProactiveConfig, ProactivePolicy, appraise_history, draft_decision, human_ref,
+    ProactiveConfig, ProactivePolicy, appraise_history, compact_life, draft_decision, human_ref,
 )
 
 log = logging.getLogger("bines.qq.proactive")
@@ -214,6 +214,7 @@ class QQProactive:
                 now, user, available=connected and not busy,
                 last_activity=max(activity, float(last["ts"] or 0)),
                 relationship_score=(snapshot.get("state") or {}).get("relationship_score", 0),
+                life=snapshot.get("life") or {},
             )
             self.save(conversation, policy)  # Save observation even during cooldown/quiet.
             needs_appraisal = (
@@ -234,6 +235,7 @@ class QQProactive:
                 "profile": memory_context.get("profile") or {},
                 "bridge": memory_context.get("bridge"),
                 "state": memory_context.get("state") or {},
+                "life": compact_life(memory_context.get("life")),
             }
             if policy.state.history_ref != human_ref(user):
                 appraisal = self.appraise(materials, policy.state, now)
@@ -255,7 +257,8 @@ class QQProactive:
             candidate = {**decision, "id": event_id, "based_on_user": human_ref(user),
                          "activity_at": activity, "timestamp": self.clock(),
                          "contact_allowed": "connection" in kinds,
-                         "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives)}
+                         "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),
+                         "life": compact_life(memory_context.get("life"))}
             event = {"post_type": "bines_proactive", "self_id": original["self_id"],
                      "user_id": original["user_id"], "message_type": "private",
                      "sender": original.get("sender") or {}, "event_id": event_id, "proactive": candidate}

@@ -114,6 +114,11 @@ def state(scope):
     return _ok(client.get_state(scope))
 
 
+@app.route("/api/life/<scope>")
+def life(scope):
+    return _ok(client.life_snapshot(scope))
+
+
 @app.route("/api/rebuild_index", methods=["POST"])
 def rebuild_index():
     return _ok(client.rebuild_index())

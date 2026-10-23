@@ -42,7 +42,10 @@ class ExperienceIntegration(MemoryMergeIntegration):
         self.assertEqual(evidence["source_type"], "experience")
         self.assertIsNone(evidence["role"])
         self.assertTrue(evidence["autonomous"])
-        self.assertEqual(before, self.memory.activity_snapshot())
+        after = self.memory.activity_snapshot()
+        for key in ("messages", "last_user", "last_owner_activity", "state"):
+            self.assertEqual(before[key], after[key])
+        self.assertGreaterEqual(after["life"]["last_action_at"], before["life"]["last_action_at"])
         self.assertEqual(self.memory.list_memories(kinds=["semantic"])["total"], 0)
         with tool_context(ctx):
             context = self.memory.build_context({}, query="天文学")
@@ -132,6 +135,24 @@ class ExperienceIntegration(MemoryMergeIntegration):
             raw = "\n".join(row["params"] for row in db.execute("SELECT params FROM memory_outbox"))
         self.assertNotIn("top-secret", raw)
         self.assertNotIn("never-store", raw)
+
+    def test_life_snapshot_scope_cannot_be_forged(self):
+        record = {
+            "category": "turn", "action": "autonomous_turn", "autonomous": True,
+            "turn_id": "owner-life-goal", "candidate": {
+                "kind": "initiative", "topic": "管理员私密生命目标", "intent": "只在主人作用域继续",
+            },
+            "started_at": 1_790_000_000.0, "status": "started", "result": "",
+        }
+        self.hub.service.record_experience(identity_envelope(LOCAL_IDENTITY),
+                                           "owner-life-goal", record, revision=1)
+        with tool_context(self.context(event("1", group="10", msg_id=122))):
+            group = self.memory.life_snapshot("owner")
+        self.assertNotIn("goals", group)
+        self.assertNotIn("管理员私密生命目标", json.dumps(group, ensure_ascii=False))
+        with tool_context(self.context(event("1", msg_id=123))):
+            owner = self.memory.life_snapshot("qq:99:group:10")
+        self.assertIn("管理员私密生命目标", json.dumps(owner, ensure_ascii=False))
 
     def test_retrieval_audit_does_not_duplicate_old_memory(self):
         journal, _ = self.journal()

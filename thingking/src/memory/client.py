@@ -71,6 +71,9 @@ class MemoryClient:
     def activity_snapshot(self, limit: int = 10) -> Dict[str, Any]:
         return self.call("activity_snapshot", limit=limit, timeout_ms=5000)
 
+    def life_snapshot(self, scope: str = "owner") -> Dict[str, Any]:
+        return self.call("life_snapshot", scope=scope)
+
     # ---------- consolidation ----------
     def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
         return self.call("claim_job", **({"kinds": list(kinds)} if kinds else {}))

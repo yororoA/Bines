@@ -9,7 +9,7 @@ import uuid
 from path_setup import ensure_project_root
 
 ROOT = ensure_project_root(__file__, 2)
-from common.proactive import ProactivePolicy, appraise_history, draft_decision, human_ref
+from common.proactive import ProactivePolicy, appraise_history, compact_life, draft_decision, human_ref
 
 log = logging.getLogger("bines.bored")
 
@@ -93,6 +93,7 @@ def main():
                     now, snapshot.get("last_user"), available=available,
                     last_activity=max(float(owner.get("ts") or 0), last_local),
                     relationship_score=(snapshot.get("state") or {}).get("relationship_score", 0),
+                    life=snapshot.get("life") or {},
                 )
                 save()
                 needs_appraisal = (
@@ -110,7 +111,8 @@ def main():
                 materials = {"recent": memory_context.get("working", [])[-12:],
                              "memories": memory_context.get("recalled", [])[:5],
                              "profile": memory_context.get("profile") or {}, "bridge": memory_context.get("bridge"),
-                             "state": memory_context.get("state") or {}}
+                             "state": memory_context.get("state") or {},
+                             "life": compact_life(memory_context.get("life"))}
                 if policy.state.history_ref != policy.state.user_ref:
                     appraisal = appraise_history(materials, policy.state, now)
                     policy.appraise(appraisal, policy.state.user_ref, now)
@@ -137,7 +139,8 @@ def main():
                 candidate = {**decision, "id": uuid.uuid4().hex, "type": "bored",
                              "timestamp": time.time(), "based_on_user": policy.state.user_ref,
                              "activity_at": float(owner.get("ts") or 0), "contact_allowed": "connection" in kinds,
-                             "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives)}
+                             "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),
+                             "life": compact_life(memory_context.get("life"))}
                 policy.reserve(candidate)
                 save()
                 publisher.send_multipart([b"bored", json.dumps(candidate, ensure_ascii=False).encode()])

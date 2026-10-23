@@ -53,8 +53,12 @@ _DIARY_INSTRUCTIONS = """日期：{day}
 【当日可靠历史状态（空对象表示无可靠记录）】
 {state}
 
+【当日生命连续性（系统按真实事件统计）】
+{life}
+
 请以第一人称写一段当天的日记，保留有证据的关键事件与情感变化，语气自然。
 日期必须以给定日期为准，事实只能来自当日经历摘要。历史状态只作有证据的背景，不能补成当日事件。
+生命连续性只能用于确认当天真实交流次数、自主行动次数和有记录的自主主题，不能把计数扩写成不存在的情节。
 排除系统事件、模型自我推测、未发生的计划和假设；不要引用今天或其他日期的状态，不凭空补齐空白日。
 不要逐句复述 User/Assistant 对话或逐条列举，输出一整段连贯的日记正文。"""
 
@@ -144,10 +148,12 @@ def parse_summary(raw: str) -> Tuple[str, List[str], List[Dict[str, Any]], float
 
 def build_diary_prompt(materials: Dict[str, Any], diary_system_prompt: str) -> List[Dict[str, str]]:
     state = json.dumps(materials.get("state") or {}, ensure_ascii=False, indent=1)
+    life = json.dumps(materials.get("life") or {}, ensure_ascii=False, indent=1)
     return [
         {"role": "system", "content": diary_system_prompt},
         {"role": "user", "content": _DIARY_INSTRUCTIONS.format(
-            day=materials["day_key"], episodes="\n\n".join(materials["episodes"]), state=state[:3000])},
+            day=materials["day_key"], episodes="\n\n".join(materials["episodes"]),
+            state=state[:3000], life=life[:3000])},
     ]
 
 

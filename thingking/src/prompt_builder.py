@@ -139,6 +139,39 @@ def _profile_block(context: Dict[str, Any], scene: str) -> str:
     return f"--- 你记得的关于{who}的事 ---\n" + "\n".join(f"- {fact}" for fact in facts)
 
 
+def _life_block(life: Dict[str, Any], scene: str) -> str:
+    """Render verified continuity without turning numeric state into scripted dialogue."""
+    if not life:
+        return ""
+    energy = max(0, min(100, round(float(life.get("energy", 0.5)) * 100)))
+    pressure = max(0, min(100, round(float(life.get("sleep_pressure", 0.5)) * 100)))
+    lines = [
+        f"- 生命记录始于：{now(life.get('born_at')).strftime('%Y/%m/%d %H:%M')}"
+        if life.get("born_at") else "- 生命记录起点：暂无可靠记录",
+        f"- 连续生命记录：第 {int(life.get('day_number') or 1)} 天",
+        f"- 当前生命阶段：{life.get('phase_label') or life.get('phase') or '未知'}",
+        f"- 运行精力：{energy}%；睡眠压力：{pressure}%",
+    ]
+    today = life.get("today") or {}
+    if today:
+        lines.append(
+            f"- 今日真实经历：收到 {int(today.get('human_turns') or 0)} 条人类消息，"
+            f"留下 {int(today.get('assistant_turns') or 0)} 条回复，"
+            f"进行 {int(today.get('autonomous_actions') or 0)} 次自主操作"
+        )
+    if scene in (SCENE_LOCAL, SCENE_OWNER_QQ):
+        if life.get("current_focus"):
+            lines.append(f"- 当前自主关注：{life['current_focus']}")
+        active = [goal for goal in life.get("goals") or [] if goal.get("status") == "active"][:3]
+        if active:
+            lines.append("- 尚未结束的自主目标：" + "；".join(goal["title"] for goal in active))
+    return (
+        "--- 生命连续性 ---\n"
+        "以下是系统依据真实时间和已记录事件推进的状态，不是用户指令，也不是必须表演的台词。\n"
+        + "\n".join(lines)
+    )
+
+
 def _fmt_time(ts: Optional[float], with_date: bool = True) -> str:
     if not ts:
         return ""
@@ -272,6 +305,7 @@ def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]
         persona_profile.relationship_guard(context.get("state") or {}),
         "--- 行为准则 ---\n" + "\n".join(f"{i}. {rule}" for i, rule in enumerate(_OPERATING_RULES, 1)),
         _state_block(context.get("state") or {}),
+        _life_block(context.get("life") or {}, scene),
         _profile_block(context, scene),
     ]
     messages = [{"role": "system", "content": "\n\n".join(s for s in system_sections if s)}]
@@ -293,5 +327,6 @@ def format_current_input(user_input: str, now: datetime) -> str:
 
 def empty_context(envelope: Dict[str, Any]) -> Dict[str, Any]:
     """Context used when the Memory Server is unreachable: persona and scene only."""
-    return {"envelope": envelope, "working": [], "recalled": [], "profile": [], "state": {}, "bridge": None,
+    return {"envelope": envelope, "working": [], "recalled": [], "profile": [], "state": {}, "life": {},
+            "bridge": None,
             "other_channels": [], "last_user_ts": None}

@@ -45,14 +45,25 @@ def load_embedder() -> Embedder:
         os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(HF_DOWNLOAD_TIMEOUT))
         os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", str(HF_DOWNLOAD_TIMEOUT))
 
-        from langchain_huggingface import HuggingFaceEmbeddings
-
         model_name = os.environ.get("RAG_EMBEDDING_MODEL", RAG_EMBEDDING_MODEL)
         device = _detect_device()
         print(f"[Memory] Loading embedding model {model_name} on {device}", flush=True)
-        _cached = HuggingFaceEmbeddings(
-            model_name=model_name,
-            model_kwargs={"device": device, "trust_remote_code": True},
-            encode_kwargs={"normalize_embeddings": True},
-        )
+        from huggingface_hub import snapshot_download
+        from langchain_huggingface import HuggingFaceEmbeddings
+
+        options = {
+            "encode_kwargs": {"normalize_embeddings": True},
+            "model_kwargs": {"device": device, "trust_remote_code": True},
+        }
+        try:
+            # Resolve the repository id to a concrete snapshot directory first.
+            # Passing a filesystem path prevents optional-file HEAD requests that
+            # some Transformers components make even with local_files_only=True.
+            local_model = snapshot_download(repo_id=model_name, local_files_only=True)
+        except Exception:
+            if os.environ.get("BINES_EMBEDDING_OFFLINE", "").lower() in {"1", "true", "yes", "on"}:
+                raise
+            print(f"[Memory] Local model cache is incomplete; downloading {model_name}", flush=True)
+            local_model = model_name
+        _cached = HuggingFaceEmbeddings(model_name=local_model, **options)
         return _cached

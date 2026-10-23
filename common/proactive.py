@@ -77,6 +77,23 @@ def topic_key(text):
     return re.sub(r"[\W_]+", "", text.lower())
 
 
+def compact_life(life):
+    """Bound the scheduler payload while preserving the parts needed for judgment."""
+    life = life or {}
+    return {
+        key: life.get(key)
+        for key in ("day_number", "phase", "phase_label", "energy", "sleep_pressure",
+                    "today", "current_focus")
+        if life.get(key) not in (None, "")
+    } | {
+        "active_goals": [
+            {"title": goal.get("title"), "intent": goal.get("intent"), "kind": goal.get("kind")}
+            for goal in (life.get("goals") or [])
+            if goal.get("status") == "active"
+        ][:3]
+    }
+
+
 @dataclass
 class ProactiveState:
     user_ref: str = ""
@@ -167,7 +184,7 @@ class ProactivePolicy:
         independent = state.actions_today < self.config.action_daily_limit
         return (["connection"] if contact else []) + (["curiosity", "initiative"] if independent else [])
 
-    def tick(self, now, user, *, last_activity=0, available=True, relationship_score=0):
+    def tick(self, now, user, *, last_activity=0, available=True, relationship_score=0, life=None):
         state, config = self.state, self.config
         delta = max(0, min(30, now - self.last_tick))
         self.last_tick = now
@@ -191,13 +208,21 @@ class ProactivePolicy:
         emotion = {key: neutral + (number(state.emotion.get(key), neutral, -1 if key == "valence" else 0) - neutral) * freshness
                    for key, neutral in (("valence", 0), ("arousal", 0.5), ("social", 0.5), ("curiosity", 0.5))}
         local = datetime.fromtimestamp(now, ZoneInfo(config.timezone))
-        circadian = 0.25 if config.quiet(now) else (0.8 if 8 <= local.hour < 12 else 1)
+        life = life or {}
+        phase = life.get("phase")
+        phase_weight = {
+            "sleeping": 0.08, "night_awake": 0.3, "waking": 0.65,
+            "active": 1.0, "winding_down": 0.5,
+        }.get(phase, 1.0)
+        circadian = (0.25 if config.quiet(now) else (0.8 if 8 <= local.hour < 12 else 1)) * phase_weight
         relation = number(relationship_score, 0, -200, 200) / 200
         hour_weight = state.weights.get(str(local.hour), 1)
+        energy = number(life.get("energy"), emotion["arousal"])
         targets = {
             "connection": number((0.3 + 0.45 * emotion["social"] + 0.15 * relation + 0.1 * emotion["valence"]) * circadian * hour_weight),
             "curiosity": number((0.25 + 0.65 * emotion["curiosity"]) * circadian),
-            "initiative": number((0.25 + 0.5 * emotion["arousal"] + 0.1 * emotion["valence"]) * circadian),
+            "initiative": number((0.2 + 0.35 * emotion["arousal"] + 0.25 * energy
+                                  + 0.1 * emotion["valence"]) * circadian),
         }
         alpha = 1 - math.exp(-delta / config.interval)
         for kind in DRIVES:
@@ -205,7 +230,8 @@ class ProactivePolicy:
         kinds = self.eligible_kinds(now, user)
         state.value = max((state.drives[k] for k in kinds), default=0) * 100
         idle_since = max(float((user or {}).get("ts") or 0), float(last_activity or 0))
-        blocked = (not available or not ref or changed or now - idle_since < config.min_idle
+        blocked = (not available or not ref or changed or phase == "sleeping"
+                   or now - idle_since < config.min_idle
                    or state.pending or now - self.started < config.startup_grace
                    or now < state.next_decision)
         return not blocked and bool(kinds) and state.value >= 45
@@ -297,7 +323,8 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
     return parse_decision(_complete(
         f"角色基础性格：{persona_profile.brief()}\n"
         "这是可信自主意愿评估，没有新用户提问。结合意愿强度、时间、情绪、历史兴趣及行动结果，"
-        "决定现在是否真想做一件具体的事，也可以继续安静。"
+        "决定现在是否真想做一件具体的事，也可以继续安静。生命状态包含真实昼夜阶段、精力、"
+        "睡眠压力、当天经历和未完成目标；睡眠阶段保持休息，不制造行动。"
         "connection=主动交流；curiosity=自主探索或查资料；initiative=主动操作可用应用或NapCat。"
         "无人回复、告别或夜间时，不通过其他类别绕过联系限制；可以不打扰地查资料或观察。"
         "QQ轻量环境没有桌面键鼠能力；desktop环境可使用当前启用的桌面技能。"
@@ -325,5 +352,6 @@ def intention_prompt(candidate):
         f"contact_allowed={str(candidate.get('contact_allowed', True)).lower()}。"
         f"\n此刻角色情绪倾向={json.dumps(candidate.get('emotion') or {}, ensure_ascii=False)}；"
         f"意愿强度={json.dumps(candidate.get('willingness') or {}, ensure_ascii=False)}。"
+        f"\n生命状态={json.dumps(candidate.get('life') or {}, ensure_ascii=False)}。"
         "以此作为当前情绪参考，保持基础人格，不写长篇内心独白。"
     )
