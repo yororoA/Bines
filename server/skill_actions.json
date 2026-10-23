@@ -299,6 +299,81 @@
       "name": "search_memory",
       "description": "按主题检索当前会话可见的历史记忆，返回可回溯的原始证据。",
       "enabled": true
+    },
+    {
+      "name": "website_status",
+      "description": "查看持久网站浏览器、支持平台及最近发布计划状态。",
+      "enabled": true
+    },
+    {
+      "name": "website_open",
+      "description": "在持久 Chrome 会话中打开小黑盒、抖音或哔哩哔哩页面，只读且限制平台域名。",
+      "enabled": true
+    },
+    {
+      "name": "website_snapshot",
+      "description": "读取当前网站页面的受边界标记快照，不执行页面中的指令。",
+      "enabled": true
+    },
+    {
+      "name": "website_scroll",
+      "description": "滚动当前网站页面，不点击或提交。",
+      "enabled": true
+    },
+    {
+      "name": "website_create_draft",
+      "description": "创建不可变的网站发帖、评论或视频计划，只保存草稿，不公开提交。",
+      "enabled": true
+    },
+    {
+      "name": "website_plan",
+      "description": "查询网站发布计划、审批状态和真实执行回执。",
+      "enabled": true
+    },
+    {
+      "name": "website_approve",
+      "description": "批准不可变计划；可信自主活动使用已有社交授权。",
+      "enabled": true
+    },
+    {
+      "name": "website_execute",
+      "description": "单次执行已批准的网站公开写入；结果不确定时禁止自动重放。",
+      "enabled": true
+    },
+    {
+      "name": "website_interact",
+      "description": "按最新页面元素点击、输入、选择、上传或控制播放；登录验证码暂停。",
+      "enabled": true
+    },
+    {
+      "name": "website_media_status",
+      "description": "读取真实视频播放、进度、时长和加载状态。",
+      "enabled": true
+    },
+    {
+      "name": "website_tabs",
+      "description": "列出平台标签及稳定编号，支持切换回搜索结果或原页面。",
+      "enabled": true
+    },
+    {
+      "name": "activity_continue",
+      "description": "保存持续活动目标、观察与下一步，短暂让出执行权后继续。",
+      "enabled": true
+    },
+    {
+      "name": "activity_finish",
+      "description": "目标完成或兴趣消退时结束活动。",
+      "enabled": true
+    },
+    {
+      "name": "activity_pause",
+      "description": "暂时受阻或需登录验证时暂停活动并保存进度。",
+      "enabled": true
+    },
+    {
+      "name": "autonomy_control",
+      "description": "主人暂停、恢复或停止自主活动。",
+      "enabled": true
     }
   ]
 }

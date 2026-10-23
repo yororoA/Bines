@@ -209,6 +209,18 @@ class Integration(unittest.TestCase):
             bot.process(rows, Model())
         self.assertNotIn("'role': 'assistant'", str(self.store.context(self.store.identity(event("3")))))
 
+    def test_existing_conversation_does_not_refetch_napcat_history(self):
+        self.insert(event("2", msg_id=80, text="已有上下文"))
+        self.insert(event("2", msg_id=81, text="继续聊"))
+        rows = self.store.claim("worker", 0, 0)
+
+        class Model:
+            def run_skill_protocol(inner, conversation, runner, **kwargs):
+                return "继续", [], []
+
+        QQThinking(self.store, self.client).process(rows, Model())
+        self.assertFalse(any(action.endswith("msg_history") for action, _ in self.api.calls))
+
     def test_qq_final_guard_uses_only_current_relationship(self):
         self.memory_hub._call("put_state", scope="owner", data={"relationship_score": 133})
         for user, expected in (("1", "亲近"), ("2", None)):
@@ -282,6 +294,47 @@ class Integration(unittest.TestCase):
         QQThinking(self.store, self.client).process(rows, Model())
         self.assertEqual(sum(action == "get_msg" for action, _ in self.api.calls), 2)
 
+    def test_cached_text_quote_does_not_call_napcat_get_msg(self):
+        current = event("2", msg_id=97, message=[
+            {"type": "reply", "data": {"id": "95"}},
+            {"type": "text", "data": {"text": "收到"}},
+        ])
+        identity = self.store.identity(current)
+        self.store.add(
+            identity,
+            "assistant",
+            "缓存文字",
+            external_id="99:p:2:95",
+            raw={
+                "message_id": 95,
+                "message_type": "private",
+                "user_id": 99,
+                "target_id": 2,
+                "message": [{"type": "text", "data": {"text": "缓存文字"}}],
+            },
+        )
+        event_id = self.insert(current)
+        with tool_context(ToolContext(identity, event_id, "cached-quote")):
+            result = self.client.request("/quoted_message", {"message_id": "95"})
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("缓存文字", str(result["data"]))
+        self.assertFalse(any(action == "get_msg" for action, _ in self.api.calls))
+
+    def test_zero_reply_id_is_ignored_without_napcat_lookup(self):
+        self.insert(event("2", msg_id=98, message=[
+            {"type": "reply", "data": {"id": "0"}},
+            {"type": "text", "data": {"text": "继续"}},
+        ]))
+        rows = self.store.claim("worker", 0, 0)
+
+        class Model:
+            def run_skill_protocol(inner, conversation, runner, **kwargs):
+                self.assertNotIn("引用消息 0", str(conversation))
+                return "好", [], []
+
+        QQThinking(self.store, self.client).process(rows, Model())
+        self.assertFalse(any(action == "get_msg" for action, _ in self.api.calls))
+
     def test_quoted_message_rejects_foreign_peer_and_unreferenced_ids(self):
         current = event("2", group="10", msg_id=97, message=[
             {"type": "reply", "data": {"id": "95"}}, {"type": "at", "data": {"qq": "99"}},
@@ -294,6 +347,8 @@ class Integration(unittest.TestCase):
                 self.client.request("/quoted_message", {"message_id": "95"})
             with self.assertRaises(RuntimeError):
                 self.client.request("/quoted_message", {"message_id": "96"})
+            with self.assertRaises(RuntimeError):
+                self.client.request("/quoted_message", {"message_id": "0"})
         self.assertEqual(sum(action == "get_msg" for action, _ in self.api.calls), 1)
 
     def test_recalled_quote_is_not_read_or_passed_to_vision(self):

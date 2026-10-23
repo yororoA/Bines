@@ -13,6 +13,8 @@ class ToolContext:
     receipts: list = field(default_factory=list, compare=False)
     autonomous: bool = False
     contact_allowed: bool = True
+    user_text: str = ""
+    activity: dict = field(default_factory=dict, compare=False)
     check: object = field(default=None, compare=False)
     journal: object = field(default=None, compare=False)
 

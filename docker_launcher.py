@@ -112,6 +112,18 @@ IMAGE_SOURCES = {
         "deploy/docker/Dockerfile.thinking",
     ),
 }
+IMAGE_HASH_EXCLUDES = frozenset({
+    "common/website.py",
+    "docker_launcher.py",
+    "website_bridge.py",
+    "website_runtime.py",
+})
+IMAGE_HASH_EXCLUDES_BY_IMAGE = {
+    "bines-thinking:local": frozenset({
+        "common/website_spool.py",
+        "thingking/qq_thinking.py",
+    }),
+}
 
 
 def source_hashes(env=None) -> Dict[str, str]:
@@ -127,7 +139,13 @@ def source_hashes(env=None) -> Dict[str, str]:
     hashes = {}
     for service, image in BUILD_SERVICES.items():
         digest = common.copy()
-        paths = {path for pattern in IMAGE_SOURCES[image] for path in ROOT.glob(pattern) if path.is_file()}
+        excluded = IMAGE_HASH_EXCLUDES | IMAGE_HASH_EXCLUDES_BY_IMAGE.get(image, frozenset())
+        paths = {
+            path
+            for pattern in IMAGE_SOURCES[image]
+            for path in ROOT.glob(pattern)
+            if path.is_file() and path.relative_to(ROOT).as_posix() not in excluded
+        }
         for path in sorted(paths):
             content = path.read_bytes()
             digest.update(path.relative_to(ROOT).as_posix().encode() + b"\0")

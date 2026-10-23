@@ -126,7 +126,7 @@ class CapabilityService:
     def _message(self, identity, message_id):
         # Equality matters: LIKE would let a model-supplied "%" bypass the scope lookup.
         message_id = str(message_id)
-        if not re.fullmatch(r"-?\d+", message_id):
+        if not re.fullmatch(r"[1-9]\d*", message_id):
             raise PermissionError("需使用当前会话中真实的 message_id")
         external_id = f"{identity.account}:{identity.group or 'p:'+identity.user}:{message_id}"
         with self.store.connection() as db:
@@ -141,7 +141,7 @@ class CapabilityService:
     def quoted_message(self, identity, event_id, message_id):
         """Resolve only a reply actually present in this event, checking its peer."""
         message_id = str(message_id)
-        if not event_id or not re.fullmatch(r"-?\d+", message_id):
+        if not event_id or not re.fullmatch(r"[1-9]\d*", message_id):
             raise PermissionError("引用消息需来自当前 QQ 事件")
         with self.store.connection() as db:
             row = db.execute("SELECT raw FROM events WHERE id=?", (event_id,)).fetchone()
@@ -162,12 +162,27 @@ class CapabilityService:
             ).fetchone()
         if cached and cached["recalled"]:
             return {"status": "failed", "msg": "引用消息已撤回"}
+        cached_data = None
+        if cached and cached["raw"]:
+            try:
+                cached_data = json.loads(cached["raw"])
+            except (TypeError, ValueError):
+                cached_data = None
+        cached_segments = segments(
+            (cached_data or {}).get("message", (cached_data or {}).get("raw_message", ""))
+        )
+        expiring_media = any(
+            part.get("type") in {"image", "record", "video", "file"}
+            for part in cached_segments
+        )
+        if cached_data and not expiring_media:
+            return {"status": "ok", "retcode": 0, "data": cached_data}
         # Refresh expiring image URLs through NapCat; cached text remains useful
         # when the original message is no longer available from the history API.
         result = self.client.raw_api("get_msg", {"message_id": message_id}, timeout=10)
         if not isinstance(result, dict) or result.get("status") != "ok":
-            if cached and cached["raw"]:
-                return {"status": "ok", "data": json.loads(cached["raw"])}
+            if cached_data:
+                return {"status": "ok", "data": cached_data}
             return {"status": "failed", "msg": "引用消息暂不可读取"}
         data = result.get("data") or {}
         if not isinstance(data, dict):

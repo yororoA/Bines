@@ -119,6 +119,8 @@ services:
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_GATEWAY_DIR: /app/gateway_data
       BINES_QQ_GATEWAY_URL: http://chatbot:6102
+      BINES_WEBSITE_BRIDGE_TOKEN: ${BINES_WEBSITE_BRIDGE_TOKEN:-}
+      BINES_WEBSITE_BRIDGE_SPOOL: /app/thingking/memory_data/website_bridge
     volumes:
       - ../../thingking/memory_data:/app/thingking/memory_data
       - ../../thingking/models:/app/thingking/models

@@ -68,6 +68,14 @@ class QQThinking:
         return False
 
     def import_history(self, identity):
+        # The gateway already persists every live event. Only bootstrap a genuinely
+        # new conversation; repeated history reads make NapCat re-resolve old quotes.
+        with self.store.connection() as db:
+            cached = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE scope=?", (identity.scope,),
+            ).fetchone()[0]
+        if cached > 1:
+            return
         action = "get_group_msg_history" if identity.group else "get_friend_msg_history"
         params = {"group_id": identity.group} if identity.group else {"user_id": identity.user}
         result = self.client.raw_api(action, {**params, "count": 30, "reverse_order": False})
@@ -163,6 +171,10 @@ class QQThinking:
         relevant = [event for event in events if self.should_reply(event, self.store.identity(event))]
         if not relevant:
             return
+        trusted_user_text = "\n".join(
+            readable(event.get("message", event.get("raw_message", "")))
+            for event in relevant
+        )
         turn_id = rows[0].get("batch") or hashlib.sha256("|".join(row["id"] for row in rows).encode()).hexdigest()
         journal = MemoryJournal(self.outbox, identity_envelope(identity), turn_id,
                                 event_ids=[row["id"] for row in rows])
@@ -174,7 +186,9 @@ class QQThinking:
                                      (identity.scope, external)).fetchone()
                 if message:
                     journal.source_message_refs.append(source + ":" + str(message["id"]))
-        context = ToolContext(identity, rows[-1]["id"], turn_id, journal=journal)
+        context = ToolContext(
+            identity, rows[-1]["id"], turn_id, user_text=trusted_user_text, journal=journal,
+        )
         with tool_context(context):
             previous = self.store.begin_turn(turn_id)
             if previous:
@@ -199,7 +213,7 @@ class QQThinking:
                     raise RuntimeError(f"中断的回复轮次 {turn_id}，保留回执，禁止重新生成并重复执行")
             self.import_history(identity)
             history = self.store.context(identity, include_ids=True)
-            request = "\n".join(readable(event.get("message", event.get("raw_message", ""))) for event in relevant)
+            request = trusted_user_text
             memory_context = self.memory.build_context(identity_envelope(identity), query=request)
             from chatBot.media import describe_images, resolve_replies
             quotes, quoted_events = resolve_replies(relevant, self.client)
@@ -300,6 +314,7 @@ class QQThinking:
     def process_proactive(self, event, model):
         from chatBot.proactive import guard
         from will_runtime import run_intention, outcome_succeeded
+        from common.activity import activity_checkpoint
         identity, turn_id = self.store.identity(event), event["event_id"]
         snapshot = self.memory.activity_snapshot()
         activity = (snapshot.get("last_owner_activity") or {}).get("ts") or 0
@@ -311,7 +326,11 @@ class QQThinking:
         if reason and not self.store.turn_writes(turn_id):
             with self.store.connection() as db:
                 db.execute("UPDATE proactive_runs SET status='skipped',error=? WHERE id=?", (reason, turn_id))
-            self.store.save_turn(turn_id, "done")
+            checkpoint = (activity_checkpoint(event["proactive"], {
+                "mode": "continue", "note": f"被{reason}打断；先处理新消息后重新观察",
+                "delay_seconds": 15,
+            }, []) if event["proactive"].get("activity") else None)
+            self.store.save_turn(turn_id, "done", {"activity": checkpoint})
             journal = MemoryJournal(self.outbox, identity_envelope(identity), turn_id,
                                     autonomous=True, candidate=event.get("proactive"))
             journal.capture("autonomous_turn", {}, reason, category="turn", status="skipped",
@@ -319,7 +338,16 @@ class QQThinking:
             return
         try:
             completed = False
+            def check():
+                latest = self.memory.activity_snapshot()
+                if (latest.get("life") or {}).get("phase") in {"sleeping", "resting"}:
+                    return "resting"
+                if self.stop.is_set():
+                    return "shutdown"
+                activity = (latest.get("last_owner_activity") or {}).get("ts") or 0
+                return guard(self.store, event, central_activity=float(activity))
             context = ToolContext(identity, turn_id, turn_id, autonomous=True,
+                                  check=check,
                                   contact_allowed=event["proactive"].get("contact_allowed", True),
                                   journal=MemoryJournal(self.outbox, identity_envelope(identity), turn_id,
                                       autonomous=True, candidate=event["proactive"], event_ids=[turn_id]))
@@ -332,10 +360,6 @@ class QQThinking:
                     # A crash during autonomous tool use must not rerun its model.
                     raise RuntimeError("自主轮次已执行操作，保留回执，禁止重新生成")
                 else:
-                    def check():
-                        latest = self.memory.activity_snapshot()
-                        activity = (latest.get("last_owner_activity") or {}).get("ts") or 0
-                        return guard(self.store, event, central_activity=float(activity))
                     memory_context = self.memory.build_context(
                         identity_envelope(identity), query=event["proactive"]["topic"],
                     )
@@ -352,24 +376,46 @@ class QQThinking:
                     sent = any(r["action"] in SEND_ACTIONS and successful(r.get("result"))
                                for r in context.receipts)
                     if (event["proactive"]["kind"] == "connection" and text.strip()
-                            and not sent and not check()):
+                            and not sent and not context.activity and not check()):
                         self.send_actions(identity, turn_id, self.reply_actions(identity, [text]))
                         completed = True
                     else:
-                        self.store.save_turn(turn_id, "done", {"outcomes": outcomes, "reflection": text[:2000]})
+                        from common.activity import activity_checkpoint
+                        checkpoint = activity_checkpoint(
+                            event["proactive"], context.activity, outcomes, text,
+                        )
+                        self.store.save_turn(turn_id, "done", {
+                            "outcomes": outcomes, "reflection": text[:2000], "activity": checkpoint,
+                        })
                         completed = sent or any(outcome_succeeded(item) for item in outcomes)
+                        completed = completed or bool(context.activity)
             with self.store.connection() as db:
                 db.execute("UPDATE proactive_runs SET status=?,delivered_at=? WHERE id=?",
                            ("completed" if completed else "skipped", time.time() if completed else 0, turn_id))
             log.info("自主意图已完成 · %s", event["proactive"]["topic"])
         except Exception as exc:
+            checkpoint = None
+            if "context" in locals() and not previous:
+                checkpoint = activity_checkpoint(event["proactive"], {
+                    "mode": "continue", "note": f"执行被中断：{str(exc)[:400]}；先核对回执和页面",
+                    "delay_seconds": 15,
+                    "observations": context.activity.get("observations") or [],
+                }, locals().get("outcomes", []))
             with self.store.connection() as db:
                 uncertain = db.execute(
                     "SELECT 1 FROM operations WHERE id LIKE ? AND status IN ('started','uncertain')",
                     (turn_id + ":%",),
                 ).fetchone()
+                uncertain = uncertain or any(
+                    (row.get("result") or {}).get("status") == "uncertain"
+                    for row in (context.receipts if "context" in locals() else [])
+                )
                 db.execute("UPDATE proactive_runs SET status=?,error=? WHERE id=?",
                            ("uncertain" if uncertain else "failed", str(exc), turn_id))
+            if checkpoint:
+                if uncertain:
+                    checkpoint.update(mode="pause", delay_seconds=0, note="回执不确定，等待主人核查后恢复")
+                self.store.save_turn(turn_id, "done", {"activity": checkpoint, "reflection": str(exc)[:2000]})
             raise
 
     def worker(self):

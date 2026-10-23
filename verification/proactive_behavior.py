@@ -224,10 +224,15 @@ class QQTests(unittest.TestCase):
         bot = QQThinking(self.store, self.client)
         with self.assertRaises(RuntimeError):
             bot.process_proactive(ev, self.model())
-        with self.assertRaises(RuntimeError):
-            bot.process_proactive(ev, Mock())
+        model = Mock()
+        bot.process_proactive(ev, model)
+        model.run_skill_protocol.assert_not_called()
         self.assertEqual(len(self.api.calls), 1)
         self.assertEqual(len(self.store.context(self.store.identity(ev))), 1)
+        with self.store.connection() as db:
+            checkpoint = json.loads(db.execute("SELECT payload FROM turns").fetchone()[0])["activity"]
+        self.assertEqual(checkpoint["mode"], "pause")
+        self.assertEqual(checkpoint["delay_seconds"], 0)
 
     def test_crash_after_final_send_recovers_without_duplicate(self):
         ev = self.prepare()
@@ -271,8 +276,9 @@ class QQTests(unittest.TestCase):
             bot.process_proactive(ev, self.model(execute))
         with self.store.connection() as db:
             self.assertEqual(db.execute("SELECT status FROM proactive_runs").fetchone()[0], "uncertain")
-        with self.assertRaises(RuntimeError):
-            bot.process_proactive(ev, Mock())
+        model = Mock()
+        bot.process_proactive(ev, model)
+        model.run_skill_protocol.assert_not_called()
         self.assertEqual(len(self.api.calls), 1)
 
     def test_scheduler_appraises_history_and_rechecks_slow_model(self):

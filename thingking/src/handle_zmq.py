@@ -563,7 +563,9 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
     journal.source_message_refs = [user_ref]
     memory_outbox.record_message(envelope, "user", user_input, user_ref, state_update=False)
     try:
-        with tool_context(ToolContext(LOCAL_IDENTITY, turn_id=turn_id, journal=journal)):
+        with tool_context(ToolContext(
+            LOCAL_IDENTITY, turn_id=turn_id, user_text=user_input, journal=journal,
+        )):
             return _process_message(user_input, img_descr, source, extra_data)
     finally:
         memory_outbox.record_message(envelope, "user", user_input, user_ref,
@@ -974,7 +976,10 @@ def start_zmq_listener():
                             def process_bored_async(candidate=dict(data)):
                                 global IS_PROCESSING_DIALOGUE, INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT
                                 status, reason, reserved = "skipped", "", False
+                                checkpoint = None
                                 text = ""
+                                lease_stop = threading.Event()
+                                lease_thread = None
                                 try:
                                     with processing_lock:
                                         busy = processing_state["is_processing"] or _is_processing_dialogue() or is_player_busy
@@ -992,6 +997,18 @@ def start_zmq_listener():
                                     if last_interaction_time >= float(candidate.get("timestamp") or 0):
                                         reason = "incoming_message"
                                     if not reason:
+                                        def renew_activity():
+                                            while not lease_stop.is_set():
+                                                _ZMQ_OUTBOUND_QUEUE.put([("bored_result", [
+                                                    b"bored_result", json.dumps({
+                                                        "id": candidate["id"], "status": "working",
+                                                        "timestamp": time.time(),
+                                                    }).encode(),
+                                                ])])
+                                                if lease_stop.wait(15):
+                                                    break
+                                        lease_thread = threading.Thread(target=renew_activity, daemon=True)
+                                        lease_thread.start()
                                         from will_runtime import run_intention, outcome_succeeded
                                         from tools.context import ToolContext, tool_context
                                         from chatBot.messages import LOCAL_IDENTITY
@@ -1001,6 +1018,7 @@ def start_zmq_listener():
                                             return bored_event_rejection(
                                                 candidate, memory_client.activity_snapshot(), time.time(),
                                                 online=is_user_online(PRESENCE_STATE_PATH),
+                                                executing=True,
                                             )
                                         envelope = envelope_for_turn(None, None, "", owner_name=MEMORY_SETTINGS.owner_name).to_dict()
                                         memory_context = memory_client.build_context(envelope, query=candidate["topic"])
@@ -1025,13 +1043,22 @@ def start_zmq_listener():
                                         if contacted:
                                             status = "sent"
                                         desktop_spoken = False
-                                        if not contacted and candidate["kind"] == "connection" and text and not check():
+                                        if (not contacted and candidate["kind"] == "connection" and text
+                                                and not will_context.activity and not check()):
                                             zmq_send(text, enable_audio=True)
                                             zmq_send("", cough="end", origin=text)
                                             status = "sent"
                                             desktop_spoken = True
                                         elif not contacted and any(outcome_succeeded(item) for item in outcomes):
                                             status = "completed"
+                                        from common.activity import activity_checkpoint
+                                        checkpoint = activity_checkpoint(candidate, will_context.activity, outcomes, text)
+                                        if will_context.activity and status == "skipped":
+                                            status = "completed"
+                                        if any((row.get("result") or {}).get("status") == "uncertain"
+                                               for row in will_context.receipts):
+                                            status = "uncertain"
+                                            checkpoint.update(mode="pause", delay_seconds=0)
                                         # Internal opportunity is never recorded as a person's speech.
                                         try:
                                             if desktop_spoken:
@@ -1042,15 +1069,30 @@ def start_zmq_listener():
                                             logger.warning("主动消息记忆写入失败: %s", mem_err)
                                 except Exception as exc:
                                     reason = str(exc)
-                                    status = "failed"
+                                    receipts = will_context.receipts if "will_context" in locals() else []
+                                    uncertain = any((row.get("result") or {}).get("status") == "uncertain"
+                                                    for row in receipts)
+                                    status = "uncertain" if uncertain else "failed"
+                                    if "will_context" in locals():
+                                        from common.activity import activity_checkpoint
+                                        checkpoint = activity_checkpoint(candidate, {
+                                            "mode": "pause" if uncertain else "continue",
+                                            "delay_seconds": 0 if uncertain else 15,
+                                            "note": reason[:1000],
+                                            "observations": will_context.activity.get("observations") or [],
+                                        }, locals().get("outcomes", []))
                                 finally:
+                                    lease_stop.set()
+                                    if lease_thread:
+                                        lease_thread.join(timeout=1)
                                     envelope = envelope_for_turn(None, None, "", owner_name=MEMORY_SETTINGS.owner_name).to_dict()
                                     journal = MemoryJournal(memory_outbox, envelope, "will:" + str(candidate.get("id")),
                                                             autonomous=True, candidate=candidate)
                                     journal.capture("autonomous_turn", {}, {"reflection": text, "reason": reason},
                                                     category="turn", status=status, key=journal.prefix + ":turn")
                                     result = {"id": candidate.get("id"), "timestamp": time.time(),
-                                              "status": status, "reason": reason, "reflection": text[:2000]}
+                                              "status": status, "reason": reason, "reflection": text[:2000],
+                                              "activity": checkpoint}
                                     # The acknowledgement follows the output on the same listener
                                     # queue; publishing a candidate alone is never counted as sent.
                                     _ZMQ_OUTBOUND_QUEUE.put([("bored_result", [

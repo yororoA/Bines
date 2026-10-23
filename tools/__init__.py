@@ -20,6 +20,14 @@ _MODULES = {
     "screen_tool": {"get_screen_info": "get_screen_info_wrapper"},
     "app_tool": {"open_application": "open_application"},
     "browser_tool": {"browser_search": "browser_search", "web_fetch": "web_fetch"},
+    "website_tool": {name: name for name in (
+        "website_status", "website_open", "website_snapshot", "website_scroll",
+        "website_create_draft", "website_plan", "website_approve", "website_execute", "website_interact",
+        "website_media_status", "website_tabs",
+    )},
+    "activity_tool": {name: name for name in (
+        "activity_continue", "activity_pause", "activity_finish", "autonomy_control",
+    )},
     "automation_tool": {name: name for name in ("automate_action", "automate_sequence")},
     "music_tool": {name: name for name in (
         "open_netease_music", "search_music_in_netease", "play_music_in_netease",

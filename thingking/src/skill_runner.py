@@ -30,6 +30,10 @@ QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | QQ_GROUP_OWNER_ACTIONS | {
     "broadcast_to_all_groups", "at_each_group_member",
     "get_ark_profile", "get_ark_conversations", "get_ark_chat_history", "send_ark_chat", "get_ark_operation",
     "get_moments", "add_moment", "comment_moment", "get_comments", "like_moment", "like_comment",
+    "website_status", "website_open", "website_snapshot", "website_scroll",
+    "website_create_draft", "website_plan", "website_approve", "website_execute",
+    "website_interact", "activity_continue", "activity_pause", "activity_finish", "autonomy_control",
+    "website_media_status", "website_tabs",
 }
 
 

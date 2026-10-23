@@ -152,11 +152,21 @@ def main():
         except Exception as exc:
             print(f"Docker 清理失败：{exc}", file=sys.stderr, flush=True)
             return 1
-    if not options.host and not options.external_napcat and docker_launcher.available():
-        print(f"Bines · Docker · {options.profile}", flush=True)
-        return _run_docker(options)
-    print(f"Bines · 宿主机 · {options.profile}", flush=True)
-    return _run_host(options)
+    from website_runtime import WebsiteBridgeProcess
+    website_bridge = WebsiteBridgeProcess()
+    try:
+        try:
+            if website_bridge.start():
+                print("网站浏览器 · 已就绪", flush=True)
+        except Exception as exc:
+            print(f"网站浏览器不可用：{exc}", file=sys.stderr, flush=True)
+        if not options.host and not options.external_napcat and docker_launcher.available():
+            print(f"Bines · Docker · {options.profile}", flush=True)
+            return _run_docker(options)
+        print(f"Bines · 宿主机 · {options.profile}", flush=True)
+        return _run_host(options)
+    finally:
+        website_bridge.close()
 
 
 if __name__ == "__main__":

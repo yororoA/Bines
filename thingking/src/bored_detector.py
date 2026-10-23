@@ -9,7 +9,7 @@ import uuid
 from path_setup import ensure_project_root
 
 ROOT = ensure_project_root(__file__, 2)
-from common.proactive import ProactivePolicy, appraise_history, compact_life, draft_decision, human_ref
+from common.proactive import ProactivePolicy, appraise_history, compact_life, context_blocked, draft_decision, human_ref
 
 log = logging.getLogger("bines.bored")
 
@@ -64,10 +64,14 @@ def main():
     log.info("自主意愿已启用 · 桌面 · 时间、情绪与历史")
     try:
         while True:
-            if results.poll(10000):
+            if results.poll(2000):
                 frames = results.recv_multipart()
                 result = json.loads(frames[1])
                 if result.get("id") == policy.state.pending.get("id"):
+                    if result.get("status") == "working":
+                        policy.state.pending["lease_until"] = float(result["timestamp"]) + policy.config.expiry
+                        save()
+                        continue
                     journal = MemoryJournal(outbox, local_envelope("").to_dict(), result["id"],
                                             autonomous=True, candidate=policy.state.pending)
                     journal.capture("autonomous_feedback", {}, result, status="completed",
@@ -77,10 +81,13 @@ def main():
                     policy.resolve(float(result.get("timestamp") or time.time()),
                                    delivered=result.get("status") in {"sent", "completed"},
                                    uncertain=result.get("status") == "uncertain",
-                                   reflection=result.get("reflection") or "")
+                                   reflection=result.get("reflection") or "",
+                                   activity=result.get("activity"))
                     save()
             now = time.time()
-            if policy.state.pending and now - policy.state.pending["timestamp"] > policy.config.expiry:
+            if (policy.state.pending and
+                    now > max(policy.state.pending["timestamp"] + policy.config.expiry,
+                              policy.state.pending.get("lease_until", 0))):
                 # PUB has no replay guarantees; an absent acknowledgement cannot prove no output.
                 policy.resolve(now, uncertain=True)
                 save()
@@ -91,7 +98,8 @@ def main():
                 last_local = max((m.get("ts") or 0 for m in snapshot.get("messages") or []), default=0)
                 ready = policy.tick(
                     now, snapshot.get("last_user"), available=available,
-                    last_activity=max(float(owner.get("ts") or 0), last_local),
+                    last_activity=(float(owner.get("ts") or 0) if policy.state.activity
+                                   else max(float(owner.get("ts") or 0), last_local)),
                     relationship_score=(snapshot.get("state") or {}).get("relationship_score", 0),
                     life=snapshot.get("life") or {},
                 )
@@ -122,8 +130,12 @@ def main():
                 if not ready:
                     continue
                 kinds = policy.eligible_kinds(now, snapshot.get("last_user"))
-                decision = draft_decision(materials, policy.state, now, capabilities="desktop", allowed_kinds=kinds)
-                if decision and decision["kind"] not in kinds:
+                active = policy.state.activity
+                continuing = active.get("mode") == "continue"
+                decision = ({"kind": active["kind"], "topic": active["topic"],
+                             "intent": active["intent"], "reason": active["reason"]} if continuing
+                            else draft_decision(materials, policy.state, now, capabilities="desktop", allowed_kinds=kinds))
+                if decision and not continuing and decision["kind"] not in kinds:
                     decision = None
                 if not decision:
                     policy.defer(time.time())
@@ -138,7 +150,11 @@ def main():
                     continue
                 candidate = {**decision, "id": uuid.uuid4().hex, "type": "bored",
                              "timestamp": time.time(), "based_on_user": policy.state.user_ref,
-                             "activity_at": float(owner.get("ts") or 0), "contact_allowed": "connection" in kinds,
+                             "activity_at": float(owner.get("ts") or 0),
+                             "contact_allowed": (active.get("contact_allowed", True)
+                                 and not context_blocked((snapshot.get("last_user") or {}).get("content"))
+                                 and not policy.config.quiet(now) if continuing else "connection" in kinds),
+                             "activity": dict(active) if continuing else {},
                              "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),
                              "life": compact_life(memory_context.get("life"))}
                 policy.reserve(candidate)

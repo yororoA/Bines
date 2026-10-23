@@ -6,7 +6,7 @@ import time
 import uuid
 
 from common.proactive import (
-    ProactiveConfig, ProactivePolicy, appraise_history, compact_life, draft_decision, human_ref,
+    ProactiveConfig, ProactivePolicy, appraise_history, compact_life, context_blocked, draft_decision, human_ref,
 )
 
 log = logging.getLogger("bines.qq.proactive")
@@ -54,21 +54,27 @@ def guard(store, event, now=None, *, config=None, central_activity=0):
     now = time.time() if now is None else now
     config = config or ProactiveConfig.from_env()
     candidate = event.get("proactive") or {}
+    from common.activity import activity_control
+    if activity_control().get("mode") in {"pause", "stop"}:
+        return "owner_paused"
     identity = store.identity(event)
     if not identity.owner or identity.group or identity.user == identity.account:
         return "invalid_target"
     if candidate.get("kind") == "connection" and config.quiet(now):
         return "quiet_hours"
-    if not 0 <= now - float(candidate.get("timestamp") or 0) <= config.expiry:
-        return "expired"
     with store.connection() as db:
         run = db.execute("SELECT candidate FROM proactive_runs WHERE id=?", (event.get("event_id"),)).fetchone()
         if not run or json.loads(run["candidate"]) != candidate:
             return "unknown_candidate"
+        execution = db.execute("SELECT status,lease FROM events WHERE id=?", (event.get("event_id"),)).fetchone()
         pending = db.execute(
             "SELECT raw FROM events WHERE conversation=? AND status IN ('pending','working')",
             (identity.conversation,),
         ).fetchall()
+    active = execution and execution["status"] == "working" and execution["lease"] > now
+    age = now - float(candidate.get("timestamp") or 0)
+    if age < 0 or (age > config.expiry and not active):
+        return "expired"
     if any(json.loads(row["raw"]).get("post_type") == "message" for row in pending):
         return "incoming_message"
     latest = latest_private(store, identity.conversation)
@@ -78,7 +84,8 @@ def guard(store, event, now=None, *, config=None, central_activity=0):
     # A desktop or group interaction after this candidate also cancels it.
     if max(owner_activity(store), central_activity) > float(candidate.get("activity_at") or 0):
         return "owner_active_elsewhere"
-    if now - max(float(user["ts"]), central_activity) < config.min_idle:
+    idle = min(config.min_idle, 15) if candidate.get("activity") else config.min_idle
+    if now - max(float(user["ts"]), central_activity) < idle:
         return "not_idle"
     return ""
 
@@ -91,7 +98,7 @@ def dispatch_allowed(store, event, action, params, operation_id, *, central_acti
         with store.connection() as db:
             count = db.execute("SELECT COUNT(*) FROM operations WHERE id LIKE ?",
                                (event["event_id"] + ":%",)).fetchone()[0]
-        if count >= 8 and store.operation(operation_id).get("status") == "not_found":
+        if count >= ProactiveConfig.from_env().quantum_actions and store.operation(operation_id).get("status") == "not_found":
             raise PermissionError("自主轮次写操作额度已用完")
     if not is_read(action) and (not operation_id or not operation_id.startswith(event["event_id"] + ":")):
         raise PermissionError("自主操作必须绑定本轮回执编号")
@@ -154,7 +161,12 @@ class QQProactive:
             operations = db.execute("SELECT * FROM operations WHERE id LIKE ?",
                                     (candidate["id"] + ":%",)).fetchall()
             turn = db.execute("SELECT payload FROM turns WHERE id=?", (candidate["id"],)).fetchone()
+            execution = db.execute("SELECT status,lease FROM events WHERE id=?", (candidate["id"],)).fetchone()
+        if (run and run["status"] == "queued" and execution
+                and execution["status"] == "working" and execution["lease"] > now):
+            return  # A renewed worker lease covers slow browser/model calls.
         reflection = (json.loads(turn["payload"] or "{}").get("reflection", "") if turn else "")
+        checkpoint = (json.loads(turn["payload"] or "{}").get("activity") if turn else None)
         if run and run["status"] == "queued":
             with self.store.connection() as db:
                 event = db.execute("SELECT 1 FROM events WHERE id=?", (candidate["id"],)).fetchone()
@@ -175,11 +187,11 @@ class QQProactive:
         if (delivered and (terminal or now - candidate["timestamp"] > self.config.expiry)
                 or (run and run["status"] in {"sent", "completed"})):
             policy.resolve(float(run["delivered_at"] or delivered["created"]) if run else float(delivered["created"]),
-                           delivered=True, reflection=reflection)
+                           delivered=True, reflection=reflection, activity=checkpoint)
         elif run and run["status"] == "uncertain":
-            policy.resolve(now, uncertain=True)
+            policy.resolve(now, uncertain=True, activity=checkpoint)
         elif not run or run["status"] in {"skipped", "failed"}:
-            policy.resolve(now)
+            policy.resolve(now, activity=checkpoint)
         elif now - candidate["timestamp"] > self.config.expiry:
             # Dispatch already began but never committed a receipt: don't chase/replay.
             policy.resolve(now, uncertain=bool(operations))
@@ -212,7 +224,7 @@ class QQProactive:
                 last = db.execute("SELECT MAX(ts) ts FROM messages WHERE conversation=?", (conversation,)).fetchone()
             ready = policy.tick(
                 now, user, available=connected and not busy,
-                last_activity=max(activity, float(last["ts"] or 0)),
+                last_activity=(activity if policy.state.activity else max(activity, float(last["ts"] or 0))),
                 relationship_score=(snapshot.get("state") or {}).get("relationship_score", 0),
                 life=snapshot.get("life") or {},
             )
@@ -246,8 +258,14 @@ class QQProactive:
             if not ready:
                 continue
             kinds = policy.eligible_kinds(now, user)
-            decision = self.decide(materials, policy.state, now, capabilities="QQ", allowed_kinds=kinds)
-            if decision and decision["kind"] not in kinds:
+            saved_activity = policy.state.activity
+            continuing = saved_activity.get("mode") == "continue"
+            if continuing:
+                decision = {"kind": saved_activity["kind"], "topic": saved_activity["topic"],
+                            "intent": saved_activity["intent"], "reason": saved_activity["reason"]}
+            else:
+                decision = self.decide(materials, policy.state, now, capabilities="QQ", allowed_kinds=kinds)
+            if decision and not continuing and decision["kind"] not in kinds:
                 decision = None
             if not decision:
                 policy.defer(self.clock())
@@ -256,7 +274,10 @@ class QQProactive:
             event_id = "proactive:" + uuid.uuid4().hex
             candidate = {**decision, "id": event_id, "based_on_user": human_ref(user),
                          "activity_at": activity, "timestamp": self.clock(),
-                         "contact_allowed": "connection" in kinds,
+                         "contact_allowed": (saved_activity.get("contact_allowed", True)
+                            and not context_blocked(user.get("content")) and not self.config.quiet(now)
+                            if continuing else "connection" in kinds),
+                         "activity": dict(saved_activity) if continuing else {},
                          "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),
                          "life": compact_life(memory_context.get("life"))}
             event = {"post_type": "bines_proactive", "self_id": original["self_id"],
@@ -284,7 +305,7 @@ class QQProactive:
 
     def run(self, stop):
         log.info("自主意愿已启用 · 时间、情绪与交流历史")
-        while not stop.wait(10):
+        while not stop.wait(2):
             try:
                 self.tick()
             except Exception as exc:

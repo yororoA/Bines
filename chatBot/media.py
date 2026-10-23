@@ -1,5 +1,6 @@
 """Read current and quoted QQ media without treating references as empty mentions."""
 import logging
+import re
 
 from chatBot.messages import readable, segments
 
@@ -13,7 +14,7 @@ def resolve_replies(events, client):
             if part.get("type") != "reply":
                 continue
             message_id = str((part.get("data") or {}).get("id") or "")
-            if not message_id or message_id in seen:
+            if not re.fullmatch(r"[1-9]\d*", message_id) or message_id in seen:
                 continue
             seen.add(message_id)
             if len(seen) > 4:

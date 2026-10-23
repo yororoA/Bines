@@ -51,6 +51,8 @@ def outcome_status(result):
     data = result_data(result)
     if isinstance(data, dict):
         status = str(data.get("status", "")).lower()
+        if status in {"blocked_human", "paused", "skipped"} or data.get("human_action_required"):
+            return "skipped"
         if status in {"uncertain", "started"}:
             return "uncertain"
         if status in {"error", "failed", "failure"} or data.get("retcode", 0) not in (0, "0", None):

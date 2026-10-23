@@ -26,6 +26,7 @@ venv/
 .tools/downloads/
 .tools/memory_export/
 .tools/memory-repair-*/
+.tools/agent-browser/
 singing/singing_venv/
 voiceprints
 /model
