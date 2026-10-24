@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from .models import ORIGIN_LEGACY, ROLES, is_system_event
 from .repository import MemoryRepository
+from .read_cache import read_cache
 
 CHUNK_SIZE = 700
 CHUNK_OVERLAP = 80
@@ -204,6 +205,7 @@ class EvidenceStore:
     def __init__(self, repo: MemoryRepository):
         self.repo = repo
         self.conn = repo.conn
+        self.reads = read_cache(repo)
         self.ensure_schema()
 
     @contextmanager
@@ -262,6 +264,13 @@ class EvidenceStore:
                     "expansion_sources": sorted({path for path, _ in expansions}),
                 }),
             }
+
+    def _direct_source(self, row, source_type):
+        retention = getattr(self.repo, "retention", None)
+        status = retention.direct(row, source_type) if retention else None
+        if status is False:
+            return False
+        return _active(row, source_type, include_archived=status is True)
 
     def _experience_record(self, memory):
         ref = _object(memory.get("meta")).get("experience_ref")
@@ -324,7 +333,7 @@ class EvidenceStore:
             for source_type, table in (("memory", "memories"), ("message", "messages")):
                 for raw in self.conn.execute(f"SELECT * FROM {table} ORDER BY id"):
                     row = dict(raw)
-                    if not _active(row, source_type):
+                    if not self._direct_source(row, source_type):
                         continue
                     for key in self._source_keys(row, source_type):
                         key_id = key["id"]
@@ -377,7 +386,7 @@ class EvidenceStore:
                     f"AND scope IN ({_placeholders(scopes)})", (*batch, *scopes),
                 ):
                     source = dict(raw)
-                    if _active(source, source_type):
+                    if self._direct_source(source, source_type):
                         sources[source_type, source["id"]] = (source["scope"], _fingerprint(source, source_type))
         result = {}
         for row in rows:
@@ -493,6 +502,10 @@ class EvidenceStore:
         return (start, end) if 0 < start <= end <= 2**63 - 1 else None
 
     def _memory_messages(self, memory: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return list(self.reads.get("evidence_messages", (memory["id"], memory["scope"]),
+                                   lambda: self._walk_memory_messages(memory)))
+
+    def _walk_memory_messages(self, memory: Dict[str, Any]) -> List[Dict[str, Any]]:
         scope = memory["scope"]
         pending, seen, messages = [memory], set(), {}
         while pending:
@@ -566,30 +579,50 @@ class EvidenceStore:
             source = dict(self.conn.execute(
                 f"SELECT * FROM {table} WHERE id = ? AND scope = ?", (current[field], current["scope"]),
             ).fetchone())
-            experience_evidence = (self._experience_evidence(source, query, limit)
-                                   if source_type == "memory" else [])
-            messages = [source] if source_type == "message" else self._memory_messages(source)
-            if messages:
-                terms = set(_tokens(query))
-                messages.sort(key=lambda row: (
-                    -len(terms.intersection(_tokens(row["content"]))), row["ts"], row["id"],
-                ))
-                message_evidence = [{
-                    "source_type": "message", "source_id": row["id"],
-                    "source_ref": row.get("source_ref") or f"messages:{row['id']}",
-                    "role": row["role"], "actor_id": row["actor_id"], "content": _short_evidence(row["content"], query),
-                    "ts": row["ts"], "scope": row["scope"],
-                } for row in messages[:limit]]
-                combined = message_evidence + experience_evidence
-                combined.sort(key=lambda ev: -len(terms.intersection(_tokens(ev["content"]))))
-                return combined[:limit]
-            if experience_evidence:
-                return experience_evidence
-            return [{
-                "source_type": "legacy_memory" if source.get("origin") == ORIGIN_LEGACY else "summary",
-                "source_id": source["id"],
-                "source_ref": source.get("source_ref") or f"memories:{source['id']}",
-                "role": None, "actor_id": None, "content": _short_evidence(source["content"], query),
-                "ts": source["end_ts"] if source.get("end_ts") is not None else source.get("created_at"),
-                "scope": source["scope"],
-            }]
+            return self._source_evidence(source, source_type, query, limit)
+
+    def source_evidence(self, memory_id, scopes, query="", limit=4):
+        """Resolve a scoped cold source without adding it to the direct index."""
+        scopes = _strings(scopes)
+        if not scopes or limit <= 0:
+            return []
+        with self._atomic():
+            row = self.conn.execute(
+                f"SELECT * FROM memories WHERE id=? AND scope IN ({_placeholders(scopes)}) AND deleted=0",
+                (memory_id, *scopes)).fetchone()
+            if not row or not _active(dict(row), "memory"):
+                return []
+            graph = getattr(self.repo, "associations", None)
+            node = graph.for_memory(memory_id) if graph else None
+            if node and not graph.valid(node):
+                return []
+            return self._source_evidence(dict(row), "memory", query, limit)
+
+    def _source_evidence(self, source, source_type, query, limit):
+        experience_evidence = (self._experience_evidence(source, query, limit)
+                               if source_type == "memory" else [])
+        messages = [source] if source_type == "message" else self._memory_messages(source)
+        if messages:
+            terms = set(_tokens(query))
+            messages.sort(key=lambda row: (
+                -len(terms.intersection(_tokens(row["content"]))), row["ts"], row["id"],
+            ))
+            message_evidence = [{
+                "source_type": "message", "source_id": row["id"],
+                "source_ref": row.get("source_ref") or f"messages:{row['id']}",
+                "role": row["role"], "actor_id": row["actor_id"], "content": _short_evidence(row["content"], query),
+                "ts": row["ts"], "scope": row["scope"],
+            } for row in messages[:limit]]
+            combined = message_evidence + experience_evidence
+            combined.sort(key=lambda ev: -len(terms.intersection(_tokens(ev["content"]))))
+            return combined[:limit]
+        if experience_evidence:
+            return experience_evidence
+        return [{
+            "source_type": "legacy_memory" if source.get("origin") == ORIGIN_LEGACY else "summary",
+            "source_id": source["id"],
+            "source_ref": source.get("source_ref") or f"memories:{source['id']}",
+            "role": None, "actor_id": None, "content": _short_evidence(source["content"], query),
+            "ts": source["end_ts"] if source.get("end_ts") is not None else source.get("created_at"),
+            "scope": source["scope"],
+        }]

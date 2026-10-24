@@ -629,7 +629,8 @@ class MemoryRepository:
             (json.dumps(payload, ensure_ascii=False), self.clock(), job_id),
         )
 
-    def claim_job(self, lease_seconds: int, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
+    def claim_job(self, lease_seconds: int, kinds: Optional[Sequence[str]] = None,
+                  excluded: Sequence[int] = ()) -> Optional[Dict[str, Any]]:
         now = self.clock()
         sql = (
             "SELECT * FROM jobs WHERE ((status = 'pending' AND available_at <= ?) "
@@ -639,8 +640,13 @@ class MemoryRepository:
         if kinds:
             sql += f" AND kind IN ({','.join('?' for _ in kinds)})"
             params.extend(kinds)
+        if excluded:
+            sql += f" AND id NOT IN ({','.join('?' for _ in excluded)})"
+            params.extend(excluded)
         with self.transaction():
-            row = self.conn.execute(sql + " ORDER BY available_at, id LIMIT 1", params).fetchone()
+            row = self.conn.execute(sql + " ORDER BY CASE WHEN kind='update_state' THEN 0 "
+                                    "WHEN kind='associate' THEN 1 ELSE 2 END, available_at, id LIMIT 1",
+                                    params).fetchone()
             if not row:
                 return None
             self.conn.execute(

@@ -16,7 +16,7 @@ CALL_END = "[[/SKILL_CALL]]"
 QQ_ALLOWED_ACTIONS = {
     "get_time", "send_qq_group_msg", "send_qq_private_msg",
     "napcat_call", "napcat_discover", "napcat_catalog", "napcat_send", "napcat_forward",
-    "napcat_events", "update_status", "search_memory", "browser_search", "web_fetch",
+    "napcat_events", "update_status", "search_memory", "cite_memory", "browser_search", "web_fetch",
 }
 QQ_GROUP_OWNER_ACTIONS = {"napcat_custom_faces", "napcat_send_custom_face"}
 NAPCAT_ACTIONS = {

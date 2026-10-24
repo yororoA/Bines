@@ -71,6 +71,7 @@ def run_main_agent_rounds(
         directive_text = ""
         segment_state = {"buffer": "", "first": True}
         stream_done = False
+        memory_confirmed = False
 
         while not stream_done:
             try:
@@ -84,6 +85,10 @@ def run_main_agent_rounds(
                 stream_done = True
                 break
 
+            if chunk and not memory_confirmed:
+                from thinking_model_helper import _confirm_memory_request
+                _confirm_memory_request(messages)
+                memory_confirmed = True
             full_response.append(chunk)
             if directive_mode:
                 directive_text += chunk

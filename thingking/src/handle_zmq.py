@@ -561,7 +561,9 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
     journal = MemoryJournal(memory_outbox, envelope, turn_id)
     user_ref = journal.prefix + ":user"
     journal.source_message_refs = [user_ref]
-    memory_outbox.record_message(envelope, "user", user_input, user_ref, state_update=False)
+    journal.turn_message_refs = [user_ref]
+    memory_outbox.record_message(envelope, "user", user_input, user_ref, state_update=False,
+                                 turn_ref=journal.prefix + ":turn")
     try:
         with tool_context(ToolContext(
             LOCAL_IDENTITY, event_id=turn_id, turn_id=turn_id, user_text=user_input, journal=journal,
@@ -569,7 +571,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             return _process_message(user_input, img_descr, source, extra_data)
     finally:
         memory_outbox.record_message(envelope, "user", user_input, user_ref,
-                                     state_update=not getattr(journal, "state_updated", False))
+                                     state_update=not getattr(journal, "state_updated", False),
+                                     turn_ref=journal.prefix + ":turn")
 
 
 def _process_message(user_input, img_descr, source=None, extra_data=None):
@@ -769,7 +772,11 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
             journal.turn_result = assistant_memory
             journal.turn_status = ("failed" if stream_result.get("error") else
                                    "interrupted" if exited_due_to_interrupt else "completed")
-            memory_outbox.record_message(envelope, "assistant", assistant_memory, journal.prefix + ":assistant")
+            memory_outbox.record_message(envelope, "assistant", assistant_memory, journal.prefix + ":assistant",
+                                         turn_ref=journal.prefix + ":turn")
+            if assistant_memory.strip():
+                journal.source_message_refs.append(journal.prefix + ":assistant")
+                journal.turn_message_refs.append(journal.prefix + ":assistant")
         except Exception as mem_err:
             print(f"[Thinking] 写入记忆失败: {mem_err}", flush=True)
 

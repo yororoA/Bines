@@ -67,6 +67,10 @@ class HybridRetriever:
         return result
 
     def search(self, query, scopes, kinds=None, k=10, excluded=(), as_of=None, include_history=False):
+        with self.repo.transaction(), self.keys.reads.session():
+            return self._search(query, scopes, kinds, k, excluded, as_of, include_history)
+
+    def _search(self, query, scopes, kinds, k, excluded, as_of, include_history):
         if not isinstance(query, str) or not query.strip() or not scopes:
             return []
         k = max(1, min(int(k), 50))
@@ -126,16 +130,20 @@ class HybridRetriever:
                            "reranker": "local", "as_of": as_of, "historical": historical}
         if self.settings.reranker_model and candidates:
             candidates = self._rerank(query, candidates[:count])
+        graph = getattr(self.repo, "associations", None)
+        graph_enabled = graph is not None and self.settings.associations_enabled
         output, seen = [], set()
         for row in candidates:
             source_id = (row["source_type"], row["memory_id"] or row["message_id"])
             if source_id in seen:
                 continue
-            evidence = self.keys.evidence(row, scopes, query=query, limit=self.settings.evidence_limit)
-            if not evidence:
-                continue
+            evidence = []
+            if not graph_enabled:
+                evidence = self.keys.evidence(row, scopes, query=query, limit=self.settings.evidence_limit)
+                if not evidence:
+                    continue
             seen.add(source_id)
-            memory = self.repo.get_memory(row["memory_id"]) if row["memory_id"] else None
+            memory = self.repo.get_memory(row["memory_id"]) if row["memory_id"] and not graph_enabled else None
             # key.content 是原文连续片段；evidence 指向原始轮次，不能把提取事实当成用户原话。
             output.append({
                 **(memory or {}), "id": row["memory_id"] or f"message:{row['message_id']}",
@@ -145,8 +153,64 @@ class HybridRetriever:
                 "score": row["score"], "rrf_score": row["rrf_score"],
                 "retrieval_channels": row["retrieval_channels"], "origin": row["meta"].get("origin"),
             })
+            if len(output) == (count if graph_enabled else k):
+                break
+        if not graph_enabled:
+            return output[:k]
+        return self._graph_fusion(query, output, scopes, allowed_kinds, k, excluded, as_of, historical)
+
+    def _graph_fusion(self, query, direct, scopes, kinds, k, excluded, as_of, historical):
+        graph = self.repo.associations
+
+        def visible(node):
+            if not node or node["scope"] not in scopes or not graph.valid(node):
+                return False
+            if node["source_type"] == "raw":
+                return "message" in kinds and not any(f"message:{i}" in excluded for i in node["message_ids"])
+            return (node["source_type"] in kinds and node["memory_id"] not in excluded
+                    and bool(self.repo.temporal.visible_memory_ids(
+                        [node["memory_id"]], as_of=as_of, include_history=historical)))
+
+        rows, direct_ids = {}, []
+        for hit in direct:
+            node = (graph.for_memory(hit["memory_id"]) if hit["memory_id"]
+                    else graph.for_message(hit["message_id"]))
+            if not node:
+                node = (graph.register_memory(hit["memory_id"]) if hit["memory_id"]
+                        else graph.register_raw([self.repo.get_message(hit["message_id"])]))
+            if not visible(node):
+                continue
+            if node["id"] not in rows:
+                rows[node["id"]] = hit
+                direct_ids.append(node["id"])
+        expanded = graph.expand(query, direct_ids, scopes, visible)
+        graph_ids = []
+        for nid, activation, chains in expanded:
+            rows[nid] = {**rows.get(nid, {}), "graph_activation": activation, "chain_ids": chains}
+            graph_ids.append(nid)
+        # CrossEncoder already ranked the direct candidates. Fuse ranks afterwards
+        # so its score replacement cannot discard association activation.
+        scores, channels = rrf({"direct": direct_ids, "association": graph_ids},
+                               self.settings.retrieval_rrf_constant)
+        ordered = sorted(rows, key=lambda nid: (-scores.get(nid, 0),
+                         -graph.strength(graph.get(nid)), nid))
+        output, families = [], set()
+        for nid in ordered:
+            node = graph.get(nid)
+            family = set(node["family"])
+            if families.intersection(family):
+                continue
+            view = graph.view(node, self.keys, query)
+            if not view:
+                continue
+            row = {**rows[nid], **view}
+            row["associations"] = graph.reasons(row.get("chain_ids") or [], node["scope"])
+            families.update(family)
+            output.append({**row, "score": scores[nid], "retrieval_channels": channels[nid]})
             if len(output) == k:
                 break
+        self.last_trace["graph_candidates"] = len(graph_ids)
+        self.last_trace["graph_hops"] = self.settings.graph_max_hops
         return output
 
     def _rerank(self, query, candidates):

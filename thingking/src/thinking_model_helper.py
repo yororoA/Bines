@@ -14,6 +14,13 @@ logger = logging.getLogger("bines.thinking.model")
 _MAX_TEXT_RETRY_TOKENS = 262144
 
 
+def _confirm_memory_request(messages):
+    from tools.context import CURRENT_CONTEXT
+    journal = CURRENT_CONTEXT.get().journal
+    if journal and hasattr(journal, "confirm_memory_presentations"):
+        journal.confirm_memory_presentations(messages)
+
+
 class ModelCompletionError(RuntimeError):
     """The API succeeded but did not return a complete final answer."""
 
@@ -40,6 +47,7 @@ class ThinkingModelHelper:
             )
             if not response.choices:
                 raise ModelCompletionError(f"model {self.model} returned no choices")
+            _confirm_memory_request(messages)
             choice = response.choices[0]
             text = (choice.message.content or "").strip()
             finish_reason = getattr(choice, "finish_reason", None)
@@ -143,6 +151,7 @@ class ThinkingModelHelper:
                 )
                 if not response.choices:
                     raise ModelCompletionError(f"model {self.model} returned no choices")
+                _confirm_memory_request(request_messages)
                 choice = response.choices[0]
                 if getattr(choice, "finish_reason", None) != "length":
                     break

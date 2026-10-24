@@ -117,6 +117,22 @@ class QQThinking:
         self.store.add(identity, "assistant", readable(message),
                        external_id=f"{identity.account}:{identity.group or 'p:'+identity.user}:{message_id}",
                        raw={"message": message, "receipt": result})
+        from tools.context import CURRENT_CONTEXT
+        context = CURRENT_CONTEXT.get()
+        if context.journal and context.identity.scope == identity.scope:
+            external = f"{identity.account}:{identity.group or 'p:'+identity.user}:{message_id}"
+            with self.store.connection() as db:
+                row = db.execute("SELECT id FROM messages WHERE scope=? AND external_id=?",
+                                 (identity.scope, external)).fetchone()
+            if row:
+                source = "gateway:" + hashlib.sha256(str(Path(self.store.path).resolve()).encode()).hexdigest()
+                ref = source + ":" + str(row["id"])
+                if ref not in context.journal.source_message_refs:
+                    context.journal.source_message_refs.append(ref)
+                    context.journal.turn_result = str(getattr(context.journal, "turn_result", "")) + "\n" + readable(message)
+                    context.journal.turn_status = "sent"
+                if ref not in context.journal.turn_message_refs:
+                    context.journal.turn_message_refs.append(ref)
 
     def reply_actions(self, identity, texts):
         """Legacy final-text fallback preserves model text without automatic @."""
@@ -187,6 +203,7 @@ class QQThinking:
                                      (identity.scope, external)).fetchone()
                 if message:
                     journal.source_message_refs.append(source + ":" + str(message["id"]))
+                    journal.turn_message_refs.append(source + ":" + str(message["id"]))
         context = ToolContext(
             identity, rows[-1]["id"], turn_id, user_text=trusted_user_text, journal=journal,
         )

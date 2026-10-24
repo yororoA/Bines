@@ -26,6 +26,7 @@ RPC_METHODS = (
     "life_snapshot",
     "regulate_life",
     "claim_job",
+    "complete_association",
     "complete_summary",
     "complete_diary",
     "complete_state_update",

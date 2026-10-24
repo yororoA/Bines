@@ -57,7 +57,8 @@ class Clock:
 class MemoryFixture:
     def __init__(self, clock_start=1_790_000_000.0, **settings_overrides):
         self.tmp = Path(tempfile.mkdtemp(prefix="bines_memory_test_"))
-        overrides = {"summarize_trigger": 6, "summarize_chunk": 4, "working_window": 4, "state_updates": False}
+        overrides = {"summarize_trigger": 6, "summarize_chunk": 4, "working_window": 4, "state_updates": False,
+                     "associations_enabled": False}
         overrides.update(settings_overrides)
         self.settings = MemorySettings(data_dir=self.tmp, owner_qq_ids=frozenset({OWNER_QQ}), **overrides)
         self.clock = Clock(clock_start)

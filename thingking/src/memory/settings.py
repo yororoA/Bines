@@ -43,6 +43,16 @@ class MemorySettings:
     retrieval_max_distance: float = 0.7
     evidence_limit: int = 3
     reranker_model: str = ""
+    associations_enabled: bool = True
+    retention_enabled: bool = False
+    association_candidates: int = 20
+    graph_max_hops: int = 2
+    graph_candidate_limit: int = 40
+    raw_protect_k: int = 3
+    episode_protect_k: int = 1
+    raw_hot_budget: int = 512
+    episode_hot_budget: int = 256
+    cold_activation_factor: float = .1
 
     @property
     def db_path(self) -> Path:
@@ -70,4 +80,9 @@ def load_settings() -> MemorySettings:
         reranker_model=os.environ.get("BINES_MEMORY_RERANKER", "").strip(),
         summarize_idle_seconds=max(60, int(os.environ.get("BINES_MEMORY_IDLE_SUMMARY_SECONDS", "1800"))),
         summarize_idle_min=max(2, min(40, int(os.environ.get("BINES_MEMORY_IDLE_SUMMARY_MIN", "4")))),
+        associations_enabled=os.environ.get("BINES_MEMORY_ASSOCIATIONS", "true").lower() in {"true", "1", "yes", "on"},
+        retention_enabled=os.environ.get("BINES_MEMORY_RETENTION", "false").lower() in {"true", "1", "yes", "on"},
+        association_candidates=max(1, min(40, int(os.environ.get("BINES_MEMORY_ASSOCIATION_CANDIDATES", "20")))),
+        raw_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_RAW_HOT_BUDGET", "512"))),
+        episode_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_EPISODE_HOT_BUDGET", "256"))),
     )

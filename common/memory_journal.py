@@ -145,13 +145,65 @@ class MemoryJournal:
         self.autonomous, self.candidate = autonomous, safe_data(candidate or {})
         self.event_ids = list(event_ids)
         self.source_message_refs = []
+        self.turn_message_refs = []
+        self.memory_presentations = {}
+        self.confirmed_memory_presentations = {}
+        self.memory_citations = []
         self.prefix = "experience:" + hashlib.sha256(str(outbox.path.resolve()).encode()).hexdigest() + ":" + turn_id
 
     def _record(self, key, record):
         record = {**record, "turn_id": self.turn_id, "autonomous": self.autonomous,
                   "candidate": self.candidate, "event_ids": self.event_ids,
                   "source_message_refs": self.source_message_refs}
+        if record.get("category") == "turn":
+            record["turn_message_refs"] = self.turn_message_refs
+            record["memory_usage"] = {"presented": list(self.confirmed_memory_presentations.values()),
+                                      "citations": self.memory_citations}
         self.outbox.put(key, "record_experience", {"envelope": self.envelope, "record": safe_data(record)})
+
+    def present_memory(self, item, spans):
+        nid = item.get("node_id")
+        if not nid or not item.get("node_digest") or not spans:
+            return
+        previous = self.memory_presentations.get(nid, {})
+        self.memory_presentations[nid] = {
+            "node_id": nid, "node_digest": item["node_digest"],
+            "spans": list(dict.fromkeys([*(previous.get("spans") or []), *spans]))[:8],
+            "chain_ids": list(dict.fromkeys([*(previous.get("chain_ids") or []),
+                                             *(item.get("chain_ids") or [])]))[:20],
+        }
+
+    def confirm_memory_presentations(self, messages):
+        """Confirm only spans in a request for which the model returned data."""
+        texts = [m.get("content", "") for m in messages if isinstance(m, dict)]
+        text = "\n".join(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                         for value in texts)
+        for nid, item in self.memory_presentations.items():
+            if nid not in text:
+                continue
+            spans = [span for span in item["spans"]
+                     if any(encoded in text for encoded in (
+                         span, repr(span)[1:-1], json.dumps(span, ensure_ascii=False)[1:-1]))]
+            if spans:
+                previous = self.confirmed_memory_presentations.get(nid, {})
+                if previous.get("node_digest") != item["node_digest"]:
+                    previous = {}
+                self.confirmed_memory_presentations[nid] = {
+                    **item, "spans": list(dict.fromkeys([*(previous.get("spans") or []), *spans]))[:8],
+                    "chain_ids": list(dict.fromkeys([*(previous.get("chain_ids") or []),
+                                                     *(cid for cid in item["chain_ids"] if cid in text)]))[:20],
+                }
+
+    def cite_memory(self, source_id, answer_span, source_quote="", chain_id=""):
+        if source_id not in self.confirmed_memory_presentations:
+            raise ValueError("引用来源必须已在本轮呈现")
+        if not isinstance(answer_span, str) or not answer_span.strip():
+            raise ValueError("引用需要最终回答中的连续片段")
+        allowed = self.confirmed_memory_presentations[source_id].get("chain_ids") or []
+        if chain_id and chain_id not in allowed:
+            raise ValueError("关联理由必须来自本轮实际呈现的资料")
+        self.memory_citations.append({"source_id": source_id, "answer_span": answer_span,
+                                      "source_quote": source_quote, "chain_id": chain_id})
 
     def begin(self, command, *, category="tool", key=None):
         key = key or self.prefix + ":" + uuid.uuid4().hex

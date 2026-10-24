@@ -20,7 +20,14 @@ def search_memory(query: str, k: int = 8):
         raise RuntimeError("记忆服务未就绪")
     k = max(1, min(int(k), 20))
     hits = client.search(query, [identity.scope], k=k)
+    journal = CURRENT_CONTEXT.get().journal
+    if journal:
+        for hit in hits:
+            journal.present_memory(hit, [hit["content"], *[
+                ev["content"] for ev in (hit.get("evidence") or [])[:3] if ev.get("content")]])
     return [{
+        "id": hit["id"], "citation_id": hit.get("citation_id"), "chain_ids": hit.get("chain_ids", []),
+        "associations": hit.get("associations", []),
         "content": hit["content"], "kind": hit["kind"], "day_key": hit.get("day_key"),
         "evidence": [
             {"source_type": ev.get("source_type"), "source_ref": ev.get("source_ref"),
@@ -29,6 +36,16 @@ def search_memory(query: str, k: int = 8):
             for ev in (hit.get("evidence") or [])[:3]
         ],
     } for hit in hits]
+
+
+def cite_memory(source_id: str, answer_span: str, source_quote: str = "", chain_id: str = ""):
+    """标注本轮确实使用的记忆来源；answer_span 必须出现在最终回答中，原话引用附 source_quote。"""
+    from tools.context import CURRENT_CONTEXT
+    journal = CURRENT_CONTEXT.get().journal
+    if not journal:
+        return "本轮没有可记录的记忆引用上下文。"
+    journal.cite_memory(source_id, answer_span, source_quote, chain_id)
+    return "引用回执已暂存，轮次结束后核对来源与实际回答。"
 
 
 def _apply_changes(state, *, current_location=None, relationship_delta=None, add_item=None, remove_item=None,

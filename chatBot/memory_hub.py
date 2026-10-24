@@ -202,9 +202,10 @@ class MemoryHub:
                 ).fetchall()
             for row in rows:
                 with self.store.connection() as db:
-                    live_event = db.execute(
-                        "SELECT 1 FROM events WHERE id=?", ("message:" + (row["external_id"] or ""),),
-                    ).fetchone() is not None
+                    event_row = db.execute(
+                        "SELECT batch,status FROM events WHERE id=?", ("message:" + (row["external_id"] or ""),),
+                    ).fetchone()
+                    live_event = event_row is not None
                 scope = row["scope"]
                 if scope.startswith("qq:"):
                     _, account, kind, target = scope.split(":", 3)
@@ -227,6 +228,9 @@ class MemoryHub:
                     role=row["role"], content=row["content"],
                     source_ref=self.source + ":" + str(row["id"]), recalled=bool(row["recalled"]),
                     state_update=live_event,
+                    **({"turn_ref": "experience:" + hashlib.sha256(str(self.outbox.path.resolve()).encode()).hexdigest()
+                                    + ":" + event_row["batch"] + ":turn"}
+                       if event_row and event_row["batch"] else {}),
                 )
                 with self.store.connection() as db:
                     db.execute("UPDATE messages SET memory_synced=1 WHERE id=? AND content=? AND recalled=?",

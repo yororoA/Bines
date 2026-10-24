@@ -84,6 +84,9 @@ class MemoryClient:
     def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
         return self.call("claim_job", **({"kinds": list(kinds)} if kinds else {}))
 
+    def complete_association(self, job_id: int, links: List[Dict[str, Any]], prior: float = .5) -> Dict[str, Any]:
+        return self.call("complete_association", job_id=job_id, links=links, prior=prior)
+
     def complete_state_update(self, job_id: int, changes: Dict[str, Any],
                               expected_version: Optional[int] = None) -> Dict[str, Any]:
         return self.call("complete_state_update", job_id=job_id, changes=changes, expected_version=expected_version)
