@@ -1,0 +1,2 @@
+# Optional Ark integration; Python >= 3.11. Existing UTF-16 requirements stay intact.
+mcp==2.3.0

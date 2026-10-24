@@ -1,11 +1,10 @@
 """
-动态（Moments）后端 API 客户端。
-与 Express 提供的 /api/moments 接口字段与路径一致，供本地 Skills 调用。
-uid 与 token 从环境变量 MOMENTS_UID、MOMENTS_TOKEN 读取，请求头必带。
-调用动态相关工具时写入 moments_tools.log，记录工具名、参数及结果摘要。
+动态（Moments）客户端：优先使用已配置的 Ark MCP，保留显式 legacy REST。
+工具名和缓冲结构兼容现有 SkillRunner；MCP 失败不会回落到 REST。
 """
 import os
 import json
+from uuid import uuid4
 from pathlib import Path
 from typing import Optional, Any, Dict, List
 from datetime import datetime
@@ -21,12 +20,16 @@ except ImportError:
 
 PROJECT_ROOT = ensure_project_root(__file__, 1)
 
-from config import (
-    MOMENTS_UID,
-    MOMENTS_TOKEN,
-    MOMENTS_API_BASE_URL,
-    MOMENTS_API_TIMEOUT,
-)
+from ark_mcp_client import ArkMcpError, call_ark, mcp_config
+
+try:
+    from config import MOMENTS_UID, MOMENTS_TOKEN, MOMENTS_API_BASE_URL, MOMENTS_API_TIMEOUT
+except ImportError:
+    MOMENTS_UID = MOMENTS_TOKEN = MOMENTS_API_BASE_URL = ""
+    MOMENTS_API_TIMEOUT = 15
+
+_REFRESHED_TOKEN = None
+_REFRESHED_SOURCE = None
 
 
 # 动态工具调用日志：与本模块同目录（tools/moments_tools.log）
@@ -43,7 +46,8 @@ def _log_moments_call(tool_name: str, params: dict, result: Any) -> None:
     """将本次调用的工具名、参数、结果摘要写入 moments_tools.log。"""
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        params_str = json.dumps(params, ensure_ascii=False)
+        # Do not persist posts, comments, URLs or credentials in tool logs.
+        params_str = json.dumps({"fields": sorted(params)}, ensure_ascii=False)
         if isinstance(result, dict):
             msg = result.get("message", "")
             data = result.get("data")
@@ -67,11 +71,55 @@ def _url(path: str) -> str:
 
 
 def _headers() -> dict:
-    """鉴权：Authorization Bearer + uid，从环境变量读取。"""
-    h = {"Content-Type": "application/json", "uid": MOMENTS_UID or ""}
-    if MOMENTS_TOKEN:
-        h["Authorization"] = f"X-Token {MOMENTS_TOKEN}"
+    """旧 REST 鉴权，续接服务端刷新的 token。"""
+    source = os.environ.get("MOMENTS_TOKEN", MOMENTS_TOKEN)
+    token = _REFRESHED_TOKEN if _REFRESHED_SOURCE == source and _REFRESHED_TOKEN else source
+    h = {"Content-Type": "application/json", "uid": os.environ.get("MOMENTS_UID", MOMENTS_UID)}
+    if token:
+        h["Authorization"] = f"X-Token {token}"
     return h
+
+
+def _legacy_shape(item: dict) -> dict:
+    """Keep the existing action/buffer fields, alongside MCP's media metadata."""
+    return {
+        **item, "_id": item.get("id"), "createdAt": item.get("created_at"),
+        "momentId": item.get("moment_id"),
+        "comments": item.get("comment_ids", []),
+        "filenames": {
+            str(index): media["url"] for index, media in enumerate(item.get("media", []))
+            if isinstance(media, dict) and media.get("url") and not str(media.get("mime", "")).startswith("video/")
+        },
+    }
+
+
+def _mcp_request(tool_name: str, params: dict, body: dict, request_id: Optional[str]) -> dict:
+    pagination = {"page": params.get("page", 1), "limit": params.get("limit", 20)}
+    if tool_name == "get_moments":
+        name, args = "ark_list_moments", pagination
+    elif tool_name == "get_comments":
+        name = "ark_list_comments"
+        args = {**pagination, **({"moment_id": body["moment_id"]} if body.get("moment_id") else {"comment_ids": body["commentIds"]})}
+    elif tool_name == "add_moment":
+        name, args = "ark_publish_moment", {"title": body["title"], "content": body["content"]}
+    elif tool_name == "comment_moment":
+        name, args = "ark_comment_moment", {"moment_id": body["momentId"], "comment": body["comment"]}
+        if body.get("belong"):
+            args["belong"] = body["belong"]
+    elif tool_name in {"like_moment", "like_comment"}:
+        kind = "moment" if tool_name == "like_moment" else "comment"
+        name, args = f"ark_like_{kind}", {f"{kind}_id": body[f"{kind}Id"], "like": body["like"]}
+    else:
+        raise ArkMcpError("UNSUPPORTED_ACTION", f"MCP 不提供 {tool_name}；不会回落旧 REST。")
+    is_write = tool_name not in {"get_moments", "get_comments"}
+    if request_id:
+        args["request_id"] = request_id
+    result = call_ark(name, args, write=is_write)
+    data = result["data"]
+    if "items" in data:
+        return {**result, "data": [_legacy_shape(item) for item in data["items"]],
+                "pagination": {key: data.get(key) for key in ("page", "limit", "has_more", "next_page")}}
+    return {**result, "data": _legacy_shape(data)}
 
 
 def _check_requests():
@@ -89,18 +137,25 @@ def _request_with_retry(
     timeout: Optional[int] = None,
     log_params: Optional[dict] = None,
     max_retries: int = 3,
+    request_id: Optional[str] = None,
 ) -> dict:
     """
-    统一的 HTTP 请求封装：最多重试 max_retries 次，仍失败则记录失败日志并抛出异常交由上游处理。
+    已配置 MCP 时直接分发。旧 REST 只重试读取；写操作不自动重放。
     """
+    global _REFRESHED_TOKEN, _REFRESHED_SOURCE
+    if mcp_config() is not None:
+        return _mcp_request(tool_name, params or {}, json_body or {}, request_id)
     _check_requests()
     url = _url(path)
-    timeout = timeout or MOMENTS_API_TIMEOUT
+    timeout = timeout or float(os.environ.get("MOMENTS_API_TIMEOUT", MOMENTS_API_TIMEOUT))
     log_params = log_params or {}
+    is_read = method.upper() == "GET" or tool_name == "get_comments"
+    attempts = max_retries if is_read else 1
+    stable_id = request_id or str(uuid4())
 
     last_exc: Optional[Exception] = None
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, attempts + 1):
         try:
             if method.upper() == "GET":
                 resp = requests.get(
@@ -114,23 +169,35 @@ def _request_with_retry(
                     url,
                     params=params,
                     json=json_body,
-                    headers=_headers(),
+                    headers={**_headers(), "X-Idempotency-Key": stable_id},
                     timeout=timeout,
                 )
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 
+            refreshed = resp.headers.get("X-Refreshed-Token")
+            if refreshed:
+                _REFRESHED_TOKEN = refreshed
+                _REFRESHED_SOURCE = os.environ.get("MOMENTS_TOKEN", MOMENTS_TOKEN)
             resp.raise_for_status()
             out = resp.json()
+            if out.get("success") is False:
+                raise ArkMcpError("LEGACY_ERROR", "旧接口拒绝了请求，请检查参数和凭证。", None if is_read else stable_id)
+            if not is_read:
+                out["request_id"] = stable_id
             _log_moments_call(f"{tool_name}#ok{attempt}", log_params, out)
             return out
         except Exception as e:
             last_exc = e
-            _log_moments_call(f"{tool_name}#error{attempt}", log_params, f"Error: {e}")
-            if attempt < max_retries:
+            _log_moments_call(f"{tool_name}#error{attempt}", log_params, type(e).__name__)
+            retryable = isinstance(e, (requests.Timeout, requests.ConnectionError))
+            if isinstance(e, requests.HTTPError):
+                retryable = e.response is not None and e.response.status_code >= 500
+            if retryable and attempt < attempts:
                 continue
-            # 最终失败仍抛出，让 SkillRunner 返回明确错误
-            raise
+            if not is_read:
+                raise RuntimeError(f"LEGACY_WRITE_UNCONFIRMED: request_id={stable_id}。旧接口写入结果未确认，请在网页核查，勿直接重发。") from None
+            raise ArkMcpError("LEGACY_ERROR", "旧接口读取失败，请检查网络、参数和凭证。") from None
 
     # 理论上不会到这里
     if last_exc:
@@ -143,7 +210,7 @@ def _normalize_moment_item(item: dict) -> dict:
     将后端返回的单条 moment 文档规整成仅包含需要字段的结构：
     _id, title, content, filenames, comments, likes, views, createdAt, username。
     """
-    moment_id = item.get("_id") or item.get("documentId")
+    moment_id = item.get("_id") or item.get("id") or item.get("documentId")
     if not moment_id:
         return {}
 
@@ -162,10 +229,15 @@ def _normalize_moment_item(item: dict) -> dict:
         "views": item.get("views", 0),
         "createdAt": item.get("createdAt"),
         "username": item.get("username"),
+        "uid": item.get("uid"),
+        "media": item.get("media", []),
+        "comment_count": item.get("comment_count", len(comments)),
+        "comments_has_more": item.get("comments_has_more", False),
+        "url": item.get("url"),
     }
 
 
-def get_moments() -> dict:
+def get_moments(page: int = 1, limit: int = 20) -> dict:
     """
     获取「已发布动态列表」并写入本模块缓冲区。
 
@@ -176,11 +248,11 @@ def get_moments() -> dict:
         - filenames: { filename: url, ... }
         - comments:  初始为评论 id 列表，调用 get_comments 后会被升级为 { comment_id: comment_info }
     - 会自动写入模块级缓冲区：_MOMENTS_BUFFER / _MOMENTS_BY_ID / _MOMENT_COMMENTS_IDS，供后续工具使用
-    - 网络请求最多重试 3 次，失败会在 moments_tools.log 中记录错误并抛出异常
+    - MCP 读取失败明确报错；legacy REST 仅对可恢复的读取错误重试
     """
     global _MOMENTS_BUFFER, _MOMENTS_BY_ID, _MOMENT_COMMENTS_IDS
 
-    params = {"isEditing": "false"}
+    params = {"isEditing": "false", "page": page, "limit": limit}
     raw = _request_with_retry(
         "get_moments",
         "GET",
@@ -212,7 +284,7 @@ def get_moments() -> dict:
     _MOMENTS_BY_ID = moments_by_id
     _MOMENT_COMMENTS_IDS = moment_comments_ids
 
-    out = {"message": raw.get("message", ""), "data": normalized}
+    out = {"message": raw.get("message", ""), "data": normalized, "pagination": raw.get("pagination")}
     # 再记录一条整体结构日志，便于调试（不包含原始大字段）
     _log_moments_call("get_moments_structured", params, out)
     return out
@@ -253,7 +325,7 @@ def _simplify_moment_item(item: dict) -> dict:
     }
 
 
-def get_moments_simple() -> dict:
+def get_moments_simple(page: int = 1, limit: int = 20) -> dict:
     """
     面向大模型的简化版 get_moments（推荐使用）。
 
@@ -263,14 +335,14 @@ def get_moments_simple() -> dict:
     - 若只需要阅读/筛选动态内容，一般调用本函数即可
     """
     params = {"isEditing": "false", "mode": "simple"}
-    raw = get_moments()
+    raw = get_moments(page=page, limit=limit)
     # 直接复用 get_moments 已经规整并写入缓冲区的结构
-    out = {"message": raw.get("message", ""), "data": raw.get("data") or []}
+    out = {"message": raw.get("message", ""), "data": raw.get("data") or [], "pagination": raw.get("pagination")}
     _log_moments_call("get_moments_simple", params, out)
     return out
 
 
-def add_moment(title: str, content: str = "") -> dict:
+def add_moment(title: str, content: str = "", request_id: Optional[str] = None) -> dict:
     """
     发布一条新的动态（仅含标题和正文）。
 
@@ -281,9 +353,8 @@ def add_moment(title: str, content: str = "") -> dict:
       - content: 选填，正文内容，内部会将 \\r\\n 转为 \\n
     - 返回: { "message": "ok", "data": 后端原始 moment 文档 }
     - 成功后会将新动态规整后写入本模块缓冲区（最新一条在列表最前）
-    - 网络请求最多重试 3 次，失败会在 moments_tools.log 中记录错误并抛出异常
+    - request_id 可选；首次自动生成，成功或失败都会返回。未知结果请先查询，不自动重发
     """
-    _check_requests()
     if not title:
         out = {"message": "缺少必要字段：title", "data": None}
         _log_moments_call("add_moment", {"title": title, "content": content or ""}, out)
@@ -301,6 +372,7 @@ def add_moment(title: str, content: str = "") -> dict:
         "/post",
         json_body=payload,
         log_params=params,
+        request_id=request_id,
     )
 
     # 成功发布后尝试更新本地 moments 缓冲
@@ -320,7 +392,7 @@ def add_moment(title: str, content: str = "") -> dict:
     return out
 
 
-def comment_moment(moment_id: str, comment: str, belong: Optional[str] = None) -> dict:
+def comment_moment(moment_id: str, comment: str, belong: Optional[str] = None, request_id: Optional[str] = None) -> dict:
     """
     对某条动态或某条评论发表评论。
 
@@ -338,9 +410,8 @@ def comment_moment(moment_id: str, comment: str, belong: Optional[str] = None) -
       - belong: 被回复的评论 id，可为 None
     - 返回: { "message": "ok", "data": 新评论文档 }
     - 会自动更新本模块评论缓冲和对应 moment 的 comments 字段
-    - 网络请求最多重试 3 次，失败会在 moments_tools.log 中记录错误并抛出异常
+    - request_id 可选；首次自动生成，成功或失败都会返回。未知结果请先查询，不自动重发
     """
-    _check_requests()
     body = {"momentId": moment_id, "comment": comment}
     if belong is not None and str(belong).strip():
         body["belong"] = str(belong).strip()
@@ -351,6 +422,7 @@ def comment_moment(moment_id: str, comment: str, belong: Optional[str] = None) -
         "/comment/post",
         json_body=body,
         log_params=params,
+        request_id=request_id,
     )
 
     # 更新本地评论缓冲与对应 moment 的 comments 列表
@@ -387,7 +459,7 @@ def comment_moment(moment_id: str, comment: str, belong: Optional[str] = None) -
     return out
 
 
-def get_comments(comment_ids: list) -> dict:
+def get_comments(comment_ids: Optional[list] = None, moment_id: Optional[str] = None, page: int = 1, limit: int = 20) -> dict:
     """
     根据评论 id 列表批量拉取评论详情。
 
@@ -398,16 +470,21 @@ def get_comments(comment_ids: list) -> dict:
       3) 把这个 id 列表传给本工具，获取每条评论的详细内容
     - 返回: { "message": "ok", "data": [ { "_id", "content", "username", "momentId", "likes", "createdAt" }, ... ] }
     - 会更新模块级评论缓冲 (_COMMENTS_BY_ID / _MOMENT_COMMENTS_IDS)，并将对应 moment 的 comments 字段升级为 {comment_id: comment_info} 映射
-    - 网络请求最多重试 3 次，失败会在 moments_tools.log 中记录错误并抛出异常
+    - MCP 支持 moment_id + page/limit 分页；comment_ids 和 moment_id 二选一
     """
-    if not isinstance(comment_ids, list) or not comment_ids:
+    if moment_id and mcp_config() is None:
+        raise ArkMcpError("MCP_REQUIRED", "按动态分页读取评论需要 MCP；旧接口请传 comment_ids。")
+    if moment_id and comment_ids:
+        raise ValueError("moment_id 和 comment_ids 只能传一个。")
+    if not moment_id and (not isinstance(comment_ids, list) or not comment_ids):
         return {"message": "缺少 commentIds 数组", "data": []}
 
     raw = _request_with_retry(
         "get_comments",
         "POST",
         "/comment/get",
-        json_body={"commentIds": comment_ids},
+        params={"page": page, "limit": limit},
+        json_body={"commentIds": comment_ids, "moment_id": moment_id},
         log_params={"commentIds": comment_ids},
     )
 
@@ -454,12 +531,12 @@ def get_comments(comment_ids: list) -> dict:
     except Exception:
         pass
 
-    out = {"message": raw.get("message", ""), "data": simplified}
+    out = {"message": raw.get("message", ""), "data": simplified, "pagination": raw.get("pagination")}
     _log_moments_call("get_comments_structured", {"commentIds": comment_ids}, out)
     return out
 
 
-def like_comment(comment_id: str, like: bool) -> dict:
+def like_comment(comment_id: str, like: bool, request_id: Optional[str] = None) -> dict:
     """
     点赞/取消点赞评论。uid/token 从环境变量读取。
 
@@ -469,7 +546,7 @@ def like_comment(comment_id: str, like: bool) -> dict:
       - like: True 表示点赞，False 表示取消点赞
     - 返回: { "message": "ok", "data": { "commentId", "likes", "hasLiked" } }
     - 成功后会更新本模块缓冲中该评论的 likes 计数
-    - 网络请求最多重试 3 次，失败会在 moments_tools.log 中记录错误并抛出异常
+    - request_id 可选；结果未知时查询原编号，不自动重发
     """
     out = _request_with_retry(
         "like_comment",
@@ -477,6 +554,7 @@ def like_comment(comment_id: str, like: bool) -> dict:
         "/comment/like",
         json_body={"commentId": comment_id, "like": like},
         log_params={"commentId": comment_id, "like": like},
+        request_id=request_id,
     )
 
     # 更新本地评论 likes 计数
@@ -499,7 +577,7 @@ def get_liked_comments() -> dict:
     - 工具名（在工具系统中）：get_liked_comments
     - 返回: { "message": "ok", "data": [comment_id1, comment_id2, ...] }
     - 可与 _COMMENTS_BY_ID / get_comments 结合，恢复这些评论的详细内容
-    - 网络请求最多重试 3 次，失败会在 moments_tools.log 中记录错误并抛出异常
+    - 此旧 REST 辅助方法未注册到 SkillRunner，MCP 模式明确拒绝
     """
     return _request_with_retry(
         "get_liked_comments",
@@ -509,7 +587,7 @@ def get_liked_comments() -> dict:
     )
 
 
-def like_moment(moment_id: str, like: bool) -> dict:
+def like_moment(moment_id: str, like: bool, request_id: Optional[str] = None) -> dict:
     """
     点赞/取消点赞动态。uid/token 从环境变量读取。
 
@@ -519,7 +597,7 @@ def like_moment(moment_id: str, like: bool) -> dict:
       - like: True 表示点赞，False 表示取消点赞
     - 返回: { "message": "ok", "data": { "momentId", "likes", "hasLiked" } }
     - 成功后会更新本模块缓冲中该动态的 likes 计数
-    - 网络请求最多重试 3 次，失败会在 moments_tools.log 中记录错误并抛出异常
+    - request_id 可选；结果未知时查询原编号，不自动重发
     """
     out = _request_with_retry(
         "like_moment",
@@ -527,6 +605,7 @@ def like_moment(moment_id: str, like: bool) -> dict:
         "/like",
         json_body={"momentId": moment_id, "like": like},
         log_params={"momentId": moment_id, "like": like},
+        request_id=request_id,
     )
 
     # 更新本地 moments 缓冲中的 likes 计数
@@ -549,7 +628,7 @@ def get_liked_moments() -> dict:
     - 工具名（在工具系统中）：get_liked_moments
     - 返回: { "message": "ok", "data": [moment_id1, moment_id2, ...] }
     - 可与 _MOMENTS_BY_ID / get_moments 结合，恢复这些动态的详细内容
-    - 网络请求最多重试 3 次，失败会在 moments_tools.log 中记录错误并抛出异常
+    - 此旧 REST 辅助方法未注册到 SkillRunner，MCP 模式明确拒绝
     """
     return _request_with_retry(
         "get_liked_moments",
