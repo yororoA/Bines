@@ -112,8 +112,11 @@ class MemoryClient:
     def list_association_nodes(self, **filters: Any) -> Dict[str, Any]:
         return self.call("list_association_nodes", **filters)
 
-    def memory_detail(self, node_id=None, memory_id=None, scope=None):
-        return self.call("memory_detail", node_id=node_id, memory_id=memory_id, scope=scope)
+    def memory_detail(self, node_id=None, memory_id=None, scope=None, message_id=None):
+        return self.call("memory_detail", node_id=node_id, memory_id=memory_id, scope=scope, message_id=message_id)
+
+    def memory_graph(self, scopes=None):
+        return self.call("memory_graph", scopes=list(scopes) if scopes else None, timeout_ms=60000)
 
     def list_jobs(self, **filters):
         return self.call("list_jobs", **filters)

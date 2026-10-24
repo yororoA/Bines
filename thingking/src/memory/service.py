@@ -1217,10 +1217,15 @@ class MemoryService:
         with self.repo.transaction():
             return MemoryAdmin(self).nodes(**filters)
 
-    def memory_detail(self, node_id=None, memory_id=None, scope=None):
+    def memory_detail(self, node_id=None, memory_id=None, scope=None, message_id=None):
         from .admin import MemoryAdmin
         with self.repo.transaction():
-            return MemoryAdmin(self).detail(node_id, memory_id, scope)
+            return MemoryAdmin(self).detail(node_id, memory_id, scope, message_id)
+
+    def memory_graph(self, scopes=None):
+        from .graph_view import graph_snapshot
+        with self.repo.transaction():
+            return graph_snapshot(self, scopes)
 
     def list_jobs(self, **filters):
         from .admin import MemoryAdmin

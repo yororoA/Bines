@@ -103,7 +103,7 @@ class MemoryAdminTest(unittest.TestCase):
         hub = MemoryHub.__new__(MemoryHub)
         hub.lock = threading.RLock()
         hub._call = lambda *a, **k: self.fail("QQ admin request reached the memory service")
-        for method in ("list_association_nodes", "memory_detail", "list_jobs"):
+        for method in ("list_association_nodes", "memory_detail", "memory_graph", "list_jobs"):
             for owner in (False, True):
                 identity = SimpleNamespace(local=False, owner=owner, group=None)
                 with self.assertRaises(PermissionError):
@@ -125,7 +125,85 @@ class MemoryAdminTest(unittest.TestCase):
             self.assertEqual(http.get("/api/detail?node_id=missing").status_code, 404)
             self.assertEqual(http.get("/api/nodes?offset=bad").status_code, 400)
             self.assertEqual(http.get("/api/nodes").status_code, 200)
+            self.assertEqual(http.get("/api/graph").status_code, 200)
+            self.assertEqual(http.get("/api/graph").headers["Cache-Control"], "no-store")
+            self.assertEqual(http.get("/constellation").status_code, 200)
+            self.assertEqual(http.get("/constellation_worker.js").status_code, 200)
             self.assertEqual(http.get("/missing").status_code, 404)
+
+    def test_graph_includes_all_unindexed_sources_without_scheduling_jobs(self):
+        for i in range(151):
+            self.repo.add_memory("semantic", "owner", f"历史记忆{i}")
+        self.repo.ensure_conversation("old", "local", "owner")
+        message = self.repo.add_message("old", "owner", "user", "未回建原文",
+                                       self.clock(), "2026-10-23", actor_id="owner")
+        before = self.repo.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        view = self.service.memory_graph()
+        self.assertEqual(view["counts"]["nodes"], 152)
+        self.assertEqual(view["counts"]["unregistered"], 152)
+        self.assertEqual(view["edges"], [])
+        self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], before)
+        detail = self.service.memory_detail(message_id=message)
+        self.assertEqual(detail["content"], "未回建原文")
+        self.assertIsNone(self.service.memory_detail(message_id=message, scope="qq_group:other"))
+
+    def test_graph_keeps_long_source_searchable_and_uses_scoped_detail_identifiers(self):
+        text = "较长的历史材料。" * 60 + "尾部约定：周六归还围巾"
+        mid = self.repo.add_memory("semantic", "owner", text)
+        node = self.service.memory_graph()["nodes"][0]
+        self.assertLessEqual(len(node["preview"]), 280)
+        self.assertIn("周六归还围巾", node["search_text"])
+        self.assertEqual(node["detail_params"], {"memory_id": mid})
+        self.assertEqual(self.service.memory_detail(**node["detail_params"], scope="owner")["content"], text)
+
+    def test_graph_scope_and_complete_raw_turns(self):
+        result = self.service.record_turn(local_env(self.clock() - 86400), "真实原话", "回应")
+        self.service.add_memory("semantic", "qq_group:other", "另一个作用域")
+        view = self.service.memory_graph(["owner"])
+        self.assertEqual(view["counts"]["raw"], 1)
+        self.assertEqual(view["nodes"][0]["message_ids"], result["message_ids"])
+        self.assertEqual({n["scope"] for n in view["nodes"]}, {"owner"})
+
+    def test_graph_does_not_expose_forgotten_sources_or_stale_edges(self):
+        source = self.service.add_memory("semantic", "owner", "需要修正的围巾约定")["id"]
+        target = self.service.add_memory("semantic", "owner", "另一份围巾约定")["id"]
+        claimed = self.service.claim_job(["associate"])
+        a, b = claimed["materials"]["source"], self.service.graph.for_memory(target)
+        link = {"target_id": b["id"], "reason_key": "scarf", "reason": "围巾约定", "relation_type": "event",
+                "confidence": .8, "evidence": [{"node_id": a["id"], "quote": a["content"]},
+                                             {"node_id": b["id"], "quote": "另一份围巾约定"}]}
+        self.service.complete_association(claimed["job"]["id"], [link])
+        self.assertEqual(len(self.service.memory_graph()["edges"]), 1)
+        self.repo.update_memory(source, content="已经修订的原文")
+        view = self.service.memory_graph()
+        self.assertEqual(view["edges"], [])
+        self.assertTrue(any(n["preview"] == "已经修订的原文" for n in view["nodes"]))
+        self.service.delete_memory(target)
+        self.assertFalse(any(n["memory_id"] == target for n in self.service.memory_graph()["nodes"]))
+
+    def test_graph_brightness_is_maximum_of_both_chain_weights(self):
+        source = self.service.add_memory("semantic", "owner", "围巾约定一")["id"]
+        target = self.service.add_memory("semantic", "owner", "围巾约定二")["id"]
+        claimed = self.service.claim_job(["associate"])
+        a, b = claimed["materials"]["source"], self.service.graph.for_memory(target)
+        link = {"target_id": b["id"], "reason_key": "scarf", "reason": "围巾约定", "relation_type": "support",
+                "confidence": .8, "evidence": [{"node_id": a["id"], "quote": a["content"]},
+                                             {"node_id": b["id"], "quote": "围巾约定二"}]}
+        self.service.complete_association(claimed["job"]["id"], [link])
+        self.repo.conn.execute("""UPDATE chain_memberships SET recall_strength=.83,citation_strength=.92,
+            scored_revision=(SELECT revision FROM association_chains WHERE id=chain_memberships.chain_id)""")
+        node = next(n for n in self.service.memory_graph()["nodes"] if n["memory_id"] == source)
+        self.assertEqual(node["max_weight"], .92)
+        self.assertEqual(node["max_recall"], .83)
+        self.assertEqual(node["weight_basis"], "chain_max")
+
+    def test_graph_shows_audit_records_without_making_them_retrievable(self):
+        mid = self.repo.add_memory("episode", "owner", "只读审计记录", meta={"audit_only": True})
+        view = self.service.memory_graph()
+        self.assertEqual(len(view["nodes"]), 1)
+        self.assertTrue(view["nodes"][0]["record_only"])
+        self.assertEqual(self.service.memory_detail(memory_id=mid)["content"], "只读审计记录")
+        self.assertEqual(self.service.search("只读审计记录", ["owner"]), [])
 
     def test_model_repairs_quote_before_association_is_written(self):
         source = self.service.add_memory("semantic", "owner", "用户约好周末送蓝色围巾")["id"]

@@ -37,6 +37,7 @@ RPC_METHODS = (
     "list_memories",
     "list_association_nodes",
     "memory_detail",
+    "memory_graph",
     "list_jobs",
     "search",
     "get_memory",

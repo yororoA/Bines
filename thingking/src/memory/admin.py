@@ -50,17 +50,29 @@ class MemoryAdmin:
                               "SELECT COUNT(*) FROM chain_memberships WHERE node_id=?", (node["id"],)).fetchone()[0]})
         return {"items": items, "total": total}
 
-    def detail(self, node_id=None, memory_id=None, scope=None):
-        node = self.graph.get(node_id, scope) if node_id else self.graph.for_memory(memory_id)
+    def detail(self, node_id=None, memory_id=None, scope=None, message_id=None):
+        node = (self.graph.get(node_id, scope) if node_id else self.graph.for_memory(memory_id) if memory_id
+                else self.graph.for_message(int(message_id)) if message_id is not None else None)
         registered = node is not None
         material = self.graph.material(node) if node else None
         if not node and memory_id:
             source = self.repo.get_memory(memory_id)
-            if source and _active(source, "memory") and (scope is None or scope == source["scope"]):
+            from .graph_view import independent_material
+            prototype, unlinked = independent_material(self.graph, source) if source else (None, None)
+            if unlinked and (scope is None or scope == source["scope"]):
                 node = {"id": None, "memory_id": memory_id, "scope": source["scope"],
                         "source_type": source["kind"], "source_ref": f"memory:{memory_id}",
-                        "family": sorted(self.graph._roots(source)), "revision": 0, "ready": 0,
+                        "family": prototype["family"], "revision": 0, "ready": 0,
                         "retrieval_status": "hot", "retention_reason": None}
+                material = unlinked
+        if not node and message_id is not None:
+            source = self.repo.get_message(int(message_id))
+            if source and _active(source, "message", include_archived=True) and (scope is None or scope == source["scope"]):
+                node = {"id": None, "memory_id": None, "scope": source["scope"],
+                        "source_type": "raw", "source_ref": source["source_ref"] or f"message:{source['id']}",
+                        "family": [f"message:{source['id']}"], "message_ids": [source["id"]],
+                        "revision": 0, "ready": 0,
+                        "retrieval_status": "cold" if source.get("episode_id") else "hot", "retention_reason": None}
                 material = {"text": source["content"], "sources": [source]}
         if not node or scope is not None and node["scope"] != scope:
             return None

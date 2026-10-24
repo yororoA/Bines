@@ -47,6 +47,17 @@ def _list_arg(name):
 def index():
     return send_from_directory(app.static_folder, "index.html")
 
+@app.route("/constellation")
+def constellation():
+    return send_from_directory(app.static_folder, "constellation.html")
+
+
+@app.route("/api/graph")
+def memory_graph():
+    response = _ok(client.memory_graph(scopes=_list_arg("scopes")))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 
 @app.route("/api/stats")
 def stats():
@@ -80,7 +91,8 @@ def list_nodes():
 def memory_detail():
     result = client.memory_detail(node_id=request.args.get("node_id") or None,
                                   memory_id=request.args.get("memory_id") or None,
-                                  scope=request.args.get("scope") or None)
+                                  scope=request.args.get("scope") or None,
+                                  message_id=int(request.args["message_id"]) if request.args.get("message_id") else None)
     if result is None:
         return jsonify({"success": False, "error": "记录不存在或来源已失效"}), 404
     return _ok(result)

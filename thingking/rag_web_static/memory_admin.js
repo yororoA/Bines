@@ -148,3 +148,11 @@ setInterval(() => {
   if (document.hidden || $("memory-detail").open || $("editor").open) return;
   if (!$("tab-overview").classList.contains("hidden")) Promise.all([loadStats(), loadJobs()]).catch(alertError);
 }, 15000);
+
+// The constellation shares this complete detail view, including original evidence.
+const detailLinkParams = new URLSearchParams(location.search);
+const detailLink = Object.fromEntries(["node_id", "memory_id", "message_id", "scope"]
+  .filter((key) => detailLinkParams.has(key)).map((key) => [key, detailLinkParams.get(key)]));
+if (detailLink.node_id || detailLink.memory_id || detailLink.message_id) {
+  openMemoryDetail(detailLink).catch(alertError);
+}

@@ -6,6 +6,9 @@ nav{display:flex;gap:4px}nav button{color:#b7cec3;transition:background .2s ease
 nav button.active{background:#eff5e9;color:#183b30}nav button:hover{background:#ffffff14;color:#fff}
 .header-status{margin-left:auto;color:#b7cec3;font-size:12px;display:flex;gap:8px;align-items:center}
 .header-status::before{content:"";width:6px;height:6px;border-radius:50%;background:#b5d894}
+.constellation-link{color:#d1e5d8;border:1px solid #7ca58b66;border-radius:6px;padding:5px 12px;font-size:12px;text-decoration:none}
+.constellation-link:hover{background:#ffffff14;color:#fff}
+.constellation-link:focus-visible{outline:2px solid #b5d894;outline-offset:3px}
 main{padding:28px 26px;max-width:1320px}
 .card{border-radius:12px;padding:20px;box-shadow:0 3px 14px #233b3003}
 button.btn{padding:8px 14px;transition:background .2s ease-in-out,border-color .2s ease-in-out}
