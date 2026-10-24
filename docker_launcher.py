@@ -64,12 +64,23 @@ def compose_command(profile: str, *args: str) -> List[str]:
 
 def _environment(profile: str) -> Dict[str, str]:
     from common.clock import timezone
+    from common.website_spool import read_bridge_token
     env = dict(os.environ)
     env["BINES_PROFILE"] = profile
     env["BINES_MEMORY_TIMEZONE"] = timezone().key
     env["BUILDX_CONFIG"] = str(BUILDX_CONFIG)
     env.setdefault("BINES_UID", str(os.getuid() if hasattr(os, "getuid") else 1000))
     env.setdefault("BINES_GID", str(os.getgid() if hasattr(os, "getgid") else 1000))
+    try:
+        token = read_bridge_token(
+            ROOT / "thingking" / "memory_data" / "website_bridge",
+            env.get("BINES_WEBSITE_BRIDGE_TOKEN", ""),
+        )
+        if token:
+            env["BINES_WEBSITE_BRIDGE_TOKEN"] = token
+    except (OSError, ValueError):
+        # A broken optional browser bridge must not block Docker maintenance.
+        pass
     for service, digest in source_hashes(env).items():
         env["BINES_" + service.upper().replace("-", "_") + "_HASH"] = digest
     return env

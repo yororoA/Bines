@@ -38,6 +38,12 @@ class FakeBrowser:
     def close(self):
         pass
 
+    def read_existing(self, platform, args, timeout=60):
+        return self.run(platform, args, timeout=timeout)
+
+    def existing_platforms(self):
+        return []
+
 
 class WebsiteServiceTests(unittest.TestCase):
     def setUp(self):
@@ -525,6 +531,20 @@ class AgentBrowserTests(unittest.TestCase):
 
 
 class WebsiteRuntimeTests(unittest.TestCase):
+    def test_compose_update_reads_live_token_without_launcher_environment(self):
+        import docker_launcher
+        from common.website_spool import BRIDGE_CREDENTIALS_FILE, atomic_write_json
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            spool = root / "thingking" / "memory_data" / "website_bridge"
+            atomic_write_json(spool / BRIDGE_CREDENTIALS_FILE, {"token": "live-token"})
+            with patch.object(docker_launcher, "ROOT", root), patch.object(
+                docker_launcher, "source_hashes", return_value={},
+            ), patch.dict(os.environ, {"BINES_WEBSITE_BRIDGE_TOKEN": ""}):
+                env = docker_launcher._environment("chatbot")
+            self.assertEqual(env["BINES_WEBSITE_BRIDGE_TOKEN"], "live-token")
+
     def test_newest_installed_chrome_for_testing_is_selected(self):
         from website_runtime import _chrome_for_testing_binary, installed_chrome_for_testing
 
@@ -592,6 +612,86 @@ class WebsiteRuntimeTests(unittest.TestCase):
 
 
 class WebsiteSpoolTests(unittest.TestCase):
+    def test_recreated_container_connects_without_environment_token(self):
+        from common.website_spool import BRIDGE_CREDENTIALS_FILE
+        from website_bridge import SpoolWorker
+        from tools import website_tool
+
+        class Service:
+            def status(self, platform=""):
+                return {"status": "ok", "platform": platform}
+
+        with tempfile.TemporaryDirectory() as temp:
+            worker = SpoolWorker(Service(), temp, "live-token")
+            worker.start()
+            try:
+                with patch.dict(os.environ, {
+                    "BINES_WEBSITE_BRIDGE_SPOOL": temp, "BINES_WEBSITE_BRIDGE_TOKEN": "",
+                }):
+                    result = json.loads(website_tool._request(
+                        "/v1/status", {"platform": "bilibili"}, timeout=2,
+                    ))
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["platform"], "bilibili")
+                if os.name != "nt":
+                    self.assertEqual((Path(temp).stat().st_mode & 0o777), 0o700)
+                    self.assertEqual(
+                        (Path(temp) / BRIDGE_CREDENTIALS_FILE).stat().st_mode & 0o777, 0o600,
+                    )
+            finally:
+                worker.close()
+            self.assertFalse((Path(temp) / BRIDGE_CREDENTIALS_FILE).exists())
+
+    def test_bridge_restart_reconnects_with_frozen_old_environment_token(self):
+        from website_bridge import SpoolWorker
+        from tools import website_tool
+
+        class Service:
+            def __init__(self, generation):
+                self.generation = generation
+            def status(self, platform=""):
+                return {"status": "ok", "generation": self.generation}
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "BINES_WEBSITE_BRIDGE_SPOOL": temp, "BINES_WEBSITE_BRIDGE_TOKEN": "old-token",
+        }):
+            for token, generation in (("old-token", 1), ("new-token", 2)):
+                worker = SpoolWorker(Service(generation), temp, token)
+                worker.start()
+                try:
+                    result = json.loads(website_tool._request("/v1/status", {}, timeout=2))
+                    self.assertEqual(result["generation"], generation)
+                    self.assertEqual(os.environ["BINES_WEBSITE_BRIDGE_TOKEN"], "old-token")
+                finally:
+                    worker.close()
+
+    def test_invalid_published_credentials_do_not_fall_back_or_send_requests(self):
+        from common.website_spool import BRIDGE_CREDENTIALS_FILE, atomic_write_json, heartbeat
+        from tools import website_tool
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "BINES_WEBSITE_BRIDGE_SPOOL": temp, "BINES_WEBSITE_BRIDGE_TOKEN": "env-token",
+        }):
+            root = Path(temp)
+            atomic_write_json(root / "heartbeat.json", heartbeat("env-token"))
+            for token in ("", None, ["env-token"], "wrong-token"):
+                with self.subTest(token=token):
+                    atomic_write_json(root / BRIDGE_CREDENTIALS_FILE, {"token": token})
+                    with self.assertRaises(website_tool.WebsiteRequestError) as caught:
+                        website_tool._request("/v1/status", {}, timeout=0.1)
+                    self.assertTrue(caught.exception.rejected)
+                    self.assertEqual(list((root / "requests").glob("*.json")), [])
+
+    def test_missing_credentials_report_startup_problem_before_enqueueing(self):
+        from tools import website_tool
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "BINES_WEBSITE_BRIDGE_SPOOL": temp, "BINES_WEBSITE_BRIDGE_TOKEN": "",
+        }):
+            with self.assertRaisesRegex(website_tool.WebsiteRequestError, "尚未提供连接令牌"):
+                website_tool._request("/v1/status", {}, timeout=0.1)
+            self.assertEqual(list((Path(temp) / "requests").glob("*.json")), [])
+
     def test_owner_request_can_run_during_video_observation(self):
         from website_bridge import SpoolWorker
         from tools import website_tool
@@ -626,6 +726,7 @@ class WebsiteSpoolTests(unittest.TestCase):
 
     def test_second_bridge_cannot_replace_active_heartbeat(self):
         from website_bridge import SpoolWorker
+        from common.website_spool import read_bridge_token
         with tempfile.TemporaryDirectory() as temp:
             first = SpoolWorker(None, temp, "first")
             second = SpoolWorker(None, temp, "second")
@@ -635,6 +736,7 @@ class WebsiteSpoolTests(unittest.TestCase):
                     second.start()
                 second.close()
                 self.assertTrue((Path(temp) / "heartbeat.json").exists())
+                self.assertEqual(read_bridge_token(temp), "first")
             finally:
                 first.close()
             second.start()

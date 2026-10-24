@@ -69,7 +69,8 @@ def choose_activity(model, memory_context, candidate):
             "planning_only": candidate.get("planning_only", False),
         }, ensure_ascii=False)
     )})
-    text = model.complete_text(messages, response_format={"type": "json_object"},
+    from common.website_perception import with_website_observations
+    text = model.complete_text(with_website_observations(messages), response_format={"type": "json_object"},
                                temperature=0.85, max_tokens=4096)
     decision = parse_activity_decision(text)
     if context.journal:

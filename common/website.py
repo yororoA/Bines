@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 
 MAX_CONTENT = 20_000
@@ -143,6 +143,14 @@ def validate_url(platform: Platform, value: str) -> str:
     if not any(_domain_matches(parsed.hostname, rule) for rule in platform.domains):
         raise ValueError(f"地址不属于{platform.label}允许域名")
     return url
+
+
+def navigation_identity(url):
+    parsed = urlsplit(str(url or ""))
+    tracking = {"vt", "spm_id_from", "vd_source", "from_spmid", "spmid", "share_source"}
+    query = sorted((key, value) for key, value in parse_qsl(parsed.query)
+                   if key not in tracking and not key.startswith("utm_"))
+    return parsed.hostname, parsed.path.rstrip("/"), query, parsed.fragment
 
 
 def _default_steps(platform: Platform, action: str, title: str, content: str, media: list[str], target_url: str):
@@ -550,6 +558,23 @@ class AgentBrowser:
         self.headed = headed
         self.runner = runner or subprocess.run
         self.lock = threading.RLock()
+        self.runtime_failures = {}
+        from common.website_cdp import ExistingPageReader
+        self.page_reader = ExistingPageReader(self.profile_root)
+
+    def read_existing(self, platform, args, timeout=10):
+        with self.lock:
+            return self.page_reader.run(platform, list(args), timeout=timeout)
+
+    def existing_platforms(self):
+        result = []
+        for config in PLATFORMS.values():
+            try:
+                if self.page_reader._pages(config.key):
+                    result.append(config.key)
+            except Exception:
+                continue
+        return result
 
     def _argv(self, platform: Platform, args):
         profile = self.profile_root / platform.key
@@ -570,18 +595,26 @@ class AgentBrowser:
 
     def run(self, platform: Platform, args, timeout=60):
         argv = self._argv(platform, args)
+        env = dict(os.environ)
+        # Let the browser report its own timeout before the CLI is terminated.
+        env["AGENT_BROWSER_DEFAULT_TIMEOUT"] = str(min(25_000, max(1000, int((timeout - 3) * 1000))))
         try:
             with self.lock:
+                if platform.key in self.runtime_failures:
+                    raise BrowserCommandError("浏览器启动失败后已暂停自动重试，请修复运行环境后重启浏览器桥")
                 result = self.runner(
                     argv, capture_output=True, text=True, timeout=timeout,
-                    env=dict(os.environ),
+                    env=env,
                 )
         except subprocess.TimeoutExpired as exc:
+            self.runtime_failures[platform.key] = True
             raise BrowserCommandError("浏览器命令超时，写入结果可能未知", timeout=True) from exc
         except OSError as exc:
             raise BrowserCommandError(f"无法启动浏览器运行时：{exc}") from exc
         if result.returncode:
             output = ((result.stdout or "") + ("\n" + result.stderr if result.stderr else "")).strip()
+            if re.search(r"Chrome exited|DevToolsActivePort|browser.*launch|EAGAIN|daemon.*(?:failed|timeout)", output, re.I):
+                self.runtime_failures[platform.key] = True
             raise BrowserCommandError(output[-1500:] or f"浏览器命令退出码 {result.returncode}")
         return (result.stdout or "").strip()[:50_000]
 
@@ -645,6 +678,11 @@ class WebsiteService:
         self.media_roots = [Path(path).resolve() for path in [*roots, *extra]]
         self.execute_lock = threading.RLock()
         self.observed_refs = {}
+        self.observed_pages = {}
+        self.observer = None
+        self.paused = os.getenv("BINES_WEBSITE_PAUSED", "false").lower() in {"1", "true", "yes"}
+        self.load_wait_seconds = 6.0
+        self.watch_lock = threading.Lock()
 
     def _media(self, paths):
         if paths is None:
@@ -688,7 +726,7 @@ class WebsiteService:
             plans = [plan for plan in plans if plan["platform"] == selected]
         return {
             "status": "ok",
-            "runtime": "ready",
+            "runtime": "paused" if self.paused else "ready",
             "platforms": [
                 {"key": row.key, "label": row.label, "entry_url": row.entry_url}
                 for row in PLATFORMS.values()
@@ -699,6 +737,12 @@ class WebsiteService:
     def page_state(self, config):
         """Observe the viewport; a successful scroll command alone proves no movement."""
         script = """JSON.stringify({url:location.href,title:document.title,
+            document_id:performance.timeOrigin,ready_state:document.readyState,
+            body_text_length:document.body?.innerText?.trim().length||0,
+            loading_visible:Array.from(document.querySelectorAll(
+                '[aria-busy="true"],[role="progressbar"],[class*="loading"],[class*="skeleton"]'))
+                .some(e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);
+                    return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'}),
             scroll_x:window.scrollX,scroll_y:window.scrollY,viewport_height:innerHeight,
             document_height:document.scrollingElement?.scrollHeight,
             scrollers:Array.from(document.querySelectorAll('*')).filter(
@@ -717,37 +761,71 @@ class WebsiteService:
         except (BrowserCommandError, TypeError, ValueError) as exc:
             return {"observation_error": str(exc)[:300]}
 
+    def _snapshot_ready(self, config, interactive=True):
+        """Bounded DOM settling; network-idle is unsuitable for live/video pages."""
+        args = ["snapshot", "-c", *(["-i"] if interactive else [])]
+        deadline = time.monotonic() + self.load_wait_seconds
+        attempts = 0
+        while True:
+            tree = self.browser.run(config, args)
+            state = self.page_state(config)
+            refs = bool(re.search(r"\[ref=e\d+\]", tree))
+            empty_tree = not tree.strip() or "(no interactive elements)" in tree.lower()
+            loading = state.get("ready_state") in {"loading", "interactive"} or state.get("loading_visible")
+            # Empty asynchronous shells can report complete before hydration.
+            shell = empty_tree and state.get("body_text_length", 100) < 40
+            wait = (loading or shell or empty_tree) and not CHALLENGE_PATTERN.search(tree)
+            if not wait or time.monotonic() >= deadline:
+                state.update(load_status="loading" if loading or shell else "ready",
+                             interactive_elements=bool(refs), load_checks=attempts + 1)
+                if state["load_status"] == "loading":
+                    state["loading_note"] = "页面仍在加载；空快照不代表没有内容，可稍后重新观察"
+                return tree, state
+            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+            attempts += 1
+
+    def _remember(self, config, tree, state):
+        self.observed_refs[config.key] = {
+            match.group(1): line for line in tree.splitlines()
+            if (match := re.search(r"\[ref=(e\d+)\]", line))
+        }
+        self.observed_pages[config.key] = (state.get("url"), state.get("document_id"))
+
+    def _observe_automatically(self, config, *, invalidate=True):
+        if self.observer:
+            self.observer.activate(config.key, invalidate=invalidate)
+
+    def read_browser(self, config, args, timeout=10):
+        """Background reads never enter the CLI's automatic browser launch path."""
+        reader = getattr(self.browser, "read_existing", None)
+        if reader is not None:
+            return reader(config, args, timeout=timeout)
+        from common.website_cdp import ExistingBrowserUnavailable
+        raise ExistingBrowserUnavailable("浏览器不支持只读连接；后台不会启动窗口")
+
     def open(self, platform, url="", snapshot=True):
         config = platform_config(platform)
         selected = validate_url(config, url) if url else config.entry_url
         output = self.browser.run(config, ["open", selected])
         current = self.browser.run(config, ["get", "url"])
-        tree = self.browser.run(config, ["snapshot", "-i", "-c"]) if snapshot else ""
-        self.observed_refs[config.key] = {
-            match.group(1): line for line in tree.splitlines()
-            if (match := re.search(r"\[ref=(e\d+)\]", line))
-        }
+        tree, state = self._snapshot_ready(config) if snapshot else ("", self.page_state(config))
+        self._remember(config, tree, state)
+        self._observe_automatically(config)
         return {
             "status": "ok", "platform": config.key, "url": current or selected,
             "output": output[-2000:], "snapshot": tree,
-            "page_state": self.page_state(config),
+            "page_state": state, "automatic_observation": self.observer is not None,
             "human_action_required": bool(CHALLENGE_PATTERN.search(tree + "\n" + output)),
         }
 
     def snapshot(self, platform, interactive=True):
         config = platform_config(platform)
-        args = ["snapshot", "-c"]
-        if interactive:
-            args.append("-i")
-        output = self.browser.run(config, args)
-        self.observed_refs[config.key] = {
-            match.group(1): line
-            for line in output.splitlines()
-            if (match := re.search(r"\[ref=(e\d+)\]", line))
-        }
+        output, state = self._snapshot_ready(config, interactive)
+        self._remember(config, output, state)
+        self._observe_automatically(config, invalidate=False)
         return {
             "status": "ok", "platform": config.key, "snapshot": output,
-            "page_state": self.page_state(config),
+            "page_state": state,
             "human_action_required": bool(CHALLENGE_PATTERN.search(output)),
         }
 
@@ -760,6 +838,7 @@ class WebsiteService:
             raise ValueError("pixels 必须为 1–5000")
         before = self.page_state(config)
         output = self.browser.run(config, ["scroll", direction, pixels])
+        self._observe_automatically(config)
         return {"status": "ok", "platform": config.key, "output": output[-2000:],
                 "page_state_before": before, "page_state": self.page_state(config)}
 
@@ -771,7 +850,13 @@ class WebsiteService:
     def watch(self, platform, question="", duration_seconds=6, frames=3):
         """Read a short sequence of visible video frames and captions."""
         from common.website_watch import watch
-        return watch(self, platform, question, duration_seconds, frames)
+        if not self.watch_lock.acquire(blocking=False):
+            return {"status": "observing", "platform": platform, "audio_observed": False,
+                    "message": "连续帧观察正在进行，稍后读取最新自动观察"}
+        try:
+            return watch(self, platform, question, duration_seconds, frames)
+        finally:
+            self.watch_lock.release()
 
     def media_status(self, platform):
         """Read actual HTML media state without inventing video content."""
@@ -810,6 +895,10 @@ class WebsiteService:
             if cached is not None:
                 return cached
             remembered = self.observed_refs.get(config.key, {})
+            before_state = self.page_state(config)
+            old_page = self.observed_pages.get(config.key)
+            if ref and old_page and old_page != (before_state.get("url"), before_state.get("document_id")):
+                raise ValueError("页面已切换，请刷新 snapshot 后重新选择")
             tree = self.browser.run(config, ["snapshot", "-i", "-c"])
             if CHALLENGE_PATTERN.search(tree):
                 return {"status": "blocked_human", "human_action_required": True,
@@ -851,6 +940,16 @@ class WebsiteService:
             fresh, cached = self.store.begin_action(action_id, payload)
             if not fresh:
                 return cached
+            target_url = ""
+            tabs_before = ""
+            if action == "click":
+                try:
+                    target_url = self.browser.run(config, ["get", "attr", ref, "href"]).strip()
+                    tabs_before = self.browser.run(config, ["tab", "list"])
+                except BrowserCommandError:
+                    pass
+            # Invalidate old analysis before any action, including a timed-out write.
+            self._observe_automatically(config)
             try:
                 if action == "upload":
                     args = ["upload", ref, paths[0]]
@@ -875,17 +974,29 @@ class WebsiteService:
             # The interaction succeeded. An observation failure must not erase its
             # known receipt or pretend that a publication may need repeating.
             try:
-                after = self.browser.run(config, ["snapshot", "-i", "-c"])
-                self.observed_refs[config.key] = {
-                    match.group(1): line
-                    for line in after.splitlines()
-                    if (match := re.search(r"\[ref=(e\d+)\]", line))
-                }
+                after, after_state = self._snapshot_ready(config)
+                self._remember(config, after, after_state)
                 current = self.browser.run(config, ["get", "url"])
                 result = {"status": "ok", "operation_id": action_id, "url": current,
                           "output": output[-2000:], "snapshot": after,
-                          "page_state": self.page_state(config),
+                          "page_state": after_state,
                           "human_action_required": bool(CHALLENGE_PATTERN.search(after))}
+                if action == "click":
+                    tabs_after = self.browser.run(config, ["tab", "list"])
+                    navigated = navigation_identity(before_state.get("url")) != navigation_identity(after_state.get("url"))
+                    new_tabs = sorted(set(re.findall(r"\[?(t\d+)\]?", tabs_after))
+                                      - set(re.findall(r"\[?(t\d+)\]?", tabs_before)))
+                    target_reached = bool(target_url.startswith(("https://", "/"))
+                                          and navigation_identity(urljoin(before_state.get("url") or "", target_url))
+                                          == navigation_identity(after_state.get("url")))
+                    result["click_evidence"] = {
+                        "target_href": target_url[:2000], "url_changed": navigated,
+                        "new_tabs": new_tabs, "tabs": tabs_after[:10000],
+                        "target_reached": target_reached,
+                        "navigation_observed": bool(navigated or new_tabs),
+                    }
+                    if target_url.startswith(("https://", "/")) and not navigated and not new_tabs:
+                        result["click_evidence"]["note"] = "点击已执行，但尚未观察到导航；请核查页面，不自动重试点击"
             except BrowserCommandError as exc:
                 result = {"status": "ok", "operation_id": action_id, "output": output[-2000:],
                           "observation_error": str(exc)[:1500], "reobserve_required": True}
@@ -981,6 +1092,7 @@ class WebsiteService:
                     "status": "ok", "plan_status": "completed",
                     "replayed": False, "plan": self.public_plan(plan),
                 }
+            self._observe_automatically(platform_config(plan["platform"]))
             committed = any(
                 step.get("commit") for step in plan["steps"][:plan["next_step"]]
             )

@@ -13,6 +13,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 from common.env import load_env
 from common.website_spool import (
     atomic_write_json,
+    read_bridge_token,
     read_json,
     signed_envelope,
     verify_envelope,
@@ -114,9 +115,14 @@ def _request(route, payload, timeout=90):
 
 
 def _spool_request(root, route, payload, timeout):
-    token = os.environ.get("BINES_WEBSITE_BRIDGE_TOKEN", "")
+    try:
+        token = read_bridge_token(root, os.environ.get("BINES_WEBSITE_BRIDGE_TOKEN", ""))
+    except (OSError, ValueError) as exc:
+        raise WebsiteRequestError("网站浏览器桥认证信息无法读取；请重启浏览器桥", rejected=True) from exc
     if not token:
-        raise WebsiteRequestError("网站浏览器桥令牌缺失", rejected=True)
+        raise WebsiteRequestError(
+            "网站浏览器桥尚未提供连接令牌；请通过 python bines.py 启动 Bines", rejected=True,
+        )
     try:
         current = read_json(root / "heartbeat.json")
         ready = verify_envelope(token, "heartbeat", current)

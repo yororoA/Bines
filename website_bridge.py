@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import os
 from pathlib import Path
 import shlex
@@ -15,6 +16,7 @@ import time
 
 from common.website import AgentBrowser, PlanStore, WebsiteService
 from common.website_spool import (
+    BRIDGE_CREDENTIALS_FILE,
     acquire_bridge_lock,
     atomic_write_json,
     heartbeat,
@@ -33,6 +35,9 @@ class UnknownRoute(ValueError):
 
 
 def dispatch(service, route, body):
+    if getattr(service, "paused", False) and route not in {"/v1/status", "/v1/observations", "/v1/plans/get"}:
+        return {"status": "paused", "retry_allowed": False,
+                "message": "浏览器操作已暂停，防止重复打开窗口；本次不会执行，请等待恢复"}
     if route == "/v1/watch":
         # Only individual frame captures lock the browser; waiting/inference
         # must leave room for a new owner action.
@@ -44,6 +49,8 @@ def dispatch(service, route, body):
 
 
 def _dispatch(service, route, body):
+    if route == "/v1/observations":
+        return service.observer.observations() if service.observer else {"status": "ok", "observations": []}
     if route == "/v1/status":
         return service.status(body.get("platform", ""))
     if route == "/v1/open":
@@ -188,6 +195,9 @@ class SpoolWorker:
                     path.unlink(missing_ok=True)
                 else:
                     os.replace(path, destination)
+        # The bind-mounted directory is private to the host and Thinking UID.
+        # Publish atomically so recreated containers and rotated tokens reconnect.
+        atomic_write_json(self.root / BRIDGE_CREDENTIALS_FILE, {"token": self.token})
         atomic_write_json(self.root / "heartbeat.json", heartbeat(self.token))
         self.heartbeat_thread = threading.Thread(
             target=self._heartbeat, name="WebsiteHeartbeat", daemon=True,
@@ -303,6 +313,7 @@ class SpoolWorker:
             self.watch_thread = None
         if self.owner_lock:
             (self.root / "heartbeat.json").unlink(missing_ok=True)
+            (self.root / BRIDGE_CREDENTIALS_FILE).unlink(missing_ok=True)
             self.owner_lock.close()
             self.owner_lock = None
 
@@ -355,6 +366,11 @@ def main():
     if spool:
         spool.service = service
         spool.start()
+    from common.website_observer import WebsiteObserver
+    observer = None
+    if not service.paused and os.getenv("BINES_WEBSITE_AUTO_OBSERVE", "true").lower() not in {"0", "false", "no"}:
+        observer = WebsiteObserver(service, args.token, args.spool or None)
+        observer.start()
 
     def stop(_signum, _frame):
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -374,6 +390,8 @@ def main():
     try:
         server.serve_forever(poll_interval=0.2)
     finally:
+        if observer:
+            observer.close()
         if spool:
             spool.close()
         server.server_close()
@@ -381,4 +399,5 @@ def main():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     main()

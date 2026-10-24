@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import platform
 import secrets
 import shutil
 import shlex
@@ -36,6 +37,14 @@ def _agent_browser_version(command):
     return (result.stdout or result.stderr or "").strip()
 
 
+def _bundled_command(path):
+    """Use the native binary directly, so a timeout cannot orphan a Node child."""
+    architecture = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "x64", "AMD64": "x64"}.get(platform.machine())
+    system = {"darwin": "darwin", "linux": "linux", "win32": "win32"}.get(sys.platform)
+    native = path.resolve().parent / f"agent-browser-{system}-{architecture}{'.exe' if os.name == 'nt' else ''}"
+    return [str(native if system and architecture and native.is_file() else path)]
+
+
 def ensure_agent_browser():
     configured = os.environ.get("BINES_AGENT_BROWSER_COMMAND")
     if configured:
@@ -47,8 +56,8 @@ def ensure_agent_browser():
     bundled = INSTALL_ROOT / "node_modules" / ".bin" / (
         "agent-browser.cmd" if os.name == "nt" else "agent-browser"
     )
-    if bundled.is_file() and f" {AGENT_BROWSER_VERSION}" in _agent_browser_version([str(bundled)]):
-        return [str(bundled)]
+    if bundled.is_file() and f" {AGENT_BROWSER_VERSION}" in _agent_browser_version(_bundled_command(bundled)):
+        return _bundled_command(bundled)
 
     system = shutil.which("agent-browser")
     if system and _agent_browser_version([system]):
@@ -72,7 +81,7 @@ def ensure_agent_browser():
         raise RuntimeError("安装 agent-browser 失败：" + " ".join(detail))
     if not _agent_browser_version([str(bundled)]):
         raise RuntimeError("agent-browser 安装后无法执行")
-    return [str(bundled)]
+    return _bundled_command(bundled)
 
 
 def _version_key(path):

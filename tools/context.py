@@ -21,6 +21,7 @@ class ToolContext:
     owner_contact_allowed: bool = True
     planning_only: bool = False
     owner_ids: frozenset = OWNER_QQ_IDS
+    website_observation_ids: set = field(default_factory=set, compare=False)
 
 
 CURRENT_CONTEXT = ContextVar("bines_tool_context", default=ToolContext())

@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from config import DEEPSEEK_MODEL
 from common.deepseek_client import get_deepseek_client
 from common.clock import with_current_time
+from common.website_perception import with_website_observations
 from skill_runner import SkillProtocolError, SkillRunner
 
 logger = logging.getLogger("bines.thinking.model")
@@ -104,7 +105,7 @@ class ThinkingModelHelper:
         history: List[Dict[str, str]] = []
         final_text = ""
         for index in range(max_iterations):
-            final_text = self.complete_text(with_current_time(conversation),
+            final_text = self.complete_text(with_current_time(with_website_observations(conversation)),
                                             temperature=temperature, max_tokens=max_tokens)
             try:
                 command = skill_runner.parse_model_command(final_text)
@@ -150,7 +151,7 @@ class ThinkingModelHelper:
         history = []
         for _ in range(max_iterations):
             request_messages = [*conversation, *([{"role": "system", "content": voice}] if voice else [])]
-            request_messages = with_current_time(request_messages)
+            request_messages = with_current_time(with_website_observations(request_messages))
             budget = max_tokens
             for attempt in range(2):
                 response = self.client.chat.completions.create(

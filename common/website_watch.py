@@ -36,7 +36,10 @@ VIDEO_OBSERVATION = """JSON.stringify((()=>{
     const challenge=Array.from(document.querySelectorAll(
         '[role="dialog"],[class*="captcha"],[class*="verify"],[class*="login-panel"]'))
         .filter(visible).map(e=>e.innerText?.slice(0,700)||'').slice(0,5).join('\\n');
+    const text=Array.from(document.querySelectorAll('h1,h2,h3,p,a,button,[role="status"]'))
+        .filter(visible).map(e=>e.innerText?.trim()).filter(Boolean).slice(0,100).join('\\n');
     return {url:location.href,title:document.title.slice(0,200),challenge,
+        document_id:performance.timeOrigin,ready_state:document.readyState,text:text.slice(0,6000),
         viewport:{width:innerWidth,height:innerHeight},
         video:v?{index:Array.from(document.querySelectorAll('video')).indexOf(v),
             source:v.currentSrc||v.src,paused:v.paused,ended:v.ended,current_time:v.currentTime,
@@ -47,8 +50,8 @@ VIDEO_OBSERVATION = """JSON.stringify((()=>{
 })())"""
 
 
-def observe(service, config):
-    output = service.browser.run(config, ["eval", VIDEO_OBSERVATION]).strip()
+def observe(service, config, *, timeout=60):
+    output = service.read_browser(config, ["eval", VIDEO_OBSERVATION], timeout=timeout).strip()
     if output.startswith("--- AGENT_BROWSER_PAGE_CONTENT "):
         output = "\n".join(output.splitlines()[1:-1])
     state = json.loads(output)
@@ -57,12 +60,15 @@ def observe(service, config):
     if not isinstance(state, dict) or not isinstance(state.get("viewport"), dict):
         raise ValueError("视频观察返回格式无效")
     validate_url(config, state.get("url", ""))
+    reader = getattr(service.browser, "page_reader", None)
+    if reader:
+        state["browser_target"] = reader.targets.get(config.key, "")
     return state
 
 
 def video_identity(state):
     video = state.get("video") or {}
-    return state.get("url"), video.get("index"), video.get("source")
+    return state.get("url"), state.get("document_id"), state.get("browser_target"), video.get("index"), video.get("source")
 
 
 def encode_frame(path, state):
@@ -96,14 +102,21 @@ def watch(service, platform, question="", duration_seconds=6, frames=3):
     samples, images = [], []
     initial = None
     started = time.monotonic()
+    stopped = getattr(getattr(service, "observer", None), "stop", None)
     result = {"status": "failed", "platform": config.key, "audio_observed": False,
               "frames": samples, "observation_scope": "采样期间的可见视频画面与字幕，不含声音"}
     try:
         with tempfile.TemporaryDirectory(prefix="bines-video-") as directory:
             for index in range(frames):
+                if stopped and stopped.is_set():
+                    return {**result, "status": "interrupted", "message": "浏览器观察已停止"}
                 remaining = started + index * duration_seconds / (frames - 1) - time.monotonic()
                 if remaining > 0:
-                    time.sleep(remaining)  # Watching requires real playback time to pass.
+                    if stopped:
+                        if stopped.wait(remaining):
+                            return {**result, "status": "interrupted", "message": "浏览器观察已停止"}
+                    else:
+                        time.sleep(remaining)  # Watching requires real playback time to pass.
                 # Normal owner actions can run between samples and during vision inference.
                 with service.execute_lock:
                     state = observe(service, config)
@@ -122,7 +135,7 @@ def watch(service, platform, question="", duration_seconds=6, frames=3):
                         return {**result, "status": "interrupted", "reobserve_required": True,
                                 "message": "采样期间页面、视频或播放位置已切换，请重新观察"}
                     path = Path(directory) / f"frame-{index}.png"
-                    service.browser.run(config, ["screenshot", str(path)])
+                    service.read_browser(config, ["screenshot", str(path)])
                     after = observe(service, config)
                     if video_identity(after) != video_identity(state):
                         return {**result, "status": "interrupted", "reobserve_required": True,
@@ -157,6 +170,8 @@ def watch(service, platform, question="", duration_seconds=6, frames=3):
             return {**result, "message": analysis or "视觉模型未返回描述", "reason": "vision_failed"}
         # A navigation during inference does not turn old frames into the new page's content.
         with service.execute_lock:
+            if stopped and stopped.is_set():
+                return {**result, "status": "interrupted", "message": "浏览器观察已停止"}
             current = observe(service, config)
         result.update(status="ok", analysis=analysis[:6000],
                       page_changed=video_identity(current) != video_identity(initial),

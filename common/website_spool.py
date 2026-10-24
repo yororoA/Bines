@@ -11,6 +11,19 @@ import uuid
 
 
 MAX_SPOOL_BYTES = 1024 * 1024
+BRIDGE_CREDENTIALS_FILE = ".credentials.json"
+
+
+def read_bridge_token(root, fallback=""):
+    """Prefer the live bridge credential over a container's frozen environment."""
+    try:
+        credentials = read_json(Path(root) / BRIDGE_CREDENTIALS_FILE)
+    except FileNotFoundError:
+        return fallback.strip()
+    token = credentials.get("token")
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("网站浏览器桥认证文件缺少有效令牌")
+    return token.strip()
 
 
 def acquire_bridge_lock(path):
