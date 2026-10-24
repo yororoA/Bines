@@ -560,6 +560,7 @@ class AgentBrowser:
         self.runner = runner or subprocess.run
         self.lock = threading.RLock()
         self.runtime_failures = {}
+        self.connection_modes = {}
         from common.website_cdp import ExistingPageReader
         self.page_reader = ExistingPageReader(self.profile_root)
 
@@ -591,12 +592,33 @@ class AgentBrowser:
         return result
 
     def _argv(self, platform: Platform, args):
+        args = list(args)
+        if len(args) == 2 and args[0] == "tab" and re.fullmatch(r"t\d+", str(args[1])):
+            args[1] = str(args[1])[1:]
         profile = self.profile_root / platform.key
+        if platform.key not in self.connection_modes:
+            ports = self.page_reader._ports(platform.key) if profile.is_dir() else []
+            port = None
+            for candidate in ports:
+                try:
+                    version = self.page_reader._json(f"http://127.0.0.1:{candidate}/json/version")
+                    if "Chrome" in version.get("Browser", ""):
+                        port = candidate
+                        break
+                except (OSError, TypeError, ValueError):
+                    continue
+            if ports and port is None:
+                self.failure(platform, "attach", "existing_browser_unresponsive")
+                raise BrowserCommandError("现有 Bines 浏览器没有响应；不会自动打开替代窗口")
+            # Keep this mode for the session. A broken attachment must not fall
+            # back to launching another browser with the same login profile.
+            self.connection_modes[platform.key] = port
+        port = self.connection_modes[platform.key]
         profile.mkdir(parents=True, exist_ok=True)
         argv = [
             *self.command,
             "--session", f"bines-{platform.key}",
-            "--profile", str(profile),
+            *(["--cdp", str(port)] if port else ["--profile", str(profile)]),
             "--content-boundaries",
             "--max-output", "50000",
             "--allowed-domains", ",".join(platform.domains),
@@ -610,6 +632,9 @@ class AgentBrowser:
     def run(self, platform: Platform, args, timeout=60):
         argv = self._argv(platform, args)
         env = dict(os.environ)
+        env.pop("AGENT_BROWSER_ENGINE", None)
+        env["AGENT_BROWSER_NATIVE"] = "0"
+        env["NO_COLOR"] = "1"
         env["AGENT_BROWSER_DEBUG"] = "1"
         # Let the browser report its own timeout before the CLI is terminated.
         env["AGENT_BROWSER_DEFAULT_TIMEOUT"] = str(min(25_000, max(1000, int((timeout - 3) * 1000))))
@@ -631,7 +656,10 @@ class AgentBrowser:
             if re.search(r"Chrome exited|DevToolsActivePort|browser.*launch|EAGAIN|daemon.*(?:failed|timeout)", output, re.I):
                 self.failure(platform, str(args[0]), "launch_or_connection_failed")
             raise BrowserCommandError(output[-1500:] or f"浏览器命令退出码 {result.returncode}")
-        return (result.stdout or "").strip()[:50_000]
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout or "").strip()[:50_000]
+        if list(args) == ["tab", "list"]:
+            output = re.sub(r"(?m)^(\s*(?:→\s*)?)\[(\d+)\]", r"\1[t\2]", output)
+        return output
 
     def _active_bines_sessions(self):
         try:

@@ -165,11 +165,20 @@ class Installer:
             raise InstallError("CUDA 安装仅支持 Windows/Linux x86_64；此机器请使用 --device cpu")
         return requested
 
-    def run(self, command, label, *, env=None, timeout=1800):
+    def run(self, command, label, *, env=None, timeout=1800, live_progress=False):
         """Keep pip/compiler noise in a log and print one heartbeat every 20 seconds."""
         self.command_number += 1
         log = self.log_dir / f"{self.command_number:02d}.log"
         print(f"  {label}…", flush=True)
+        if live_progress:
+            from common.docker_progress import stream_build
+            result = stream_build(
+                [str(part) for part in command], cwd=self.root, env=env or self.env,
+                log_path=log, timeout=timeout,
+            )
+            if result.returncode:
+                raise InstallError(f"{label}失败（退出码 {result.returncode}），日志：{log}")
+            return log
         with log.open("w", encoding="utf-8") as stream:
             from process_runtime import ProcessTree
             tree = ProcessTree([str(part) for part in command], cwd=self.root,
@@ -629,7 +638,7 @@ class Installer:
                 ensure_builder()
                 try:
                     self.run(build_command(self.options.profile, service),
-                             f"构建 Docker 镜像 {service}", env=env, timeout=3600)
+                             f"构建 Docker 镜像 {service}", env=env, timeout=3600, live_progress=True)
                 finally:
                     cleanup_build_cache()
                 cleanup_images()

@@ -477,6 +477,67 @@ class WebsiteWatchTests(unittest.TestCase):
 
 
 class AgentBrowserTests(unittest.TestCase):
+    def test_playwright_numeric_tabs_keep_the_public_tn_contract(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs["env"]))
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="\x1b[36m→\x1b[0m [0] live\n  [1] blank\n", stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            os.environ, {"AGENT_BROWSER_NATIVE": "1", "AGENT_BROWSER_ENGINE": "chrome"},
+        ):
+            browser = AgentBrowser(["test"], profile_root=Path(temp), runner=runner)
+            config = platform_config("bilibili")
+            self.assertEqual(browser.run(config, ["tab", "list"]), "→ [t0] live\n  [t1] blank")
+            browser.run(config, ["tab", "t1"])
+        self.assertEqual(calls[1][0][-2:], ["tab", "1"])
+        self.assertEqual(calls[0][1]["AGENT_BROWSER_NATIVE"], "0")
+        self.assertNotIn("AGENT_BROWSER_ENGINE", calls[0][1])
+
+    def test_existing_profile_attaches_with_domain_filter_and_keeps_connection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "bilibili").mkdir()
+            browser = AgentBrowser(["test"], profile_root=root)
+            with patch.object(browser.page_reader, "_ports", return_value=[60770]), patch.object(
+                browser.page_reader, "_json", return_value={"Browser": "Chrome/156"},
+            ) as version:
+                argv = browser._argv(platform_config("bilibili"), ["snapshot"])
+                self.assertEqual(argv[argv.index("--cdp") + 1], "60770")
+                self.assertNotIn("--profile", argv)
+                self.assertIn("--allowed-domains", argv)
+                version.side_effect = TimeoutError("stalled")
+                again = browser._argv(platform_config("bilibili"), ["reload"])
+                self.assertIn("--cdp", again)
+                self.assertNotIn("--profile", again)
+                self.assertEqual(version.call_count, 1)
+
+    def test_unresponsive_existing_window_does_not_launch_a_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "bilibili").mkdir()
+            browser = AgentBrowser(["test"], profile_root=root)
+            with patch.object(browser.page_reader, "_ports", return_value=[60770]), patch.object(
+                browser.page_reader, "_json", side_effect=TimeoutError("stalled"),
+            ):
+                with self.assertRaises(BrowserCommandError):
+                    browser._argv(platform_config("bilibili"), ["open", "https://www.bilibili.com/"])
+            self.assertEqual(browser.runtime_failures["bilibili"]["stage"], "attach")
+
+    def test_new_owned_session_keeps_profile_mode_after_window_appears(self):
+        with tempfile.TemporaryDirectory() as temp:
+            browser = AgentBrowser(["test"], profile_root=Path(temp))
+            first = browser._argv(platform_config("bilibili"), ["open", "https://www.bilibili.com/"])
+            with patch.object(browser.page_reader, "_ports", return_value=[60770]) as discovery:
+                second = browser._argv(platform_config("bilibili"), ["snapshot"])
+                discovery.assert_not_called()
+            self.assertIn("--profile", first)
+            self.assertIn("--profile", second)
+            self.assertNotIn("--cdp", second)
+
     def test_runner_receives_argv_not_shell_and_domain_policy(self):
         calls = []
 
@@ -531,6 +592,64 @@ class AgentBrowserTests(unittest.TestCase):
 
 
 class WebsiteRuntimeTests(unittest.TestCase):
+    def test_browser_selects_current_node_instead_of_legacy_path_node(self):
+        import website_runtime
+
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            node = home / ".nvm/versions/node/v24.19.0/bin/node"
+            node.parent.mkdir(parents=True)
+            node.write_text("node")
+            versions = [
+                subprocess.CompletedProcess([], 0, stdout="18.20.8\n", stderr=""),
+                subprocess.CompletedProcess([], 0, stdout="24.19.0\n", stderr=""),
+            ]
+            with patch.object(website_runtime.Path, "home", return_value=home), patch.object(
+                website_runtime.shutil, "which", return_value="/old/node",
+            ), patch.object(website_runtime.subprocess, "run", side_effect=versions):
+                self.assertEqual(website_runtime.ensure_browser_node(), str(node))
+
+    def test_configured_incompatible_runtimes_are_rejected(self):
+        import website_runtime
+
+        for version in ("0.18.0", "0.27.0", "0.39.2", "0.19.0-dev"):
+            with self.subTest(version=version), patch.dict(
+                os.environ, {"BINES_AGENT_BROWSER_COMMAND": "agent-browser"},
+            ), patch.object(website_runtime, "_agent_browser_version", return_value=f"agent-browser {version}"):
+                with self.assertRaisesRegex(RuntimeError, "Playwright"):
+                    website_runtime.ensure_agent_browser()
+
+    def test_configured_runtime_cannot_opt_back_into_rust(self):
+        import website_runtime
+
+        for command in ("agent-browser --native", "agent-browser --engine chrome"):
+            with self.subTest(command=command), patch.dict(
+                os.environ, {"BINES_AGENT_BROWSER_COMMAND": command},
+            ), patch.object(website_runtime, "_compatible_agent_browser", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "Playwright"):
+                    website_runtime.ensure_agent_browser()
+
+    def test_incompatible_system_runtime_does_not_bypass_bundled_install(self):
+        import website_runtime
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shim = root / "node_modules/.bin/agent-browser"
+            shim.parent.mkdir(parents=True)
+            shim.write_text("shim")
+            with patch.dict(os.environ, {"BINES_AGENT_BROWSER_COMMAND": ""}), patch.object(
+                website_runtime, "INSTALL_ROOT", root,
+            ), patch.object(website_runtime.shutil, "which", side_effect=["/old/agent-browser", "/npm"]), patch.object(
+                website_runtime, "_compatible_agent_browser", side_effect=[False, False, True],
+            ), patch.object(
+                website_runtime.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="installed", stderr=""),
+            ) as install:
+                website_runtime.ensure_agent_browser()
+            argv = install.call_args.args[0]
+            self.assertIn("agent-browser@0.19.0", argv)
+            self.assertIn("--legacy-peer-deps", argv)
+
     def test_compose_update_reads_live_token_without_launcher_environment(self):
         import docker_launcher
         from common.website_spool import BRIDGE_CREDENTIALS_FILE, atomic_write_json

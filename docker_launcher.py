@@ -100,6 +100,17 @@ def run(profile: str, *args: str, timeout: float = 3600) -> subprocess.Completed
         capture_output=True, timeout=timeout, **_process_options(),
     )
 
+def run_build(profile: str, *services: str, timeout: float = 3600):
+    from common.docker_progress import stream_build
+    log_path = ROOT / "logs" / "docker-build.log"
+    try:
+        return stream_build(
+            build_command(profile, *services), cwd=ROOT, env=_environment(profile),
+            log_path=log_path, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DockerError(f"Docker 构建超过 {int(timeout)} 秒，日志：{log_path}") from exc
+
 
 # 每个镜像分别计算内容哈希，QQ 网关独有代码变化不再触发 RAG 镜像重建。
 _SHARED_SOURCES = (
@@ -126,7 +137,13 @@ IMAGE_SOURCES = {
 }
 IMAGE_HASH_EXCLUDES = frozenset({
     "common/website.py",
+    "common/website_cdp.py",
+    "common/website_observer.py",
+    "common/website_watch.py",
+    "common/visual_change.py",
+    "common/docker_progress.py",
     "docker_launcher.py",
+    "install.py",
     "website_bridge.py",
     "website_runtime.py",
 })
@@ -134,6 +151,7 @@ IMAGE_HASH_EXCLUDES_BY_IMAGE = {
     "bines-thinking:local": frozenset({
         "common/website_spool.py",
         "thingking/qq_thinking.py",
+        "skills/website/SKILL.md",
     }),
 }
 
@@ -195,7 +213,7 @@ def _stale_services() -> List[str]:
 
 
 def build_command(profile: str, *services: str) -> List[str]:
-    return compose_command(profile, "build", "--builder", BUILDER_NAME, *services)
+    return compose_command(profile, "--progress", "plain", "build", "--builder", BUILDER_NAME, *services)
 
 
 def _builder_driver():
@@ -257,7 +275,7 @@ def up(profile: str) -> None:
         print("源码有更新，正在构建：" + ", ".join(stale), flush=True)
         ensure_builder()
         try:
-            _check_result(run(profile, "build", "--builder", BUILDER_NAME, *stale), "Docker 构建失败")
+            _check_result(run_build(profile, *stale), "Docker 构建失败")
         finally:
             cleanup_build_cache()
     _check_result(run(profile, "up", "-d", "--no-build"), "Docker 启动失败")
