@@ -213,15 +213,41 @@ class MemoryJournal:
         self._record(key, record)
         return key, record
 
-    def finish(self, entry, result="", *, status=None):
+    def finish(self, entry, result="", *, status=None, activity=None):
         key, record = entry
-        record = {**record, "result": result_data(result), "finished_at": time.time(),
+        finished_at = time.time()
+        record = {**record, "result": result_data(result), "finished_at": finished_at,
+                  "duration_seconds": max(0, finished_at - record["started_at"]),
                   "status": status or outcome_status(result)}
+        if record.get("category") == "turn" and activity:
+            if activity.get("id") and "sequence" in activity:
+                record["activity"] = safe_data(activity)
+            else:
+                from common.activity import activity_checkpoint
+                candidate = {
+                    "id": self.turn_id, "intent": self.candidate.get("intent") or "",
+                    **self.candidate,
+                }
+                record["activity"] = activity_checkpoint(candidate, activity, [])
         self._record(key, record)
 
-    def capture(self, action, args, result, *, status=None, category="observation", key=None):
+    def capture(self, action, args, result, *, status=None, category="observation", key=None, activity=None):
+        if category == "turn" and key:
+            with self.outbox.connection() as db:
+                previous = db.execute("SELECT params FROM memory_outbox WHERE source_ref=?", (key,)).fetchone()
+            if previous:
+                # Terminal receipts revise the same real turn. Preserve its
+                # measured duration instead of replacing it with a zero-length audit.
+                record = json.loads(previous["params"])["record"]
+                if record.get("status") != "started":
+                    record = {**record, "result": result_data(result),
+                              "status": status or outcome_status(result)}
+                    if activity:
+                        record["activity"] = safe_data(activity)
+                    self._record(key, record)
+                    return key
         entry = self.begin({"action": action, "args": args}, category=category, key=key)
-        self.finish(entry, result, status=status)
+        self.finish(entry, result, status=status, activity=activity)
         return entry[0]
 
     def execute(self, command, execute):

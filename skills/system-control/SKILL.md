@@ -1,6 +1,6 @@
 ---
 name: system-control
-description: 查询时间并切换对话系统中的游戏模式。
+description: 查询当前时间、调节自身生命节律，并按请求切换游戏模式。
 actions: get_time, enable_game_mode, disable_game_mode, regulate_life
 ---
 仅在用户要求切换游戏模式、确实需要当前时间，或 Bines 有明确依据需要调节自身生命节律时调用。
@@ -11,3 +11,5 @@ actions: get_time, enable_game_mode, disable_game_mode, regulate_life
 - `auto`：取消临时选择，交还自动节律；时长会被忽略。
 
 不要为表演人格频繁切换。优先依据系统给出的精力、睡眠压力、当前阶段和真实用户活动；休息期间收到真实消息会自然唤醒。它不能改出生时间、历史、好感度或用户状态。执行后只按真实回执说明结果。
+
+自主休息期间仍可在内部思考轮次重新取舍：可以继续休息，也可根据恢复情况短暂 `wake` 或返回 `auto`。`planning_only=true` 时本批只开放时间、记忆、生命周期调节和活动控制；调整成功后，浏览、联系和键鼠动作留到后续轮次重新选择。

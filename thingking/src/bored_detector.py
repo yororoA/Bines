@@ -9,7 +9,7 @@ import uuid
 from path_setup import ensure_project_root
 
 ROOT = ensure_project_root(__file__, 2)
-from common.proactive import ProactivePolicy, appraise_history, compact_life, context_blocked, draft_decision, human_ref
+from common.proactive import ProactivePolicy, appraise_history, capability_summary, compact_life, draft_decision, human_ref
 
 log = logging.getLogger("bines.bored")
 
@@ -42,6 +42,7 @@ def main():
     except (OSError, ValueError):
         saved = {}
     policy = ProactivePolicy(time.time(), state=saved)
+    capabilities = capability_summary("desktop")
     from common.memory_journal import MemoryOutbox, MemoryJournal
     from memory.channels import local_envelope
     outbox = MemoryOutbox(directory / "desktop_outbox.db")
@@ -78,6 +79,8 @@ def main():
                                     category="feedback", key=journal.prefix + ":feedback")
                     if result.get("status") == "sent":
                         policy.state.pending["contacted"] = True
+                    if "owner_contacted" in result:
+                        policy.state.pending["owner_contacted"] = result["owner_contacted"]
                     policy.resolve(float(result.get("timestamp") or time.time()),
                                    delivered=result.get("status") in {"sent", "completed"},
                                    uncertain=result.get("status") == "uncertain",
@@ -107,13 +110,7 @@ def main():
                     life=snapshot.get("life") or {},
                 )
                 save()
-                needs_appraisal = (
-                    not policy.state.activity and policy.state.history_ref != policy.state.user_ref and policy.state.user_ref
-                    and available and now - max(float(owner.get("ts") or 0), last_local) >= policy.config.min_idle
-                    and now - policy.started >= policy.config.startup_grace
-                    and now >= policy.state.next_decision
-                )
-                if not ready and not needs_appraisal:
+                if not ready:
                     continue
                 policy.defer(now)
                 save()
@@ -125,25 +122,29 @@ def main():
                              "memories": memory_context.get("recalled", [])[:5],
                              "profile": memory_context.get("profile") or {}, "bridge": memory_context.get("bridge"),
                              "state": memory_context.get("state") or {},
-                             "life": compact_life(memory_context.get("life"))}
-                if not continuing and policy.state.history_ref != policy.state.user_ref:
+                             "life": compact_life(memory_context.get("life") or snapshot.get("life")),
+                             "available_skills": capabilities, "recent_outcomes": policy.state.recent_outcomes,
+                             "planning_only": policy.state.planning_only,
+                             **policy.contact_permissions(now, snapshot.get("last_user"),
+                                                          float(owner.get("ts") or 0))}
+                if (policy.appraisal_due(policy.state.user_ref, now)
+                        and (not continuing or bool(policy.state.emotion_at))):
                     appraisal = appraise_history(materials, policy.state, now)
                     policy.appraise(appraisal, policy.state.user_ref, now)
                     save()
-                    if not appraisal:
-                        continue
-                if not ready:
-                    continue
-                kinds = policy.eligible_kinds(now, snapshot.get("last_user"))
+                kinds = policy.eligible_kinds(now, snapshot.get("last_user"), float(owner.get("ts") or 0))
                 active = policy.state.activity
                 continuing = active.get("mode") in {"continue", "review"}
                 decision = ({"kind": active["kind"], "topic": active["topic"],
                              "intent": active["intent"], "reason": active["reason"]} if continuing
                             else draft_decision(materials, policy.state, now, capabilities="desktop", allowed_kinds=kinds))
+                if not continuing:
+                    decision = policy.record_decision(decision, now)
                 if decision and not continuing and decision["kind"] not in kinds:
+                    policy.state.last_decision.update(status="disallowed_kind", proposed=decision)
                     decision = None
                 if not decision:
-                    policy.defer(time.time())
+                    policy.defer(time.time(), policy.state.last_decision.get("delay_seconds"))
                     save()
                     continue
                 latest = memory.activity_snapshot()
@@ -156,12 +157,11 @@ def main():
                 candidate = {**decision, "id": uuid.uuid4().hex, "type": "bored",
                              "timestamp": time.time(), "based_on_user": policy.state.user_ref,
                              "activity_at": float(owner.get("ts") or 0),
-                             "contact_allowed": (active.get("contact_allowed", True)
-                                 and not context_blocked((snapshot.get("last_user") or {}).get("content"))
-                                 and not policy.config.quiet(now) if continuing else "connection" in kinds),
+                             **policy.contact_permissions(now, snapshot.get("last_user"), float(owner.get("ts") or 0)),
+                             "planning_only": policy.state.planning_only,
                              "activity": dict(active) if continuing else {},
                              "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),
-                             "life": compact_life(memory_context.get("life"))}
+                             "life": materials["life"]}
                 policy.reserve(candidate)
                 save()
                 publisher.send_multipart([b"bored", json.dumps(candidate, ensure_ascii=False).encode()])

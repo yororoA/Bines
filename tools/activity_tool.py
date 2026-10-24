@@ -62,4 +62,11 @@ def autonomy_control(mode: str, reason: str = "") -> dict:
     if re.search(rf"(?:不要|不用|别|不必|不)\s*(?:{verbs})", context.user_text):
         raise PermissionError("当前主人消息否定了对应控制")
     from common.activity import set_owner_control
-    return {"status": "ok", "control": set_owner_control(mode, reason)}
+    control = set_owner_control(mode, reason)
+    if mode in {"pause", "stop"}:
+        # Commit the owner's choice to the current goal as well as the global
+        # switch, so a durable activity is not left falsely active forever.
+        context.activity.update(mode="finish" if mode == "stop" else "pause",
+                                note=reason or context.user_text[:500], delay_seconds=0,
+                                decision_source="owner")
+    return {"status": "ok", "control": control}

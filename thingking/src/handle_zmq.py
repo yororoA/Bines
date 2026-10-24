@@ -713,6 +713,8 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
             "reason": saved_activity.get("reason") or "主人本机消息授权的持续活动",
             "timestamp": time.time(), "activity": saved_activity,
         }
+        if context.journal:
+            context.journal.candidate = dict(candidate)
         messages.append({"role": "system", "content": (
             "自由活动时根据真实内容和自己的兴趣选择是否继续、换方向、等待或结束。"
             "用activity_continue保存自己选择的next_intent、topic、reason与观察间隔，后台执行你的选择。"
@@ -1060,6 +1062,8 @@ def start_zmq_listener():
                                         will_context = ToolContext(
                                             LOCAL_IDENTITY, turn_id="will:" + candidate["id"],
                                             autonomous=True, contact_allowed=candidate.get("contact_allowed", True),
+                                            owner_contact_allowed=candidate.get("owner_contact_allowed", True),
+                                            planning_only=candidate.get("planning_only", False),
                                             check=check,
                                             journal=MemoryJournal(memory_outbox, envelope, "will:" + candidate["id"],
                                                                   autonomous=True, candidate=candidate),
@@ -1110,6 +1114,7 @@ def start_zmq_listener():
                                     if "will_context" in locals():
                                         from common.activity import activity_checkpoint
                                         checkpoint = activity_checkpoint(candidate, {
+                                            **will_context.activity,
                                             "mode": "pause" if uncertain else "review",
                                             "delay_seconds": 0 if uncertain else 15,
                                             "note": reason[:1000],
@@ -1123,9 +1128,16 @@ def start_zmq_listener():
                                     journal = MemoryJournal(memory_outbox, envelope, "will:" + str(candidate.get("id")),
                                                             autonomous=True, candidate=candidate)
                                     journal.capture("autonomous_turn", {}, {"reflection": text, "reason": reason},
-                                                    category="turn", status=status, key=journal.prefix + ":turn")
+                                                    category="turn", status=status, key=journal.prefix + ":turn",
+                                                    activity=checkpoint)
+                                    from common.proactive import owner_contact
+                                    from chatBot.config import OWNER_QQ_IDS
+                                    owner_contacted = bool(locals().get("desktop_spoken")) or any(
+                                        owner_contact(row["action"], row.get("params") or {}, OWNER_QQ_IDS)
+                                        for row in (will_context.receipts if "will_context" in locals() else []))
                                     result = {"id": candidate.get("id"), "timestamp": time.time(),
                                               "status": status, "reason": reason, "reflection": text[:2000],
+                                              "owner_contacted": owner_contacted,
                                               "activity": checkpoint}
                                     # The acknowledgement follows the output on the same listener
                                     # queue; publishing a candidate alone is never counted as sent.

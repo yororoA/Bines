@@ -216,6 +216,8 @@ class QQThinking:
             "reason": saved_activity.get("reason") or "主人当前消息授权的持续活动",
             "timestamp": time.time(), "activity": saved_activity,
         }
+        if owner_activity:
+            journal.candidate = dict(candidate)
         with tool_context(context):
             previous = self.store.begin_turn(turn_id)
             if previous:
@@ -419,13 +421,14 @@ class QQThinking:
             journal = MemoryJournal(self.outbox, identity_envelope(identity), turn_id,
                                     autonomous=True, candidate=event.get("proactive"))
             journal.capture("autonomous_turn", {}, reason, category="turn", status="skipped",
-                            key=journal.prefix + ":turn")
+                            key=journal.prefix + ":turn", activity=checkpoint)
             return
         try:
             completed = False
             def check():
                 latest = self.memory.activity_snapshot()
-                if (latest.get("life") or {}).get("phase") in {"sleeping", "resting"}:
+                if ((latest.get("life") or {}).get("phase") in {"sleeping", "resting"}
+                        and not event["proactive"].get("planning_only")):
                     return "resting"
                 if self.stop.is_set():
                     return "shutdown"
@@ -434,6 +437,9 @@ class QQThinking:
             context = ToolContext(identity, turn_id, turn_id, autonomous=True,
                                   check=check,
                                   contact_allowed=event["proactive"].get("contact_allowed", True),
+                                  owner_contact_allowed=event["proactive"].get("owner_contact_allowed", True),
+                                  planning_only=event["proactive"].get("planning_only", False),
+                                  owner_ids=self.store.owners,
                                   journal=MemoryJournal(self.outbox, identity_envelope(identity), turn_id,
                                       autonomous=True, candidate=event["proactive"], event_ids=[turn_id]))
             with tool_context(context):
@@ -484,6 +490,7 @@ class QQThinking:
             checkpoint = None
             if "context" in locals():
                 checkpoint = activity_checkpoint(event["proactive"], {
+                    **context.activity,
                     "mode": "review", "note": f"执行被中断：{str(exc)[:400]}；先核对回执和页面再自主选择",
                     "delay_seconds": 15,
                     "observations": context.activity.get("observations") or [],
@@ -503,6 +510,9 @@ class QQThinking:
                 if uncertain:
                     checkpoint.update(mode="pause", delay_seconds=0, note="回执不确定，等待主人核查后恢复")
                 self.store.save_turn(turn_id, "done", {"activity": checkpoint, "reflection": str(exc)[:2000]})
+                context.journal.capture("autonomous_turn", {}, str(exc), category="turn",
+                                        status="uncertain" if uncertain else "failed",
+                                        key=context.journal.prefix + ":turn", activity=checkpoint)
             raise
 
     def worker(self):

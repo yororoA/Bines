@@ -42,6 +42,8 @@ def _authorize(*, human=False, plan_id=""):
     context = CURRENT_CONTEXT.get()
     if not context.identity.privileged:
         raise PermissionError("网站账号仅允许本机或主人私聊使用")
+    if context.autonomous and context.planning_only:
+        raise PermissionError("当前休息思考轮次不执行网站操作")
     if not human:
         return
     if context.check:

@@ -30,6 +30,8 @@ CONTACT_ACTIONS = {
     "add_moment", "comment_moment", "send_ark_chat", "like_moment", "like_comment",
     "website_approve", "website_execute",
 }
+PLANNING_ACTIONS = {"get_time", "search_memory", "regulate_life",
+                    "activity_continue", "activity_pause", "activity_finish"}
 
 
 class ActivityYield(Exception):
@@ -80,6 +82,12 @@ class WillSkillRunner:
     def __getattr__(self, name):
         return getattr(self.runner, name)
 
+    def function_tools(self, *args, **kwargs):
+        tools = self.runner.function_tools(*args, **kwargs)
+        if self.candidate.get("planning_only"):
+            return [tool for tool in tools if tool.get("function", {}).get("name") in PLANNING_ACTIONS]
+        return tools
+
     def execute(self, command, **kwargs):
         from tools.context import CURRENT_CONTEXT
         journal = CURRENT_CONTEXT.get().journal
@@ -103,6 +111,8 @@ class WillSkillRunner:
             refused(f"自主行动已取消：{reason}")
             raise RuntimeError(f"自主行动已取消：{reason}")
         action = command.get("action")
+        if self.candidate.get("planning_only") and action not in PLANNING_ACTIONS:
+            return refused("自主行动未执行：休息期间本批只允许内部思考和生命周期调节")
         if not self.candidate.get("contact_allowed") and action in CONTACT_ACTIONS | {"mcp_call"}:
             return refused("自主行动未执行：当前只允许不打扰他人的查询或观察")
         if action in DESKTOP_ACTIONS and not self.ordinary:
@@ -164,14 +174,16 @@ def run_intention(model, runner, memory_context, candidate, check, *, source="QQ
             topic=choice["topic"], reason=choice["reason"], note=choice["reason"],
             delay_seconds=choice["delay_seconds"], decision_source="model", decision=choice,
         )
+        execution_candidate = {**candidate, "intent": choice["next_intent"] or candidate["intent"],
+                               "topic": choice["topic"] or candidate["topic"], "reason": choice["reason"]}
+        if context.journal:
+            context.journal.candidate = dict(execution_candidate)
         log.info("自主选择 · %s · %s · %s", choice["mode"], choice["topic"], choice["reason"])
         if choice["mode"] != "continue":
             context.activity["mode"] = choice["mode"]
             if context.journal:
                 context.journal.turn_result = choice["reason"]
             return choice["reason"], []
-        execution_candidate = {**candidate, "intent": choice["next_intent"],
-                               "topic": choice["topic"], "reason": choice["reason"]}
     guarded = WillSkillRunner(runner, execution_candidate, check, desktop=source != "QQ")
     try:
         text, _, _ = model.run_skill_protocol(

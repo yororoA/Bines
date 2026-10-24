@@ -29,6 +29,13 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS idx_life_events_time ON life_events(ts, source_ref)",
     "CREATE INDEX IF NOT EXISTS idx_life_events_scope ON life_events(scope, kind, ts)",
+    """CREATE TABLE IF NOT EXISTS life_workloads (
+        scope TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        seconds REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY(scope,turn_id)
+    )""",
 )
 
 _PHASE_LABELS = {
@@ -43,6 +50,10 @@ _TERMINAL = {
     "succeeded": "completed", "completed": "completed", "sent": "completed",
     "failed": "failed", "uncertain": "uncertain", "skipped": "skipped",
     "interrupted": "interrupted", "empty": "completed",
+}
+_INTERNAL_ACTIONS = {
+    "get_time", "search_memory", "cite_memory", "regulate_life",
+    "autonomous_feedback", "activity_decision",
 }
 
 
@@ -345,10 +356,34 @@ class LifeLedger:
             return
         now = self.clock()
         state = self._advance(now)
-        if record.get("status") not in {"started", "empty"}:
-            state["energy"] = _number(float(state.get("energy") or 0.72) - 0.02, 0.7)
-            state["sleep_pressure"] = _number(float(state.get("sleep_pressure") or 0.28) + 0.015, 0.3)
-            self._save(state, now)
+        # Former per-record cost charged tools, native receipts and feedback
+        # separately. Charge observed work time once per turn; audits are free.
+        if record.get("category") != "turn" or record.get("status") == "started":
+            return
+        elapsed = record.get("duration_seconds")
+        if elapsed is None:
+            elapsed = max(0, float(record.get("finished_at") or ts)
+                          - float(record.get("started_at") or ts))
+        seconds = _number(elapsed, 0, 0, 3600)
+        turn_id = str(record.get("turn_id") or source_ref)
+        previous = self.repo.conn.execute(
+            "SELECT seconds FROM life_workloads WHERE scope=? AND turn_id=?", (scope, turn_id)
+        ).fetchone()
+        charged = float(previous["seconds"]) if previous else 0
+        additional = max(0, seconds - charged)
+        if not additional:
+            return
+        self.repo.conn.execute(
+            "INSERT INTO life_workloads VALUES(?,?,?,?) "
+            "ON CONFLICT(scope,turn_id) DO UPDATE SET seconds=excluded.seconds,updated_at=excluded.updated_at",
+            (scope, turn_id, seconds, now),
+        )
+        hours = additional / 3600
+        state["energy"] = _number(state.get("energy"), 0.72) - 0.02 * hours
+        state["sleep_pressure"] = _number(state.get("sleep_pressure"), 0.28) + 0.015 * hours
+        state["energy"] = _number(state["energy"], 0.72)
+        state["sleep_pressure"] = _number(state["sleep_pressure"], 0.28)
+        self._save(state, now)
 
     def retract_experience(self, source_ref: str) -> None:
         row = self.repo.conn.execute(
@@ -466,7 +501,11 @@ class LifeLedger:
                     result["assistant_turns"] += 1
             else:
                 record = payload.get("record") or {}
-                if record.get("autonomous") and record.get("category") != "feedback":
+                external_tool = (record.get("category") == "tool"
+                                 and not str(record.get("action") or "").startswith("activity_")
+                                 and record.get("action") not in _INTERNAL_ACTIONS
+                                 and record.get("status") in {"succeeded", "completed", "sent", "failed", "uncertain"})
+                if record.get("autonomous") and external_tool:
                     result["autonomous_actions"] += 1
                     if record.get("status") in {"succeeded", "completed", "sent"}:
                         result["successful_actions"] += 1
@@ -509,15 +548,20 @@ class LifeLedger:
         for row in rows:
             record = (json.loads(row["payload"]).get("record") or {})
             candidate = record.get("candidate") or {}
-            if (not record.get("autonomous") or not candidate.get("topic")
+            activity = record.get("activity") or {}
+            topic = activity.get("topic") or candidate.get("topic")
+            if ((not record.get("autonomous") and not activity.get("id")) or not topic
                     or record.get("category") == "feedback"
                     or record.get("action") == "autonomous_feedback"):
                 continue
             turn_id = str(record.get("turn_id") or row["source_ref"])
-            goal = grouped.setdefault(turn_id, {
-                "id": hashlib.sha256(turn_id.encode()).hexdigest()[:16],
-                "title": str(candidate["topic"])[:120],
-                "intent": str(candidate.get("intent") or "")[:500],
+            activity_id = str(activity.get("id") or (candidate.get("activity") or {}).get("id")
+                              or candidate.get("id") or turn_id)
+            goal = grouped.setdefault(activity_id, {
+                "id": hashlib.sha256(activity_id.encode()).hexdigest()[:16],
+                "activity_id": activity_id,
+                "title": str(topic)[:120],
+                "intent": str(activity.get("intent") or candidate.get("intent") or "")[:500],
                 "kind": str(candidate.get("kind") or ""),
                 "status": "active",
                 "created_at": float(record.get("started_at") or row["ts"]),
@@ -526,11 +570,26 @@ class LifeLedger:
                 "result": "",
                 "_successful": False,
                 "_failed": False,
+                "_persistent": False,
+                "_turns": set(),
             })
+            goal["_turns"].add(turn_id)
             goal["updated_at"] = max(goal["updated_at"], float(row["ts"]))
             action, status = record.get("action"), record.get("status")
             if action == "autonomous_turn" or record.get("category") == "turn":
-                goal["status"] = _TERMINAL.get(status, "active")
+                goal["title"] = str(topic)[:120]
+                goal["intent"] = str(activity.get("intent") or candidate.get("intent") or "")[:500]
+                if activity.get("mode"):
+                    goal["_persistent"] = True
+                    mode = activity["mode"]
+                    if mode == "finish":
+                        goal["status"] = "completed"
+                    elif mode == "pause" or status == "uncertain":
+                        goal["status"] = "paused"
+                    else:
+                        goal["status"] = "active"
+                else:
+                    goal["status"] = _TERMINAL.get(status, "active")
                 if record.get("result"):
                     goal["result"] = str(record["result"])[:600]
             elif goal["status"] == "active" and status in {"failed", "uncertain", "interrupted"}:
@@ -539,8 +598,11 @@ class LifeLedger:
                 goal["_successful"] = True
         goals = []
         for goal in grouped.values():
-            if goal["status"] == "active" and now - goal["updated_at"] >= 6 * 3600:
+            if (not goal["_persistent"] and goal["status"] == "active"
+                    and now - goal["updated_at"] >= 6 * 3600):
                 goal["status"] = "completed" if goal["_successful"] else "interrupted" if goal["_failed"] else "skipped"
+            goal["batches"] = len(goal.pop("_turns"))
+            goal.pop("_persistent", None)
             goal.pop("_successful", None)
             goal.pop("_failed", None)
             goals.append(goal)
@@ -596,7 +658,8 @@ class LifeLedger:
                 "wake_cycles": int(state.get("wake_cycles") or 0),
                 "self_regulation_enabled": True,
                 "today": self._today(now, viewer_scope),
-                "current_focus": next((goal["title"] for goal in goals if goal["status"] == "active"), ""),
+                "current_focus": next((goal["title"] for goal in goals
+                                       if goal["status"] in {"active", "paused"}), ""),
             }
             if viewer_scope == OWNER_SCOPE:
                 result.update(goals=goals, milestones=self._milestones(state, now),

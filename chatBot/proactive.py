@@ -6,7 +6,8 @@ import time
 import uuid
 
 from common.proactive import (
-    ProactiveConfig, ProactivePolicy, appraise_history, compact_life, context_blocked, draft_decision, human_ref,
+    ProactiveConfig, ProactivePolicy, appraise_history, capability_summary, compact_life,
+    draft_decision, human_ref, owner_contact,
 )
 
 log = logging.getLogger("bines.qq.proactive")
@@ -84,7 +85,8 @@ def guard(store, event, now=None, *, config=None, central_activity=0):
     # A desktop or group interaction after this candidate also cancels it.
     if max(owner_activity(store), central_activity) > float(candidate.get("activity_at") or 0):
         return "owner_active_elsewhere"
-    idle = 0 if candidate.get("activity") else config.min_idle
+    idle = (0 if candidate.get("activity") else
+            config.min_idle if candidate.get("kind") == "connection" else config.thinking_idle)
     if now - max(float(user["ts"]), central_activity) < idle:
         return "not_idle"
     return ""
@@ -111,6 +113,11 @@ def dispatch_allowed(store, event, action, params, operation_id, *, central_acti
         raise PermissionError("安静时段不执行主动联系或账号写操作")
     if not candidate.get("contact_allowed") and not is_read(action):
         raise PermissionError("当前意愿轮次只允许不打扰他人的读取和观察")
+    if candidate.get("planning_only"):
+        raise PermissionError("当前休息思考轮次不执行 NapCat 操作")
+    if (not candidate.get("owner_contact_allowed", candidate.get("contact_allowed", True))
+            and owner_contact(action, params, store.owners)):
+        raise PermissionError("主人私聊仍处于冷却或免打扰状态")
     reason = guard(store, event, central_activity=central_activity)
     if reason:
         raise PermissionError(f"主动消息已取消：{reason}")
@@ -123,6 +130,7 @@ class QQProactive:
         self.config, self.decide, self.clock = config or ProactiveConfig.from_env(), decide, clock
         self.appraise = appraise
         self.policies = {}
+        self.capabilities = None
 
     def save(self, conversation, policy):
         with self.store.connection() as db:
@@ -202,10 +210,12 @@ class QQProactive:
         delivered = next((op for op in operations if op["status"] == "ok"
                           and json.loads(op["result"] or "{}").get("retcode", 0) == 0), None)
         from chatBot.messages import SEND_ACTIONS
-        contacted = any(op["action"] in SEND_ACTIONS or op["action"] == "send_qzone_msg"
-                        for op in operations)
+        contacted = any(op["action"] in SEND_ACTIONS for op in operations)
         if contacted:
             policy.state.pending["contacted"] = True
+        policy.state.pending["owner_contacted"] = any(
+            owner_contact(op["action"], json.loads(op["params"] or "{}"), self.store.owners)
+            for op in operations)
         terminal = run and run["status"] != "queued"
         if (delivered and (terminal or now - candidate["timestamp"] > self.config.expiry)
                 or (run and run["status"] in {"sent", "completed"})):
@@ -261,13 +271,7 @@ class QQProactive:
                 life=snapshot.get("life") or {},
             )
             self.save(conversation, policy)  # Save observation even during cooldown/quiet.
-            needs_appraisal = (
-                not policy.state.activity and policy.state.history_ref != human_ref(user) and connected and not busy
-                and now - max(activity, float(last["ts"] or 0)) >= self.config.min_idle
-                and now - policy.started >= self.config.startup_grace
-                and now >= policy.state.next_decision
-            )
-            if not ready and not needs_appraisal:
+            if not ready:
                 continue
             policy.defer(now)  # Failed model calls also back off, rather than retrying every tick.
             self.save(conversation, policy)
@@ -281,17 +285,21 @@ class QQProactive:
                 "profile": memory_context.get("profile") or {},
                 "bridge": memory_context.get("bridge"),
                 "state": memory_context.get("state") or {},
-                "life": compact_life(memory_context.get("life")),
+                "life": compact_life(memory_context.get("life") or snapshot.get("life")),
+                "recent_outcomes": policy.state.recent_outcomes,
+                "planning_only": policy.state.planning_only,
+                **policy.contact_permissions(now, user, activity),
             }
-            if not continuing and policy.state.history_ref != human_ref(user):
+            if self.capabilities is None:
+                self.capabilities = capability_summary("QQ")
+            materials["available_skills"] = self.capabilities
+            needs_appraisal = (policy.appraisal_due(human_ref(user), now)
+                               and (not continuing or bool(policy.state.emotion_at)))
+            if needs_appraisal:
                 appraisal = self.appraise(materials, policy.state, now)
                 policy.appraise(appraisal, human_ref(user), now)
-                if not appraisal:
-                    continue
                 self.save(conversation, policy)
-            if not ready:
-                continue
-            kinds = policy.eligible_kinds(now, user)
+            kinds = policy.eligible_kinds(now, user, activity)
             saved_activity = policy.state.activity
             continuing = saved_activity.get("mode") in {"continue", "review"}
             if continuing:
@@ -299,21 +307,22 @@ class QQProactive:
                             "intent": saved_activity["intent"], "reason": saved_activity["reason"]}
             else:
                 decision = self.decide(materials, policy.state, now, capabilities="QQ", allowed_kinds=kinds)
+                decision = policy.record_decision(decision, now)
             if decision and not continuing and decision["kind"] not in kinds:
+                policy.state.last_decision.update(status="disallowed_kind", proposed=decision)
                 decision = None
             if not decision:
-                policy.defer(self.clock())
+                policy.defer(self.clock(), policy.state.last_decision.get("delay_seconds"))
                 self.save(conversation, policy)
                 continue
             event_id = "proactive:" + uuid.uuid4().hex
             candidate = {**decision, "id": event_id, "based_on_user": human_ref(user),
                          "activity_at": activity, "timestamp": self.clock(),
-                         "contact_allowed": (saved_activity.get("contact_allowed", True)
-                            and not context_blocked(user.get("content")) and not self.config.quiet(now)
-                            if continuing else "connection" in kinds),
+                         **policy.contact_permissions(now, user, activity),
+                         "planning_only": policy.state.planning_only,
                          "activity": dict(saved_activity) if continuing else {},
                          "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),
-                         "life": compact_life(memory_context.get("life"))}
+                         "life": materials["life"]}
             event = {"post_type": "bines_proactive", "self_id": original["self_id"],
                      "user_id": original["user_id"], "message_type": "private",
                      "sender": original.get("sender") or {}, "event_id": event_id, "proactive": candidate}
@@ -325,6 +334,7 @@ class QQProactive:
             reason = guard(self.store, event, self.clock(), config=self.config,
                            central_activity=float(latest.get("ts") or 0))
             if reason:
+                policy.state.last_decision.update(status="cancelled", cancellation_reason=reason)
                 with self.store.connection() as db:
                     db.execute("UPDATE proactive_runs SET status='skipped',error=? WHERE id=?", (reason, event_id))
                 policy.defer(self.clock())

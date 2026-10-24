@@ -45,12 +45,13 @@ class ContinuousPolicyTests(unittest.TestCase):
         self.policy.resolve(self.now + 3, delivered=True, activity=checkpoint)
         self.assertEqual(self.policy.state.actions_today, 1)
 
-    def test_checkpoint_survives_restart_and_sleep_pauses_execution(self):
+    def test_checkpoint_survives_restart_and_sleep_allows_throttled_planning(self):
         checkpoint = activity_checkpoint(self.candidate, {"mode": "continue"}, [])
         self.policy.reserve(self.candidate)
         self.policy.resolve(self.now, delivered=True, activity=checkpoint)
         restored = ProactivePolicy(self.now + 3, self.config, self.policy.dump())
-        self.assertFalse(restored.tick(self.now + 4, self.user, life={"phase": "resting"}))
+        self.assertTrue(restored.tick(self.now + 4, self.user, life={"phase": "resting"}))
+        self.assertTrue(restored.state.planning_only)
         self.assertTrue(restored.tick(self.now + 5, self.user, life={"phase": "active"}))
         self.assertEqual(restored.state.activity["intent"], self.candidate["intent"])
 
@@ -266,8 +267,13 @@ class ContinuousToolTests(unittest.TestCase):
                 autonomy_control("resume")
         with tempfile.TemporaryDirectory() as temp:
             with patch("common.activity.control_path", return_value=Path(temp) / "control.json"):
-                with tool_context(ToolContext(LOCAL_IDENTITY, user_text="暂停自主活动")):
+                with tool_context(ToolContext(LOCAL_IDENTITY, user_text="暂停自主活动")) as context:
                     self.assertEqual(autonomy_control("pause")["control"]["mode"], "pause")
+                    self.assertEqual(context.activity["mode"], "pause")
+                    self.assertEqual(context.activity["delay_seconds"], 0)
+                with tool_context(ToolContext(LOCAL_IDENTITY, user_text="停止自主活动")) as context:
+                    self.assertEqual(autonomy_control("stop")["control"]["mode"], "stop")
+                    self.assertEqual(context.activity["mode"], "finish")
                 with tool_context(ToolContext(LOCAL_IDENTITY, user_text="不要恢复自主活动")):
                     with self.assertRaisesRegex(PermissionError, "否定"):
                         autonomy_control("resume")

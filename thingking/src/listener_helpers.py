@@ -59,7 +59,8 @@ def bored_event_rejection(event_data, snapshot, now, *, online=True, busy=False,
     from common.activity import activity_control
     if activity_control().get("mode") in {"pause", "stop"}:
         return "owner_paused"
-    if (snapshot.get("life") or {}).get("phase") in {"sleeping", "resting"}:
+    if ((snapshot.get("life") or {}).get("phase") in {"sleeping", "resting"}
+            and not event_data.get("planning_only")):
         return "resting"
     if not online or busy:
         return "unavailable"
@@ -69,12 +70,14 @@ def bored_event_rejection(event_data, snapshot, now, *, online=True, busy=False,
     if age < 0 or (age > config.expiry and not executing):
         return "expired"
     user = snapshot.get("last_user") or {}
-    if not human_ref(user) or human_ref(user) != event_data.get("based_on_user"):
+    if (human_ref(user) != event_data.get("based_on_user", "")
+            or event_data.get("kind") == "connection" and not human_ref(user)):
         return "new_user_message"
     owner_ts = float((snapshot.get("last_owner_activity") or {}).get("ts") or 0)
     if owner_ts > float(event_data.get("activity_at") or 0):
         return "owner_active_elsewhere"
-    idle = 0 if event_data.get("activity") else config.min_idle
+    idle = (0 if event_data.get("activity") else
+            config.min_idle if event_data.get("kind") == "connection" else config.thinking_idle)
     if now - max(float(user.get("ts") or 0), owner_ts) < idle:
         return "not_idle"
     decision = parse_decision(json.dumps({**event_data, "should_act": True}))

@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from chatBot.messages import LOCAL_IDENTITY, Identity
+from chatBot.config import OWNER_QQ_IDS
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,9 @@ class ToolContext:
     activity: dict = field(default_factory=dict, compare=False)
     check: object = field(default=None, compare=False)
     journal: object = field(default=None, compare=False)
+    owner_contact_allowed: bool = True
+    planning_only: bool = False
+    owner_ids: frozenset = OWNER_QQ_IDS
 
 
 CURRENT_CONTEXT = ContextVar("bines_tool_context", default=ToolContext())
@@ -30,11 +34,13 @@ def tool_context(context):
         yield context
     except BaseException as exc:
         if entry:
-            context.journal.finish(entry, f"{type(exc).__name__}: {exc}", status="failed")
+            context.journal.finish(entry, f"{type(exc).__name__}: {exc}", status="failed",
+                                   activity=context.activity)
         raise
     else:
         if entry:
             context.journal.finish(entry, getattr(context.journal, "turn_result", ""),
-                                   status=getattr(context.journal, "turn_status", "completed"))
+                                   status=getattr(context.journal, "turn_status", "completed"),
+                                   activity=context.activity)
     finally:
         CURRENT_CONTEXT.reset(token)

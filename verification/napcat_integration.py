@@ -679,7 +679,7 @@ class Integration(unittest.TestCase):
 import sys
 from process_registry import get_processes
 from tools import TOOLS_REGISTRY
-assert [p['name'] for p in get_processes(profile='chatbot')] == ['ChatBot','QQ Thinking','Memory Worker']
+assert [p['name'] for p in get_processes(profile='chatbot')] == ['RAG Web','ChatBot','QQ Thinking','Memory Worker']
 assert 'Thinking' in [p['name'] for p in get_processes(profile='full')]
 assert 'Memory Worker' in [p['name'] for p in get_processes(profile='full')]
 assert all(p['interpreter'] for p in get_processes(profile='full'))

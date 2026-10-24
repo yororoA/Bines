@@ -207,6 +207,162 @@ class LifeLedgerTests(unittest.TestCase):
         self.assertEqual(life["regulation"]["source"], "automatic")
         self.assertIn("自动", life["regulation"]["reason"])
 
+    def test_internal_records_do_not_charge_energy_or_reset_zero(self):
+        before = self.fx.service.life_snapshot()
+        for index, category in enumerate(("feedback", "decision", "observation", "tool") * 10):
+            self.fx.service.life.record_experience("owner", f"internal:{index}", {
+                "category": category, "action": "autonomous_feedback",
+                "status": "completed", "finished_at": self.fx.clock(),
+            }, 1)
+        after = self.fx.service.life_snapshot()
+        self.assertEqual(after["energy"], before["energy"])
+        self.assertEqual(after["sleep_pressure"], before["sleep_pressure"])
+        row = self.fx.repo.conn.execute("SELECT data FROM life_state WHERE id='bines'").fetchone()
+        state = json.loads(row["data"])
+        state.update(energy=0, sleep_pressure=0, last_tick=self.fx.clock())
+        self.fx.repo.conn.execute("UPDATE life_state SET data=? WHERE id='bines'", (json.dumps(state),))
+        self.fx.service.life.record_experience("owner", "zero-feedback", {
+            "category": "feedback", "status": "completed", "finished_at": self.fx.clock(),
+        }, 1)
+        self.assertEqual(self.fx.service.life_snapshot()["energy"], 0)
+        self.assertEqual(self.fx.service.life_snapshot()["sleep_pressure"], 0)
+
+    def test_work_time_is_charged_once_across_receipts_revisions_and_restart(self):
+        before = self.fx.service.life_snapshot()
+        record = {
+            "category": "turn", "turn_id": "one-work-turn", "status": "completed",
+            "duration_seconds": 900, "finished_at": self.fx.clock(),
+        }
+        ledger = self.fx.service.life
+        ledger.record_experience("owner", "work:one", record, 1)
+        ledger.record_experience("owner", "work:one", record, 2)
+        ledger.record_experience("owner", "work:other-receipt", record, 1)
+        after = self.fx.service.life_snapshot()
+        self.assertAlmostEqual(after["energy"], before["energy"] - 0.005, places=4)
+        self.assertAlmostEqual(after["sleep_pressure"], before["sleep_pressure"] + 0.00375, places=3)
+        restarted = LifeLedger(self.fx.repo, self.fx.clock)
+        restarted.record_experience("owner", "work:one", {**record, "duration_seconds": 1800}, 3)
+        self.assertAlmostEqual(restarted.snapshot()["energy"], before["energy"] - 0.01, places=4)
+
+    def test_internal_or_cancelled_tools_are_not_counted_as_external_activity(self):
+        ledger = self.fx.service.life
+        for index, action in enumerate(("get_time", "search_memory", "regulate_life", "activity_continue")):
+            ledger.record_experience("owner", f"internal-tool:{index}", {
+                "category": "tool", "action": action, "autonomous": True,
+                "status": "succeeded", "finished_at": self.fx.clock()}, 1)
+        ledger.record_experience("owner", "cancelled-browser", {
+            "category": "tool", "action": "website_open", "autonomous": True,
+            "status": "skipped", "finished_at": self.fx.clock()}, 1)
+        self.assertEqual(ledger.snapshot()["today"]["autonomous_actions"], 0)
+        ledger.record_experience("owner", "actual-browser", {
+            "category": "tool", "action": "website_open", "autonomous": True,
+            "status": "succeeded", "finished_at": self.fx.clock()}, 1)
+        self.assertEqual(ledger.snapshot()["today"]["autonomous_actions"], 1)
+
+    def test_activity_goal_spans_batches_pause_restart_and_model_finish(self):
+        def batch(index, mode, topic="观察海鸟"):
+            record = {
+                "category": "turn", "action": "autonomous_turn", "autonomous": True,
+                "turn_id": f"bird-batch:{index}", "candidate": {
+                    "id": f"candidate:{index}", "kind": "curiosity", "topic": topic,
+                    "activity": {"id": "bird-activity"} if index > 1 else {},
+                },
+                "activity": {"id": "bird-activity", "mode": mode, "topic": topic,
+                             "intent": "看看接下来的捕食动作"},
+                "status": "completed", "finished_at": self.fx.clock(), "result": "真实观察",
+            }
+            self.fx.service.record_experience(local_env(self.fx.clock()), f"bird:{index}", record, 1)
+        batch(1, "continue")
+        self.fx.clock.advance(1)
+        batch(2, "pause")
+        goals = self.fx.service.life_snapshot()["goals"]
+        self.assertEqual(len(goals), 1)
+        self.assertEqual(goals[0]["status"], "paused")
+        self.assertEqual(goals[0]["batches"], 2)
+        self.fx.clock.advance(7 * 3600)
+        restarted = LifeLedger(self.fx.repo, self.fx.clock)
+        self.assertEqual(restarted.snapshot()["goals"][0]["status"], "paused")
+        batch(3, "review", "海鸟如何协作")
+        self.assertEqual(self.fx.service.life_snapshot()["goals"][0]["status"], "active")
+        batch(4, "finish", "海鸟如何协作")
+        goals = self.fx.service.life_snapshot()["goals"]
+        self.assertEqual(len(goals), 1)
+        self.assertEqual(goals[0]["status"], "completed")
+        self.assertEqual(goals[0]["title"], "海鸟如何协作")
+        self.assertEqual(goals[0]["batches"], 4)
+
+    def test_completed_runtime_turn_preserves_activity_in_memory_journal(self):
+        from common.memory_journal import MemoryJournal, MemoryOutbox
+        outbox = MemoryOutbox(self.fx.tmp / "runtime-outbox.db")
+        candidate = {
+            "id": "next-batch", "kind": "curiosity", "topic": "观察海鸟", "intent": "观察捕食",
+            "activity": {"id": "persistent-bird", "sequence": 5},
+        }
+        journal = MemoryJournal(outbox, local_env(self.fx.clock()), "next-batch",
+                                autonomous=True, candidate=candidate)
+        with patch("common.memory_journal.time.time", side_effect=self.fx.clock):
+            with tool_context(ToolContext(LOCAL_IDENTITY, journal=journal)) as context:
+                context.activity.update(mode="continue", next_intent="看下一段协作", topic="海鸟协作")
+                self.fx.clock.advance(5)
+        outbox.sync(lambda method, **params: getattr(self.fx.service, method)(**params))
+        goal = self.fx.service.life_snapshot()["goals"][0]
+        self.assertEqual(goal["activity_id"], "persistent-bird")
+        self.assertEqual(goal["status"], "active")
+        self.assertEqual(goal["title"], "海鸟协作")
+
+    def test_terminal_audit_preserves_measured_work_time(self):
+        from common.memory_journal import MemoryJournal, MemoryOutbox
+        outbox = MemoryOutbox(self.fx.tmp / "audit-outbox.db")
+        journal = MemoryJournal(outbox, local_env(self.fx.clock()), "audit-turn",
+                                autonomous=True, candidate={"id": "audit-turn", "topic": "海鸟"})
+        with patch("common.memory_journal.time.time", side_effect=self.fx.clock):
+            with tool_context(ToolContext(LOCAL_IDENTITY, journal=journal)):
+                self.fx.clock.advance(45)
+            self.fx.clock.advance(100)
+            journal.capture("autonomous_turn", {}, "终态回执", category="turn",
+                            status="completed", key=journal.prefix + ":turn")
+        with outbox.connection() as db:
+            record = json.loads(db.execute("SELECT params FROM memory_outbox").fetchone()[0])["record"]
+        self.assertEqual(record["duration_seconds"], 45)
+        self.assertEqual(record["result"], "终态回执")
+
+    def test_eight_hours_many_internal_records_preserve_one_active_goal(self):
+        from common.activity import activity_checkpoint
+        start = self.fx.clock()
+        policy = ProactivePolicy(start)
+        user = {"id": "1", "ts": start-2000, "content": "随意探索"}
+        policy.tick(start, user)
+        candidate = {"id": "long-life", "topic": "观察海鸟", "kind": "curiosity",
+                     "intent": "观察不同海鸟的行为", "reason": "对不同行为有兴趣", "based_on_user": "1",
+                     "timestamp": start, "contact_allowed": True}
+        checkpoint = {}
+        for batch in range(96):  # Eight hours, default lifecycle and policy parameters.
+            self.fx.clock.advance(300)
+            now = self.fx.clock()
+            life = self.fx.service.life_snapshot()
+            self.assertEqual(life["phase"], "active")
+            self.assertTrue(policy.tick(now, user, life=life))
+            candidate = {**candidate, "id": f"batch:{batch}", "timestamp": now,
+                         "activity": checkpoint}
+            policy.reserve(candidate)
+            checkpoint = activity_checkpoint(candidate, {"mode": "continue", "delay_seconds": 2,
+                                                         "decision_source": "model"}, [])
+            policy.resolve(now, delivered=True, activity=checkpoint)
+            ledger = self.fx.service.life
+            for index in range(24):
+                ledger.record_experience("owner", f"audit:{batch}:{index}", {
+                    "category": "feedback", "status": "completed", "finished_at": now}, 1)
+            ledger.record_experience("owner", f"batch:{batch}", {
+                "category": "turn", "action": "autonomous_turn", "autonomous": True,
+                "turn_id": f"batch:{batch}", "candidate": candidate, "activity": checkpoint,
+                "status": "completed", "duration_seconds": 90, "finished_at": now}, 1)
+        result = self.fx.service.life_snapshot()
+        self.assertGreater(result["energy"], .18)
+        self.assertLess(result["sleep_pressure"], .88)
+        self.assertEqual(result["goals"][0]["status"], "active")
+        self.assertEqual(result["goals"][0]["batches"], 96)
+        self.assertEqual(policy.state.actions_today, 1)
+
     def test_regulation_rejects_unsafe_scope_duration_and_churn(self):
         with self.assertRaises(PermissionError):
             self.fx.service.regulate_life(
@@ -239,7 +395,7 @@ class LifeLedgerTests(unittest.TestCase):
 
 
 class LifePolicyTests(unittest.TestCase):
-    def test_sleep_blocks_autonomy_and_active_energy_restores_it(self):
+    def test_sleep_allows_internal_planning_and_active_phase_restores_authority(self):
         now = stamp()
         config = ProactiveConfig(interval=1, min_idle=0, startup_grace=0, quiet_start=0, quiet_end=0)
         user = {"id": 1, "ts": now - 1000, "content": "晚点聊"}
@@ -247,11 +403,13 @@ class LifePolicyTests(unittest.TestCase):
         sleeping.tick(now, user)
         for second in range(1, 20):
             ready = sleeping.tick(now + second, user, life={"phase": "sleeping", "energy": 0.9})
-        self.assertFalse(ready)
+        self.assertTrue(ready)
+        self.assertTrue(sleeping.state.planning_only)
         self.assertLess(sleeping.state.value, 45)
         for second in range(20, 40):
             ready = sleeping.tick(now + second, user, life={"phase": "resting", "energy": 0.6})
-        self.assertFalse(ready)
+        self.assertTrue(ready)
+        self.assertFalse(sleeping.contact_permissions(now+39, user)["contact_allowed"])
         active = ProactivePolicy(now, config)
         active.tick(now, user)
         for second in range(1, 20):

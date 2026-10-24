@@ -36,6 +36,7 @@ class GatewayClient:
         from tools.context import CURRENT_CONTEXT
         from chatBot.capabilities import is_read
         from chatBot.messages import compact_qq_send_params
+        from common.proactive import owner_contact
         # Receipts must contain the same compact text the gateway dispatches.
         params = compact_qq_send_params(action, params or {})
         context = CURRENT_CONTEXT.get()
@@ -46,6 +47,10 @@ class GatewayClient:
                     raise RuntimeError(f"自主行动已取消：{reason}")
             if not context.contact_allowed and not is_read(action):
                 raise PermissionError("当前自主轮次只允许不打扰他人的读取")
+            if context.planning_only:
+                raise PermissionError("休息思考轮次不执行 NapCat 操作")
+            if not context.owner_contact_allowed and owner_contact(action, params, context.owner_ids):
+                raise PermissionError("主人私聊仍处于冷却或免打扰状态")
         receipt = None
         if not is_read(action):
             if any((item.get("result") or {}).get("status") == "uncertain" for item in context.receipts):
