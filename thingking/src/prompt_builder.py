@@ -214,6 +214,10 @@ def _memory_recall_block(context: Dict[str, Any]) -> str:
     parts: List[str] = []
     presentations = []
     def add(part, item=None, spans=()):
+        spans = list(spans)
+        for correction in (item.get("corrections") or [])[-3:] if item else []:
+            part += f"\n已纠正事实：旧记录“{correction['quote']}”已失效，当前事实为“{correction['replacement']}”。"
+            spans.append(correction["replacement"])
         associations = (item.get("associations") or [])[:3] if item else []
         if associations:
             part += "\n关联理由：" + "；".join(f"[{a['id']}] {a['reason'][:160]}" for a in associations)

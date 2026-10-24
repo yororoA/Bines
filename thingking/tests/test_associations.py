@@ -272,17 +272,19 @@ class AssociationTest(unittest.TestCase):
 
     def test_worker_association_real_dispatch_and_idempotency(self):
         self.raw("蓝色围巾")
+        self.raw("蓝色围巾赠送约定")
         class Client:
             def claim_job(inner, **params):
                 return self.service.claim_job(**params)
-            def complete_association(inner, *args):
-                return self.service.complete_association(*args)
-            def fail_job(inner, *args):
-                return self.service.fail_job(*args)
+            def complete_association(inner, *args, **claim):
+                return self.service.complete_association(*args, **claim)
+            def fail_job(inner, *args, **claim):
+                return self.service.fail_job(*args, **claim)
         worker = MemoryWorker(Client(), lambda _: '{"prior":0.7,"links":[]}', lambda: "")
         self.assertTrue(worker.run_once())
         self.assertEqual(self.repo.conn.execute("SELECT ready,prior FROM association_nodes").fetchone()[1], .7)
         self.repo.conn.execute("UPDATE jobs SET status='done' WHERE kind='summarize'")
+        self.assertTrue(worker.run_once())
         self.assertFalse(worker.run_once())
 
     def test_prompt_budget_records_only_presented_spans(self):

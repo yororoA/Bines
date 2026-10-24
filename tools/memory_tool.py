@@ -28,6 +28,8 @@ def search_memory(query: str, k: int = 8):
     return [{
         "id": hit["id"], "citation_id": hit.get("citation_id"), "chain_ids": hit.get("chain_ids", []),
         "associations": hit.get("associations", []),
+        "context_id": hit.get("context_id"), "reason_shares": hit.get("reason_shares", {}),
+        "corrections": hit.get("corrections", []),
         "content": hit["content"], "kind": hit["kind"], "day_key": hit.get("day_key"),
         "evidence": [
             {"source_type": ev.get("source_type"), "source_ref": ev.get("source_ref"),
@@ -46,6 +48,16 @@ def cite_memory(source_id: str, answer_span: str, source_quote: str = "", chain_
         return "本轮没有可记录的记忆引用上下文。"
     journal.cite_memory(source_id, answer_span, source_quote, chain_id)
     return "引用回执已暂存，轮次结束后核对来源与实际回答。"
+
+
+def correct_memory(source_id: str, quote: str, replacement: str, explanation: str, correction_quote: str):
+    """按当前用户原话纠正已呈现的错误事实，完成本轮后核验并重评关联。"""
+    from tools.context import CURRENT_CONTEXT
+    journal = CURRENT_CONTEXT.get().journal
+    if not journal:
+        raise RuntimeError("本轮没有可核验的记忆纠错上下文")
+    journal.correct_memory(source_id, quote, replacement, explanation, correction_quote)
+    return "事实纠正已暂存，完成本轮后按真实用户原话核验并重评关联。"
 
 
 def _apply_changes(state, *, current_location=None, relationship_delta=None, add_item=None, remove_item=None,

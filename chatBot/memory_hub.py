@@ -164,6 +164,7 @@ class MemoryHub:
                 record = dict(params["record"])
                 refs = list(record.get("source_message_refs") or [])
                 message_ids = set()
+                correction_ids = set()
                 def collect(value):
                     if isinstance(value, dict):
                         for key, item in value.items():
@@ -184,13 +185,19 @@ class MemoryHub:
                             data = json.loads(event["raw"])
                             if data.get("post_type") == "message" and data.get("message_id") is not None:
                                 message_ids.add(str(data["message_id"]))
+                                if identity.privileged and str(data.get("user_id")) == identity.user:
+                                    correction_ids.add(str(data["message_id"]))
+                    correction_refs = []
                     for message_id in message_ids:
                         external = f"{account}:{group or 'p:'+user}:{message_id}"
                         message = db.execute("SELECT id FROM messages WHERE scope=? AND external_id=?",
                                              (identity.scope, external)).fetchone()
                         if message:
                             refs.append(self.source + ":" + str(message["id"]))
-                params["record"] = {**record, "source_message_refs": list(dict.fromkeys(refs))}
+                            if message_id in correction_ids:
+                                correction_refs.append(self.source + ":" + str(message["id"]))
+                params["record"] = {**record, "source_message_refs": list(dict.fromkeys(refs)),
+                                    "correction_source_refs": correction_refs}
         return self._call(method, **params)
 
     def sync(self):

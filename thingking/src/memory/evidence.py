@@ -150,7 +150,7 @@ def _expansions(meta: Mapping[str, Any]) -> List[Tuple[str, str]]:
 def _active(row: Mapping[str, Any], source_type: str, *, include_archived: bool = False) -> bool:
     text = row.get("content") or ""
     meta = _object(row.get("meta"))
-    if source_type == "memory" and meta.get("audit_only"):
+    if source_type == "memory" and (meta.get("audit_only") or meta.get("repair_pending")):
         return False
     if not text.strip() or text.strip().lower() in _RECALLED or is_system_event(text):
         return False

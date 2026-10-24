@@ -35,11 +35,13 @@ class UsageStore:
         return 1 / (1 + math.exp(-value))
 
     def _add(self, scope, turn_id, node, event_type, receipt):
-        family = set(node["family"])
+        family = self.graph.evidence_family(node)
         # A summary and its raw messages are one source even if their root sets differ.
         rows = self.conn.execute("""SELECT family FROM memory_usage_events
             WHERE scope=? AND turn_id=? AND event_type=?""", (scope, turn_id, event_type))
-        if any(family.intersection(json.loads(row[0])) for row in rows):
+        provenance = getattr(self.repo, "provenance", None)
+        if any(family.intersection(provenance.family(scope, json.loads(row[0])) if provenance
+                                   else json.loads(row[0])) for row in rows):
             return False
         cid = receipt.get("chain_id") or ""
         if cid and not self.conn.execute("SELECT 1 FROM chain_memberships WHERE node_id=? AND chain_id=?",
@@ -81,6 +83,9 @@ class UsageStore:
                 originals = [r["content"] for r in material["sources"]]
             if not originals and node["memory_id"]:
                 originals = [material["text"]]
+            corrections = getattr(self.repo, "corrections", None)
+            facts = corrections.inherited_facts(node) if corrections else []
+            originals.extend(fact["replacement"] for fact in facts)
             # Runtime sends only the spans actually included in a prompt/tool result.
             spans = receipt.get("spans") or []
             if not spans or any(not isinstance(s, str) or not s.strip()
@@ -96,13 +101,13 @@ class UsageStore:
                     WHERE m.node_id=? AND c.id=? AND c.scope=?""", (node["id"], cid, scope)).fetchone():
                     allowed_chains.add(cid)
             attributed = next(iter(allowed_chains)) if len(allowed_chains) == 1 else ""
-            visible[node["id"]] = (node, spans, originals, allowed_chains, attributed)
+            visible[node["id"]] = (node, spans, originals, allowed_chains, attributed, receipt, facts)
             result["presented"] += self._add(scope, turn_id, node, "presented",
                                              {**receipt, "chain_id": attributed})
         for receipt in citations[:20]:
             if not isinstance(receipt, dict) or receipt.get("source_id") not in visible:
                 continue
-            node, spans, originals, allowed_chains, attributed = visible[receipt["source_id"]]
+            node, spans, originals, allowed_chains, attributed, presentation, facts = visible[receipt["source_id"]]
             cid = receipt.get("chain_id") or attributed
             if cid and cid not in allowed_chains:
                 continue
@@ -114,7 +119,13 @@ class UsageStore:
                 continue
             if quote and not any(quote in original for original in originals):
                 continue
-            result["cited"] += self._add(scope, turn_id, node, "cited", {**receipt, "chain_id": cid})
+            if quote and any(fact["quote"] in quote for fact in facts):
+                continue
+            validated = {**receipt, "chain_id": cid}
+            added = self._add(scope, turn_id, node, "cited", validated)
+            result["cited"] += added
+            if added and getattr(self.repo, "competition", None):
+                self.repo.competition.learn(scope, turn_id, node, presentation, validated)
         if result["presented"] or result["cited"]:
             self.conn.execute("INSERT OR IGNORE INTO association_events(event_key,scope) VALUES(?,?)",
                               (f"usage:{turn_id}", scope))

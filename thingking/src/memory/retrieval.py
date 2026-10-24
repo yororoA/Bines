@@ -66,11 +66,12 @@ class HybridRetriever:
         self._synced_changes = self.repo.conn.total_changes
         return result
 
-    def search(self, query, scopes, kinds=None, k=10, excluded=(), as_of=None, include_history=False):
+    def search(self, query, scopes, kinds=None, k=10, excluded=(), as_of=None, include_history=False,
+               expand_graph=True, include_evidence=True):
         with self.repo.transaction(), self.keys.reads.session():
-            return self._search(query, scopes, kinds, k, excluded, as_of, include_history)
+            return self._search(query, scopes, kinds, k, excluded, as_of, include_history, expand_graph, include_evidence)
 
-    def _search(self, query, scopes, kinds, k, excluded, as_of, include_history):
+    def _search(self, query, scopes, kinds, k, excluded, as_of, include_history, expand_graph, include_evidence):
         if not isinstance(query, str) or not query.strip() or not scopes:
             return []
         k = max(1, min(int(k), 50))
@@ -131,14 +132,14 @@ class HybridRetriever:
         if self.settings.reranker_model and candidates:
             candidates = self._rerank(query, candidates[:count])
         graph = getattr(self.repo, "associations", None)
-        graph_enabled = graph is not None and self.settings.associations_enabled
+        graph_enabled = graph is not None and self.settings.associations_enabled and expand_graph
         output, seen = [], set()
         for row in candidates:
             source_id = (row["source_type"], row["memory_id"] or row["message_id"])
             if source_id in seen:
                 continue
             evidence = []
-            if not graph_enabled:
+            if not graph_enabled and include_evidence:
                 evidence = self.keys.evidence(row, scopes, query=query, limit=self.settings.evidence_limit)
                 if not evidence:
                     continue
@@ -197,7 +198,7 @@ class HybridRetriever:
         output, families = [], set()
         for nid in ordered:
             node = graph.get(nid)
-            family = set(node["family"])
+            family = graph.evidence_family(node)
             if families.intersection(family):
                 continue
             view = graph.view(node, self.keys, query)
@@ -211,7 +212,8 @@ class HybridRetriever:
                 break
         self.last_trace["graph_candidates"] = len(graph_ids)
         self.last_trace["graph_hops"] = self.settings.graph_max_hops
-        return output
+        competition = getattr(self.repo, "competition", None)
+        return competition.mint(query, output) if competition else output
 
     def _rerank(self, query, candidates):
         try:

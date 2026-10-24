@@ -106,6 +106,26 @@ class ModelCompletionTest(unittest.TestCase):
         self.assertEqual(model.complete_text([]), "今天一起听歌。")
         self.assertNotIn("response_format", model.client.chat.completions.create.call_args.kwargs)
 
+    def test_association_budget_override_is_small_and_keeps_thinking_disabled(self):
+        model = model_with_responses(response(finish_reason="length"), response('{"links":[]}'))
+        self.assertEqual(model.complete_text([], max_tokens=4096, retry_tokens=8192, thinking="disabled",
+                                            timeout=90), '{"links":[]}')
+        requests = model.client.chat.completions.create.call_args_list
+        self.assertEqual([r.kwargs["max_tokens"] for r in requests], [4096, 8192])
+        self.assertTrue(all(r.kwargs["extra_body"] == {"thinking": {"type": "disabled"}} for r in requests))
+        self.assertTrue(all(r.kwargs["timeout"] == 90 for r in requests))
+
+    def test_association_route_cannot_inherit_summary_retry_budget(self):
+        from thingking.consolidation_worker import build_worker
+        model = SimpleNamespace(complete_text=Mock(return_value='{"links":[]}'))
+        worker = build_worker(Mock(), model)
+        worker.association_complete_text([])
+        request = model.complete_text.call_args.kwargs
+        self.assertEqual(request["max_tokens"], 4096)
+        self.assertEqual(request["retry_tokens"], 8192)
+        self.assertEqual(request["max_retries"], 0)
+        self.assertEqual(request["thinking"], "disabled")
+
     def test_worker_routes_json_tasks_separately_from_diary(self):
         from thingking.consolidation_worker import build_worker
         model = SimpleNamespace(complete_text=Mock(return_value="{}"))

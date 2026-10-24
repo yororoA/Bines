@@ -44,16 +44,19 @@ class RetentionStore:
         for node in nodes:
             if not self.graph.valid(node):
                 continue
-            key = tuple(node["family"])
-            if key in seen:
-                continue
-            seen.add(key)
             scores[node["id"]] = self.graph.strength(node)
             ranked.append(node)
         ranked.sort(key=lambda n: (-scores[n["id"]], -n["prior"], n["seq"], n["id"]))
+        independent = []
+        for node in ranked:
+            family = self.graph.evidence_family(node)
+            if seen.intersection(family):
+                continue
+            seen.update(family)
+            independent.append(node)
         data = {"source_ids": [s["id"] for s in sources], "node_ids": [n["id"] for n in nodes],
                 "node_versions": {n["id"]: n["digest"] for n in nodes},
-                "scores": scores, "protected": [n["id"] for n in ranked[:k]],
+                "scores": scores, "protected": [n["id"] for n in independent[:k]],
                 "association_incomplete": [n["id"] for n in nodes if not n["ready"]]}
         self.conn.execute("INSERT INTO consolidation_snapshots VALUES(?,?,?,?,?,?,?,0)",
                           (job["id"], job["scope"], POLICY_VERSION, self.graph.waterline(),

@@ -34,12 +34,18 @@ def build_worker(client, model=None):
             messages, temperature=0.3, max_tokens=8192,
             response_format={"type": "json_object"},
         ),
+        association_complete_text=lambda messages: model.complete_text(
+            messages, temperature=0.1, max_tokens=4096, retry_tokens=8192,
+            thinking="disabled", timeout=90, max_retries=0,
+            response_format={"type": "json_object"},
+        ),
         diary_system_prompt=persona_profile.diary_system_prompt,
         state_complete_text=lambda messages: model.complete_text(
             messages, temperature=0.0, max_tokens=4096,
             response_format={"type": "json_object"},
         ),
         idle_seconds=2.0,
+        association_concurrency=int(os.environ.get("BINES_MEMORY_ASSOCIATION_CONCURRENCY", "4")),
     )
 
 

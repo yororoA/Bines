@@ -33,17 +33,26 @@ class ThinkingModelHelper:
         self.client = get_deepseek_client()
 
     def complete_text(self, messages: List[Dict[str, Any]], *, temperature=0.4, max_tokens=2048,
-                      response_format: Dict[str, str] | None = None) -> str:
+                      response_format: Dict[str, str] | None = None, retry_tokens: int | None = None,
+                      thinking: str | None = None, timeout: float | None = None,
+                      max_retries: int | None = None) -> str:
         # Thinking and final text share the output budget. Retry the original
         # request once with more room; never use reasoning or truncated text.
+        client = self.client
+        if max_retries is not None:
+            from common.deepseek_client import DeepSeekClient
+            client = DeepSeekClient(self.client.with_options(max_retries=max_retries))
+        retry_budget = _MAX_TEXT_RETRY_TOKENS if retry_tokens is None else retry_tokens
         for attempt in range(2):
-            response = self.client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 stream=False,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 **({"response_format": response_format} if response_format else {}),
+                **({"extra_body": {"thinking": {"type": thinking}}} if thinking else {}),
+                **({"timeout": timeout} if timeout is not None else {}),
             )
             if not response.choices:
                 raise ModelCompletionError(f"model {self.model} returned no choices")
@@ -52,11 +61,10 @@ class ThinkingModelHelper:
             text = (choice.message.content or "").strip()
             finish_reason = getattr(choice, "finish_reason", None)
             if finish_reason == "length":
-                retry_tokens = _MAX_TEXT_RETRY_TOKENS
-                if attempt == 0 and retry_tokens > max_tokens:
+                if attempt == 0 and retry_budget > max_tokens:
                     logger.warning("model %s reached output limit %d; retrying with %d tokens",
-                                   self.model, max_tokens, retry_tokens)
-                    max_tokens = retry_tokens
+                                   self.model, max_tokens, retry_budget)
+                    max_tokens = retry_budget
                     continue
             if finish_reason == "length" or not text:
                 usage = getattr(response, "usage", None)

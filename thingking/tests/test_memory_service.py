@@ -562,9 +562,9 @@ class StateTest(unittest.TestCase):
         class Client:
             def claim_job(inner, kinds=None):
                 return job
-            def complete_state_update(inner, job_id, changes, expected_version=None):
-                return service.complete_state_update(job_id, changes, expected_version)
-            def fail_job(inner, job_id, error):
+            def complete_state_update(inner, job_id, changes, expected_version=None, **claim):
+                return service.complete_state_update(job_id, changes, expected_version, **claim)
+            def fail_job(inner, job_id, error, **claim):
                 raise AssertionError(error)
         worker = MemoryWorker(Client(), lambda m: "", lambda: "",
                               state_complete_text=lambda m: '{"relationship_delta":1,"add_item":"夜莺耳机"}')

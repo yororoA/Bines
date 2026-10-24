@@ -126,7 +126,7 @@ def _source_visible(alias: str) -> str:
 
 
 _FACT_VISIBLE = (
-    "m.deleted = 0 AND m.scope = f.scope "
+    "m.deleted = 0 AND m.scope = f.scope AND json_extract(m.meta,'$.repair_pending') IS NULL "
     "AND NOT EXISTS (SELECT 1 FROM temporal_retractions r WHERE r.scope = m.scope "
     "AND (r.source_ref = m.id OR r.source_ref = m.source_ref)) AND " + _source_visible("f")
 )
@@ -358,7 +358,24 @@ class TemporalStore:
         rows = self.repo.conn.execute(
             sql + " ORDER BY f.valid_from DESC, f.memory_id LIMIT ?", (*params, _limit(limit)),
         ).fetchall()
-        return [{**dict(row), "value": json.loads(row["value"])} for row in rows]
+        result = []
+        corrections = getattr(self.repo, "corrections", None)
+        for row in rows:
+            value = json.loads(row["value"])
+            node = self.repo.associations.for_memory(row["memory_id"]) if corrections else None
+            history = corrections.inherited_facts(node) if node else []
+            suppressed = False
+            for correction in history:
+                if isinstance(value, str):
+                    if correction["quote"] in value:
+                        value = value.replace(correction["quote"], correction["replacement"])
+                    elif value and value in correction["quote"]:
+                        suppressed = True  # Partial sentence corrections cannot infer a scalar value.
+                elif str(value) in correction["quote"] or correction["quote"] in json.dumps(value, ensure_ascii=False):
+                    suppressed = True
+            if not suppressed:
+                result.append({**dict(row), "value": value, **({"corrections": history} if history else {})})
+        return result
 
     def delete_memory(self, memory_id: str) -> bool:
         """Purge a memory's facts and linked descendants, without reviving old facts.

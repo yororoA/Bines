@@ -1,0 +1,111 @@
+[
+  {
+    "sample": 1,
+    "mode": "old",
+    "candidates": 14,
+    "requests": [
+      {
+        "seconds": 5.697,
+        "prompt_tokens": 19713,
+        "completion_tokens": 657,
+        "finish_reason": "stop",
+        "budget": 8192
+      }
+    ],
+    "valid_links": 0,
+    "status": "valid",
+    "seconds": 5.697
+  },
+  {
+    "sample": 2,
+    "mode": "old",
+    "candidates": 12,
+    "requests": [
+      {
+        "seconds": 41.003,
+        "prompt_tokens": 12747,
+        "completion_tokens": 7553,
+        "finish_reason": "stop",
+        "budget": 8192
+      }
+    ],
+    "valid_links": 5,
+    "status": "valid",
+    "seconds": 41.003
+  },
+  {
+    "sample": 3,
+    "mode": "old",
+    "candidates": 14,
+    "requests": [
+      {
+        "seconds": 36.119,
+        "prompt_tokens": 20629,
+        "completion_tokens": 6516,
+        "finish_reason": "stop",
+        "budget": 8192
+      },
+      {
+        "seconds": 8.893,
+        "prompt_tokens": 21902,
+        "completion_tokens": 2008,
+        "finish_reason": "stop",
+        "budget": 8192
+      }
+    ],
+    "valid_links": 5,
+    "status": "valid",
+    "seconds": 45.012
+  },
+  {
+    "sample": 1,
+    "mode": "new",
+    "candidates": 12,
+    "requests": [
+      {
+        "seconds": 1.143,
+        "prompt_tokens": 9948,
+        "completion_tokens": 11,
+        "finish_reason": "stop",
+        "budget": 4096
+      }
+    ],
+    "valid_links": 0,
+    "status": "valid",
+    "seconds": 1.144
+  },
+  {
+    "sample": 2,
+    "mode": "new",
+    "candidates": 12,
+    "requests": [
+      {
+        "seconds": 5.734,
+        "prompt_tokens": 7177,
+        "completion_tokens": 1186,
+        "finish_reason": "stop",
+        "budget": 4096
+      }
+    ],
+    "valid_links": 6,
+    "status": "valid",
+    "seconds": 5.734
+  },
+  {
+    "sample": 3,
+    "mode": "new",
+    "candidates": 12,
+    "requests": [
+      {
+        "seconds": 4.344,
+        "prompt_tokens": 9407,
+        "completion_tokens": 775,
+        "finish_reason": "stop",
+        "budget": 4096
+      }
+    ],
+    "valid_links": 4,
+    "status": "valid",
+    "seconds": 4.344
+  }
+]

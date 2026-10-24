@@ -153,6 +153,10 @@ class MemoryRepository:
         if str(db_path) != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(_SCHEMA)
+        job_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(jobs)")}
+        for column in ("started_at", "duration_seconds"):
+            if column not in job_columns:
+                self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} REAL")
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
         )
@@ -651,8 +655,9 @@ class MemoryRepository:
             if not row:
                 return None
             self.conn.execute(
-                "UPDATE jobs SET status = 'running', attempts = attempts + 1, lease_until = ?, updated_at = ? WHERE id = ?",
-                (now + lease_seconds, now, row["id"]),
+                "UPDATE jobs SET status = 'running', attempts = attempts + 1, lease_until = ?, "
+                "started_at = ?, duration_seconds = NULL, updated_at = ? WHERE id = ?",
+                (now + max(lease_seconds, 420 if row["kind"] == "associate" else lease_seconds), now, now, row["id"]),
             )
         job = dict(self.conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone())
         job["payload"] = json.loads(job["payload"])
@@ -669,8 +674,9 @@ class MemoryRepository:
     def finish_job(self, job_id: int, *, release_dedupe: bool = False) -> None:
         self.conn.execute(
             "UPDATE jobs SET status = 'done', lease_until = NULL, last_error = NULL, "
+            "duration_seconds = CASE WHEN started_at IS NOT NULL THEN MAX(0, ? - started_at) END, "
             "dedupe_key = CASE WHEN ? THEN NULL ELSE dedupe_key END, updated_at = ? WHERE id = ?",
-            (release_dedupe, self.clock(), job_id),
+            (self.clock(), release_dedupe, self.clock(), job_id),
         )
 
     def fail_job(self, job_id: int, error: str, max_attempts: int) -> str:
@@ -685,8 +691,9 @@ class MemoryRepository:
         else:
             status, available_at = "pending", now + 60 * (2 ** max(0, job["attempts"] - 1))
         self.conn.execute(
-            "UPDATE jobs SET status = ?, available_at = ?, lease_until = NULL, last_error = ?, updated_at = ? WHERE id = ?",
-            (status, available_at, error[:2000], now, job_id),
+            "UPDATE jobs SET status = ?, available_at = ?, lease_until = NULL, last_error = ?, "
+            "duration_seconds = CASE WHEN started_at IS NOT NULL THEN MAX(0, ? - started_at) END, updated_at = ? WHERE id = ?",
+            (status, available_at, error[:2000], now, now, job_id),
         )
         return status
 

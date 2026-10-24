@@ -149,6 +149,7 @@ class MemoryJournal:
         self.memory_presentations = {}
         self.confirmed_memory_presentations = {}
         self.memory_citations = []
+        self.memory_corrections = []
         self.prefix = "experience:" + hashlib.sha256(str(outbox.path.resolve()).encode()).hexdigest() + ":" + turn_id
 
     def _record(self, key, record):
@@ -159,6 +160,7 @@ class MemoryJournal:
             record["turn_message_refs"] = self.turn_message_refs
             record["memory_usage"] = {"presented": list(self.confirmed_memory_presentations.values()),
                                       "citations": self.memory_citations}
+            record["memory_corrections"] = self.memory_corrections
         self.outbox.put(key, "record_experience", {"envelope": self.envelope, "record": safe_data(record)})
 
     def present_memory(self, item, spans):
@@ -168,6 +170,7 @@ class MemoryJournal:
         previous = self.memory_presentations.get(nid, {})
         self.memory_presentations[nid] = {
             "node_id": nid, "node_digest": item["node_digest"],
+            "context_id": item.get("context_id") or previous.get("context_id"),
             "spans": list(dict.fromkeys([*(previous.get("spans") or []), *spans]))[:8],
             "chain_ids": list(dict.fromkeys([*(previous.get("chain_ids") or []),
                                              *(item.get("chain_ids") or [])]))[:20],
@@ -204,6 +207,24 @@ class MemoryJournal:
             raise ValueError("关联理由必须来自本轮实际呈现的资料")
         self.memory_citations.append({"source_id": source_id, "answer_span": answer_span,
                                       "source_quote": source_quote, "chain_id": chain_id})
+
+    def correct_memory(self, source_id, quote, replacement, explanation, correction_quote):
+        from tools.context import CURRENT_CONTEXT
+        context = CURRENT_CONTEXT.get()
+        if not context.identity.privileged or context.autonomous or self.autonomous:
+            raise PermissionError("事实纠正仅用于本机或主人私聊中的真实用户纠正")
+        shown = self.confirmed_memory_presentations.get(source_id)
+        if not shown or not quote or not any(quote in span for span in shown["spans"]):
+            raise ValueError("纠正来源必须在本轮实际呈现，旧事实片段必须可见")
+        if (not correction_quote or correction_quote not in context.user_text
+                or not replacement or replacement not in correction_quote):
+            raise ValueError("新事实必须逐字来自当前用户的纠正原话")
+        self.memory_corrections.append({
+            "operation_id": "correction:" + uuid.uuid4().hex,
+            "node_id": source_id, "expected_digest": shown["node_digest"], "kind": "fact",
+            "quote": quote, "replacement": replacement, "explanation": explanation,
+            "correction_quote": correction_quote,
+        })
 
     def begin(self, command, *, category="tool", key=None):
         key = key or self.prefix + ":" + uuid.uuid4().hex

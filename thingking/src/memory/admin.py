@@ -55,6 +55,10 @@ class MemoryAdmin:
                 else self.graph.for_message(int(message_id)) if message_id is not None else None)
         registered = node is not None
         material = self.graph.material(node) if node else None
+        if node and not material and node["memory_id"]:
+            pending = self.repo.get_memory(node["memory_id"])
+            if pending and not pending["deleted"] and pending["meta"].get("repair_pending"):
+                material = {"text": pending["content"], "sources": [pending]}
         if not node and memory_id:
             source = self.repo.get_memory(memory_id)
             from .graph_view import independent_material
@@ -128,7 +132,8 @@ class MemoryAdmin:
         ):
             snapshots.append(self.service.retention.get(row[0]))
         jobs = [dict(row) for row in self.repo.conn.execute(
-            "SELECT id,kind,status,attempts,last_error,created_at,updated_at FROM jobs "
+            "SELECT id,kind,status,attempts,last_error,created_at,updated_at,started_at,duration_seconds,"
+            "json_extract(payload,'$.rejected_links') AS rejected_links FROM jobs "
             "WHERE scope=? AND json_extract(payload,'$.node_id')=? ORDER BY id DESC LIMIT 20",
             (node["scope"], node["id"]))]
         usage = [{**dict(row), "receipt": json.loads(row["receipt"])} for row in self.repo.conn.execute(
@@ -136,6 +141,10 @@ class MemoryAdmin:
             "WHERE scope=? AND node_id=? ORDER BY created_at DESC LIMIT 30", (node["scope"], node["id"]))]
         return {"node": node, "content": material["text"], "sources": material["sources"],
                 "roots": roots, "memberships": memberships, "edges": edges, "snapshots": snapshots,
+                "corrections": self.service.corrections.history(node["id"], node["scope"]) if registered else [],
+                "evidence_family": sorted(self.graph.evidence_family(node)),
+                "event_siblings": self.service.provenance.siblings(node, self.graph),
+                "contexts": self.service.competition.history(node["id"], node["scope"]) if registered else [],
                 "jobs": jobs, "usage": usage, "strength": self.graph.strength(node) if registered else None,
                 "valid": self.graph.valid(node) if registered else True, "registered": registered}
 
@@ -143,7 +152,8 @@ class MemoryAdmin:
         clause, params = (" WHERE status=?", [status]) if status else ("", [])
         total = self.repo.conn.execute("SELECT COUNT(*) FROM jobs" + clause, params).fetchone()[0]
         items = [dict(row) for row in self.repo.conn.execute(
-            "SELECT id,kind,scope,status,attempts,last_error,created_at,updated_at FROM jobs" + clause
+            "SELECT id,kind,scope,status,attempts,last_error,created_at,updated_at,started_at,duration_seconds,"
+            "json_extract(payload,'$.rejected_links') AS rejected_links FROM jobs" + clause
             + " ORDER BY id DESC LIMIT ? OFFSET ?",
             (*params, max(1, min(100, int(limit))), max(0, int(offset))))]
         return {"items": items, "total": total}

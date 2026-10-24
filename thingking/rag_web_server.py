@@ -97,6 +97,15 @@ def memory_detail():
         return jsonify({"success": False, "error": "记录不存在或来源已失效"}), 404
     return _ok(result)
 
+@app.route("/api/corrections", methods=["POST"])
+def correct_memory():
+    body = request.get_json(force=True) or {}
+    allowed = {"scope", "node_id", "operation_id", "expected_digest", "kind", "quote", "replacement",
+               "explanation", "chain_id", "expected_chain_revision", "context_id"}
+    if set(body) - allowed:
+        raise ValueError("纠错包含未知字段")
+    return _ok(client.call("correct_memory", **body))
+
 
 @app.route("/api/jobs")
 def list_jobs():

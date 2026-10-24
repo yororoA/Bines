@@ -12,7 +12,7 @@ from .read_cache import read_cache
 JOB_ASSOCIATE = "associate"
 RELATIONS = {"support", "similar", "event", "cause", "contradicts"}
 _SUPPORT = {"support": 1.0, "cause": .8, "event": .6, "similar": .3, "contradicts": 0.0}
-WEIGHT_POLICY = "scoped-usage-v2"
+WEIGHT_POLICY = "event-evidence-v3"
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS association_nodes (
@@ -85,6 +85,28 @@ class AssociationStore:
                 self.conn.execute("UPDATE chain_memberships SET scored_revision=0")
                 self.conn.execute("""INSERT INTO meta VALUES('association_weight_policy',?)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (WEIGHT_POLICY,))
+                self.quarantine_same_events()
+
+    def evidence_family(self, node):
+        provenance = getattr(self.repo, "provenance", None)
+        return provenance.family(node["scope"], node["family"]) if provenance else set(node["family"])
+
+    def independent(self, a, b):
+        return not self.evidence_family(a).intersection(self.evidence_family(b))
+
+    def quarantine_same_events(self):
+        for edge in self.conn.execute("SELECT * FROM association_edges WHERE confidence>0").fetchall():
+            a, b = self.get(edge["source_node"]), self.get(edge["target_node"])
+            if a and b and not self.independent(a, b):
+                self.conn.execute("UPDATE association_edges SET confidence=0 WHERE id=?", (edge["id"],))
+                self.invalidate(a["id"])
+
+    def reason_version(self, chain_id, scope):
+        chain = self.conn.execute("SELECT reason_text FROM association_chains WHERE id=? AND scope=?",
+                                  (chain_id, scope)).fetchone()
+        corrections = getattr(self.repo, "corrections", None)
+        correction = corrections.reason(scope, chain_id) if corrections else None
+        return digest([chain[0], correction["seq"] if correction else 0]) if chain else None
 
     def get(self, node_id, scope=None):
         return self.reads.get("association_node", (node_id, scope), lambda: self._get(node_id, scope))
@@ -138,8 +160,12 @@ class AssociationStore:
             messages = [self._message(i) for i in node["message_ids"]]
             if not messages or any(not self._message_valid(i, node["scope"]) for i in node["message_ids"]):
                 return None
-            return {"text": "\n".join(f"[{m['id']}][{m['role']}][{m['actor_id']}] {m['content']}"
-                                     for m in messages), "sources": messages}
+            text = "\n".join(f"[{m['id']}][{m['role']}][{m['actor_id']}] {m['content']}" for m in messages)
+            corrections = getattr(self.repo, "corrections", None)
+            facts = corrections.facts(node["id"], node["scope"]) if corrections else []
+            if facts:
+                text += "\n【已核实的事实纠正；以上原话仅保留历史，不可沿用被纠正事实】\n" + json.dumps(facts, ensure_ascii=False)
+            return {"text": text, "sources": messages}
         memory = self._memory(node["memory_id"])
         if not memory or memory["scope"] != node["scope"] or not _active(memory, "memory"):
             return None
@@ -170,8 +196,13 @@ class AssociationStore:
         material = self.material(node)
         if not material:
             return None
-        return digest([[r["id"], r["scope"], r["content"], r.get("role"), r.get("actor_id"),
-                        r.get("source_ref"), r.get("meta")] for r in material["sources"]])
+        values = [[r["id"], r["scope"], r["content"], r.get("role"), r.get("actor_id"),
+                   r.get("source_ref"), r.get("meta")] for r in material["sources"]]
+        corrections = getattr(self.repo, "corrections", None)
+        facts = corrections.facts(node["id"], node["scope"]) if corrections else []
+        if facts:
+            values.append(["fact_corrections", facts])
+        return digest(values)
 
     def valid(self, node):
         if not node:
@@ -190,6 +221,10 @@ class AssociationStore:
         if meta.get("experience_ref"):
             # A tool receipt is its own source; triggering user messages are dependencies.
             return {"experience:" + meta["experience_ref"]}
+        if meta.get("fact_source_message_id"):
+            message = self.repo.get_message(meta["fact_source_message_id"])
+            if message and message["scope"] == scope:
+                return {f"message:{message['id']}"}
         roots = set()
         for mid in meta.get("source_message_ids") or []:
             message = self.repo.get_message(mid)
@@ -252,13 +287,18 @@ class AssociationStore:
             self.conn.execute("""INSERT INTO association_message_nodes VALUES(?,?)
                 ON CONFLICT(message_id) DO UPDATE SET node_id=excluded.node_id""", (mid, node_id))
         self.invalidate(node_id)
+        self.conn.execute("""UPDATE jobs SET status='done',lease_until=NULL,updated_at=?
+            WHERE kind='associate' AND status='pending' AND json_extract(payload,'$.node_id')=?
+            AND json_extract(payload,'$.revision')!=?""", (self.repo.clock(), node_id, revision))
         self.conn.execute("INSERT OR IGNORE INTO association_events(event_key,scope) VALUES(?,?)",
                           (f"source:{node_id}:{revision}", scope))
-        if self.settings.associations_enabled:
+        memory = self.repo.get_memory(memory_id) if memory_id else None
+        awaiting_summary = bool(memory and memory["meta"].get("experience_summary_pending"))
+        if self.settings.associations_enabled and not awaiting_summary:
             self.repo.enqueue_job(JOB_ASSOCIATE, scope, {"node_id": node_id, "revision": revision,
                                                        "background": background},
                                   f"associate:{node_id}:{revision}")
-        else:
+        elif not self.settings.associations_enabled:
             self.conn.execute("UPDATE association_nodes SET ready=1 WHERE id=?", (node_id,))
         return self.get(node_id)
 
@@ -347,12 +387,12 @@ class AssociationStore:
                 a, b = nodes.get(edge["source_node"]), nodes.get(edge["target_node"])
                 if not a or not b or a["revision"] != edge["source_revision"] or b["revision"] != edge["target_revision"]:
                     continue
-                if set(a["family"]) & set(b["family"]):
+                if not self.independent(a, b):
                     continue
                 contribution = edge["confidence"] * _SUPPORT[edge["relation_type"]]
                 for source, target in ((a, b), (b, a)):
                     # Multiple representations/edges of one source give at most one contribution.
-                    family = tuple(target["family"])
+                    family = tuple(sorted(self.evidence_family(target)))
                     supports[source["id"]][family] = max(supports[source["id"]].get(family, 0), contribution)
             for nid, node in nodes.items():
                 independent, seen = [], set()
@@ -388,7 +428,7 @@ class AssociationStore:
                 a, b = self.get(edge["source_node"], scope), self.get(edge["target_node"], scope)
                 current = (a and b and a["revision"] == edge["source_revision"]
                            and b["revision"] == edge["target_revision"])
-                if not current or edge["confidence"] <= 0:
+                if not current or edge["confidence"] <= 0 or not self.independent(a, b):
                     continue
                 for nid in (a["id"], b["id"]):
                     quality[nid] = max(quality.get(nid, 0), edge["confidence"])
@@ -415,6 +455,9 @@ class AssociationStore:
         payload, scope = job["payload"], job["scope"]
         source = self.get(payload["node_id"], scope)
         if not self.valid(source) or source["revision"] != payload["revision"]:
+            return False
+        corrections = getattr(self.repo, "corrections", None)
+        if corrections and payload.get("correction_waterline", 0) != corrections.waterline(scope):
             return False
         expected = payload.get("candidate_versions") or {}
         if any(not self.valid(self.get(nid, scope)) or self.get(nid, scope)["digest"] != fingerprint
@@ -449,10 +492,15 @@ class AssociationStore:
         for target, reason_key, reason, relation, confidence, evidence, direction in validated:
             cid = "c:" + digest([scope, reason_key])[:32]
             # Source relationships are already represented by family; they cannot reinforce themselves.
-            if set(source["family"]) & set(target["family"]):
+            if not self.independent(source, target):
                 continue
+            correction = corrections.reason(scope, cid) if corrections else None
+            if correction and correction["kind"] == "reject_reason":
+                continue
+            if correction:
+                reason = correction["replacement"]
             self.conn.execute("""INSERT INTO association_chains(id,scope,reason_key,reason_text) VALUES(?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET reason_text=excluded.reason_text,revision=revision+1""",
+                ON CONFLICT(id) DO UPDATE SET revision=revision+1""",
                 (cid, scope, reason_key, reason))
             self.conn.execute("DELETE FROM association_reason_fts WHERE id=?", (cid,))
             self.conn.execute("INSERT INTO association_reason_fts(id,scope,tokens) VALUES(?,?,?)",
@@ -493,7 +541,10 @@ class AssociationStore:
         if not view["evidence"]:
             return None
         return dict(view, node_id=node["id"], citation_id=node["id"], node_digest=node["digest"],
-                    source_family=node["family"], retrieval_status=node["retrieval_status"])
+                    source_family=node["family"], evidence_family=sorted(self.evidence_family(node)),
+                    corrections=getattr(self.repo, "corrections").inherited_facts(node)
+                    if getattr(self.repo, "corrections", None) else [],
+                    retrieval_status=node["retrieval_status"])
 
     def expand(self, query, seeds, scopes, visible):
         terms, activations, chain_ids = query_terms(query), {}, {}
@@ -505,6 +556,9 @@ class AssociationStore:
                 WHERE scope IN ({','.join('?' for _ in scopes)}) AND association_reason_fts MATCH ?
                 ORDER BY bm25(association_reason_fts),id LIMIT ?""",
                 (*scopes, match, self.settings.association_candidates)).fetchall()
+            competition = getattr(self.repo, "competition", None)
+            shares = {scope: competition.shares(scope, query, [r["id"] for r in reasons if r["scope"] == scope])
+                      for scope in scopes} if competition else {}
             for rank, reason in enumerate(reasons, 1):
                 members = self.weights(reason["id"], reason["scope"])
                 quality = self._reason_quality(reason["id"], reason["scope"], members)
@@ -514,6 +568,8 @@ class AssociationStore:
                     if not visible(node):
                         continue
                     value = member["recall_strength"] * node["activation_factor"] * quality.get(nid, 0) / (rank + 1)
+                    if competition:
+                        value *= shares[reason["scope"]].get(reason["id"], 1)
                     if value <= 0:
                         continue
                     admitted += 1
@@ -546,7 +602,7 @@ class AssociationStore:
                         continue
                     target_id = edge["target_node"] if edge["source_node"] == nid else edge["source_node"]
                     target = self.get(target_id, node["scope"])
-                    if not visible(target) or not self.valid(target):
+                    if not visible(target) or not self.valid(target) or not self.independent(node, target):
                         continue
                     a, b = self.get(edge["source_node"]), self.get(edge["target_node"])
                     if a["revision"] != edge["source_revision"] or b["revision"] != edge["target_revision"]:
@@ -554,6 +610,11 @@ class AssociationStore:
                     reason_match = sum(t in edge["reason_text"].lower() for t in terms) / max(1, len(terms))
                     quality = edge["confidence"] * (.25 + .75 * reason_match)
                     neighbors.append((target, edge, quality))
+                competition = getattr(self.repo, "competition", None)
+                if competition and neighbors:
+                    shares = competition.shares(node["scope"], query, [e["chain_id"] for _, e, _ in neighbors])
+                    neighbors = [(target, edge, quality * shares[edge["chain_id"]])
+                                 for target, edge, quality in neighbors]
                 total = max(1.0, sum(quality for _, _, quality in neighbors))
                 for target, edge, quality in neighbors:
                     weight = self.weights(edge["chain_id"], node["scope"]).get(target["id"])

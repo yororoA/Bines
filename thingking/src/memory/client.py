@@ -84,23 +84,23 @@ class MemoryClient:
     def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
         return self.call("claim_job", **({"kinds": list(kinds)} if kinds else {}))
 
-    def complete_association(self, job_id: int, links: List[Dict[str, Any]], prior: float = .5) -> Dict[str, Any]:
-        return self.call("complete_association", job_id=job_id, links=links, prior=prior)
+    def complete_association(self, job_id: int, links: List[Dict[str, Any]], prior: float = .5, **claim) -> Dict[str, Any]:
+        return self.call("complete_association", job_id=job_id, links=links, prior=prior, **claim)
 
     def complete_state_update(self, job_id: int, changes: Dict[str, Any],
-                              expected_version: Optional[int] = None) -> Dict[str, Any]:
-        return self.call("complete_state_update", job_id=job_id, changes=changes, expected_version=expected_version)
+                              expected_version: Optional[int] = None, **claim) -> Dict[str, Any]:
+        return self.call("complete_state_update", job_id=job_id, changes=changes, expected_version=expected_version, **claim)
 
     def complete_summary(self, job_id: int, summary: str, tags: Sequence[str], facts: Sequence[Dict[str, Any]],
-                         importance: float, retrieval: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                         importance: float, retrieval: Optional[Dict[str, Any]] = None, **claim) -> Dict[str, Any]:
         return self.call("complete_summary", job_id=job_id, summary=summary, tags=list(tags), facts=list(facts),
-                         importance=importance, **({"retrieval": retrieval} if retrieval else {}))
+                         importance=importance, **({"retrieval": retrieval} if retrieval else {}), **claim)
 
-    def complete_diary(self, job_id: int, text: str) -> Dict[str, Any]:
-        return self.call("complete_diary", job_id=job_id, text=text)
+    def complete_diary(self, job_id: int, text: str, **claim) -> Dict[str, Any]:
+        return self.call("complete_diary", job_id=job_id, text=text, **claim)
 
-    def fail_job(self, job_id: int, error: str) -> Dict[str, Any]:
-        return self.call("fail_job", job_id=job_id, error=error)
+    def fail_job(self, job_id: int, error: str, **claim) -> Dict[str, Any]:
+        return self.call("fail_job", job_id=job_id, error=error, **claim)
 
     # ---------- admin ----------
     def stats(self) -> Dict[str, Any]:

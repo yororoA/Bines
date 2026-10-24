@@ -106,6 +106,19 @@
   <div id="detail-body"></div>
 </dialog>
 
+<dialog id="correction-editor" aria-labelledby="correction-title">
+  <form id="correction-form">
+    <p class="eyebrow">MEMORY / CORRECTION</p>
+    <h2 id="correction-title">纠正事实</h2>
+    <p class="muted" id="correction-help"></p>
+    <label id="correction-quote-label">需要纠正的原文片段<textarea id="correction-quote" required maxlength="4000" rows="3"></textarea></label>
+    <label id="correction-replacement-label">正确内容<textarea id="correction-replacement" required maxlength="4000" rows="3"></textarea></label>
+    <label>纠正依据<textarea id="correction-explanation" required maxlength="2000" rows="2" placeholder="说明哪里有误，以及判断依据"></textarea></label>
+    <p id="correction-error" class="correction-error" role="alert"></p>
+    <div class="row correction-actions"><button type="button" class="btn hidden" id="correction-reload">重新查看当前版本</button><button type="button" class="btn" id="correction-cancel">取消</button><button type="submit" class="btn primary" id="correction-save">保存并重新评估</button></div>
+  </form>
+</dialog>
+
 <dialog id="editor">
   <h3 id="ed-title" style="margin-top:0">编辑记忆</h3>
   <div class="row" style="margin-bottom:8px">

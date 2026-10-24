@@ -103,7 +103,7 @@ class MemoryAdminTest(unittest.TestCase):
         hub = MemoryHub.__new__(MemoryHub)
         hub.lock = threading.RLock()
         hub._call = lambda *a, **k: self.fail("QQ admin request reached the memory service")
-        for method in ("list_association_nodes", "memory_detail", "memory_graph", "list_jobs"):
+        for method in ("list_association_nodes", "memory_detail", "memory_graph", "list_jobs", "correct_memory", "complete_memory_repair"):
             for owner in (False, True):
                 identity = SimpleNamespace(local=False, owner=owner, group=None)
                 with self.assertRaises(PermissionError):
@@ -130,6 +130,30 @@ class MemoryAdminTest(unittest.TestCase):
             self.assertEqual(http.get("/constellation").status_code, 200)
             self.assertEqual(http.get("/constellation_worker.js").status_code, 200)
             self.assertEqual(http.get("/missing").status_code, 404)
+
+    def test_http_correction_history_and_conflict(self):
+        with patch("memory.client.MemoryClient.ping", return_value=True):
+            web = importlib.import_module("thingking.rag_web_server")
+        mid = self.service.add_memory("semantic", "owner", "居住在北京")["id"]
+        node = self.service.graph.for_memory(mid)
+        request = dict(scope="owner", node_id=node["id"], expected_digest=node["digest"],
+                       operation_id="web-fix", kind="fact", quote="北京", replacement="上海",
+                       explanation="用户明确纠正")
+        class Client:
+            def call(_, method, **params):
+                return getattr(self.service, method)(**params)
+            def memory_detail(_, **params):
+                return self.service.memory_detail(**params)
+        with patch.object(web, "client", Client()):
+            http = web.app.test_client()
+            self.assertEqual(http.post("/api/corrections", json=request).status_code, 200)
+            detail = http.get("/api/detail?node_id=" + node["id"]).get_json()["result"]
+            self.assertIn("上海", detail["content"])
+            self.assertEqual(len(detail["corrections"]), 1)
+            self.assertEqual(http.post("/api/corrections", json=request).get_json()["result"]["status"], "duplicate")
+            conflict = {**request, "operation_id": "web-stale", "replacement": "广州"}
+            self.assertEqual(http.post("/api/corrections", json=conflict).status_code, 400)
+            self.assertEqual(http.post("/api/corrections", json={**request, "scope": "qq_group:other"}).status_code, 400)
 
     def test_graph_includes_all_unindexed_sources_without_scheduling_jobs(self):
         for i in range(151):
