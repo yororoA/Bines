@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from helpers import MemoryFixture, OWNER_QQ, STRANGER_QQ, local_env, qq_group_env, qq_private_env
 from memory.models import ZONE
-from memory.life import LifeLedger
+from memory.life import LifeConfig, LifeLedger, _energy_delta, _rest_recovery
 from common.proactive import ProactiveConfig, ProactivePolicy, compact_life
 from chatBot.messages import LOCAL_IDENTITY, Identity
 from tools.context import ToolContext, tool_context
@@ -238,11 +238,75 @@ class LifeLedgerTests(unittest.TestCase):
         ledger.record_experience("owner", "work:one", record, 2)
         ledger.record_experience("owner", "work:other-receipt", record, 1)
         after = self.fx.service.life_snapshot()
-        self.assertAlmostEqual(after["energy"], before["energy"] - 0.005, places=4)
+        self.assertAlmostEqual(after["energy"], before["energy"] - 0.0025, places=4)
         self.assertAlmostEqual(after["sleep_pressure"], before["sleep_pressure"] + 0.00375, places=3)
         restarted = LifeLedger(self.fx.repo, self.fx.clock)
         restarted.record_experience("owner", "work:one", {**record, "duration_seconds": 1800}, 3)
-        self.assertAlmostEqual(restarted.snapshot()["energy"], before["energy"] - 0.01, places=4)
+        self.assertAlmostEqual(restarted.snapshot()["energy"], before["energy"] - 0.005, places=4)
+
+    def test_one_to_two_hour_nap_restores_without_resetting_counters(self):
+        one_hour = _rest_recovery(.1, .95, 3600)
+        ninety_minutes = _rest_recovery(.1, .95, 5400)
+        two_hours = _rest_recovery(.1, .95, 7200)
+        self.assertGreater(one_hour[0], .65)
+        self.assertLess(one_hour[1], .4)
+        self.assertGreater(ninety_minutes[0], .75)
+        self.assertLess(ninety_minutes[1], .25)
+        self.assertGreater(two_hours[0], .84)
+        self.assertTrue(.12 < two_hours[1] < .2)
+        self.assertLess(two_hours[0], .92)
+        self.assertEqual(_rest_recovery(1, 0, 7200), (1, 0))
+        self.assertEqual(_rest_recovery(.4, .7, 0), (.4, .7))
+
+    def test_nap_expiry_recovery_is_independent_of_observation_frequency(self):
+        other = MemoryFixture(clock_start=self.fx.clock())
+        self.addCleanup(other.close)
+        for fx in (self.fx, other):
+            state = fx.service.life._load(fx.clock())
+            state.update(energy=.1, sleep_pressure=.95, last_tick=fx.clock())
+            fx.service.life._save(state, fx.clock())
+            fx.service.regulate_life("owner", "rest", 90, "一次完整的午睡", "nap-boundary")
+        self.fx.clock.advance(2 * 3600)
+        delayed = self.fx.service.life_snapshot()
+        for _ in range(6):
+            other.clock.advance(20 * 60)
+            observed = other.service.life_snapshot()
+        self.assertEqual(delayed["phase"], "active")
+        self.assertAlmostEqual(delayed["energy"], observed["energy"], places=4)
+        self.assertAlmostEqual(delayed["sleep_pressure"], observed["sleep_pressure"], places=4)
+        recovered_energy, recovered_pressure = _rest_recovery(.1, .95, 5400)
+        self.assertAlmostEqual(delayed["energy"], recovered_energy - .006, places=4)
+        self.assertAlmostEqual(delayed["sleep_pressure"], recovered_pressure + .0175, places=4)
+
+    def test_six_hours_idle_has_small_energy_cost(self):
+        energy_cost, _ = _energy_delta("active", 6 * 3600)
+        self.assertAlmostEqual(energy_cost, -.072)
+        self.assertGreater(.8 + energy_cost, .7)
+
+    def test_four_hours_full_work_does_not_exhaust_energy(self):
+        before = self.fx.service.life_snapshot()["energy"]
+        for batch in range(4):
+            self.fx.clock.advance(3600)
+            self.fx.service.life.record_experience("owner", f"long-work:{batch}", {
+                "category": "turn", "turn_id": f"long-work:{batch}", "status": "completed",
+                "duration_seconds": 3600, "finished_at": self.fx.clock()}, 1)
+        after = self.fx.service.life_snapshot()
+        self.assertAlmostEqual(before - after["energy"], .088, places=4)
+        self.assertEqual(after["phase"], "active")
+
+    def test_recovery_and_energy_config_are_bounded_and_allow_zero_cost(self):
+        import os
+        for key, value in (("BINES_LIFE_REST_RECOVERY_MINUTES", "nan"),
+                           ("BINES_LIFE_REST_RECOVERY_MINUTES", "0"),
+                           ("BINES_LIFE_IDLE_ENERGY_PER_HOUR", "-0.01"),
+                           ("BINES_LIFE_WORK_ENERGY_PER_HOUR", "inf")):
+            with patch.dict(os.environ, {key: value}), self.assertRaises(ValueError):
+                LifeConfig.from_env()
+        with patch.dict(os.environ, {"BINES_LIFE_IDLE_ENERGY_PER_HOUR": "0",
+                                     "BINES_LIFE_WORK_ENERGY_PER_HOUR": "0"}):
+            config = LifeConfig.from_env()
+        self.assertEqual(_energy_delta("active", 3600, config)[0], 0)
+        self.assertEqual(config.work_energy_per_hour, 0)
 
     def test_internal_or_cancelled_tools_are_not_counted_as_external_activity(self):
         ledger = self.fx.service.life

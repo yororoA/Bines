@@ -66,6 +66,9 @@ class LifeConfig:
     auto_rest_energy: float = 0.18
     auto_rest_pressure: float = 0.88
     auto_rest_minutes: int = 90
+    rest_recovery_minutes: float = 45
+    idle_energy_per_hour: float = 0.012
+    work_energy_per_hour: float = 0.01
     max_rest_minutes: int = 480
     max_wake_minutes: int = 240
     regulation_cooldown_seconds: int = 300
@@ -82,6 +85,9 @@ class LifeConfig:
             auto_rest_energy=float(os.getenv("BINES_LIFE_AUTO_REST_ENERGY", "0.18")),
             auto_rest_pressure=float(os.getenv("BINES_LIFE_AUTO_REST_PRESSURE", "0.88")),
             auto_rest_minutes=int(os.getenv("BINES_LIFE_AUTO_REST_MINUTES", "90")),
+            rest_recovery_minutes=float(os.getenv("BINES_LIFE_REST_RECOVERY_MINUTES", "45")),
+            idle_energy_per_hour=float(os.getenv("BINES_LIFE_IDLE_ENERGY_PER_HOUR", "0.012")),
+            work_energy_per_hour=float(os.getenv("BINES_LIFE_WORK_ENERGY_PER_HOUR", "0.01")),
             max_rest_minutes=int(os.getenv("BINES_LIFE_MAX_REST_MINUTES", "480")),
             max_wake_minutes=int(os.getenv("BINES_LIFE_MAX_WAKE_MINUTES", "240")),
             regulation_cooldown_seconds=int(os.getenv("BINES_LIFE_REGULATION_COOLDOWN", "300")),
@@ -96,6 +102,11 @@ class LifeConfig:
             raise ValueError("自动休息压力阈值必须在 0.5 到 0.98 之间")
         if not 5 <= config.auto_rest_minutes <= config.max_rest_minutes <= 12 * 60:
             raise ValueError("自动/最长休息时长配置无效")
+        if not math.isfinite(config.rest_recovery_minutes) or not 15 <= config.rest_recovery_minutes <= 120:
+            raise ValueError("午睡恢复时间尺度必须为 15 到 120 分钟")
+        if any(not math.isfinite(value) or not 0 <= value <= 0.1
+               for value in (config.idle_energy_per_hour, config.work_energy_per_hour)):
+            raise ValueError("每小时精力消耗必须为 0 到 0.1")
         if not 5 <= config.max_wake_minutes <= 8 * 60:
             raise ValueError("最长清醒时长配置无效")
         if not 0 <= config.regulation_cooldown_seconds <= 3600:
@@ -133,18 +144,28 @@ def _phase(now: float, last_human_at: float = 0, config: LifeConfig | None = Non
     return "active"
 
 
-def _energy_delta(phase: str, seconds: float) -> tuple[float, float]:
+def _energy_delta(phase: str, seconds: float, config: LifeConfig | None = None) -> tuple[float, float]:
+    config = config or LifeConfig()
     hours = seconds / 3600
     rates = {
         "sleeping": (0.11, -0.13),
-        "resting": (0.085, -0.105),
-        "night_awake": (-0.07, 0.09),
+        "night_awake": (-3 * config.idle_energy_per_hour, 0.09),
         "waking": (0.035, -0.025),
-        "active": (-0.026, 0.035),
-        "winding_down": (-0.045, 0.06),
+        # "active" means awake, including waiting without doing any work.
+        "active": (-config.idle_energy_per_hour, 0.035),
+        "winding_down": (-1.5 * config.idle_energy_per_hour, 0.06),
     }
     energy, pressure = rates[phase]
     return energy * hours, pressure * hours
+
+
+def _rest_recovery(energy: float, pressure: float, seconds: float,
+                   recovery_minutes: float = 45) -> tuple[float, float]:
+    """A short nap restores quickly at first, then levels off without a reset."""
+    remaining = math.exp(-max(0, seconds) / (recovery_minutes * 60))
+    energy_target, pressure_target = max(energy, 0.92), min(pressure, 0.12)
+    return (energy_target + (energy - energy_target) * remaining,
+            pressure_target + (pressure - pressure_target) * remaining)
 
 
 class LifeLedger:
@@ -270,10 +291,24 @@ class LifeLedger:
         regulation_before = dict(state.get("regulation") or {})
         while cursor < now:
             end = min(now, cursor + 3600)
+            local = datetime.fromtimestamp(cursor, ZONE)
+            next_hour = (local.replace(minute=0, second=0, microsecond=0)
+                         + timedelta(hours=1)).timestamp()
+            # A sample may cross nap expiry, a wake message or the sleep window.
+            # Split there so one delayed observation cannot miss part of a nap.
+            boundaries = (next_hour, regulation_before.get("set_at", 0),
+                          regulation_before.get("until", 0), last_human, last_human + 20 * 60)
+            for boundary in boundaries:
+                if cursor < float(boundary or 0) < end:
+                    end = float(boundary)
             phase = self._effective_phase((cursor + end) / 2, last_human, state)
-            energy_delta, pressure_delta = _energy_delta(phase, end - cursor)
-            energy = _number(energy + energy_delta, energy)
-            pressure = _number(pressure + pressure_delta, pressure)
+            if phase == "resting":
+                energy, pressure = _rest_recovery(energy, pressure, end - cursor,
+                                                  self.config.rest_recovery_minutes)
+            else:
+                energy_delta, pressure_delta = _energy_delta(phase, end - cursor, self.config)
+                energy = _number(energy + energy_delta, energy)
+                pressure = _number(pressure + pressure_delta, pressure)
             cursor = end
         regulation = self._regulation_at(state, now, last_human)
         if (regulation.get("source") == "automatic" and regulation.get("mode") == "rest"
@@ -379,7 +414,7 @@ class LifeLedger:
             (scope, turn_id, seconds, now),
         )
         hours = additional / 3600
-        state["energy"] = _number(state.get("energy"), 0.72) - 0.02 * hours
+        state["energy"] = _number(state.get("energy"), 0.72) - self.config.work_energy_per_hour * hours
         state["sleep_pressure"] = _number(state.get("sleep_pressure"), 0.28) + 0.015 * hours
         state["energy"] = _number(state["energy"], 0.72)
         state["sleep_pressure"] = _number(state["sleep_pressure"], 0.28)

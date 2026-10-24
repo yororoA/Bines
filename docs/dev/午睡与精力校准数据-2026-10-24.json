@@ -1,0 +1,58 @@
+{
+  "calibration": {
+    "before": {
+      "energy": 0.44368700538919875,
+      "sleep_pressure": 0.7696999863866304
+    },
+    "after": {
+      "energy": 0.7963348854642374,
+      "sleep_pressure": 0.2925180065010143
+    },
+    "nap_minutes": 70.03332552512487,
+    "rest_start_at": 1792830983.290016,
+    "rest_end_at": 1792835185.2895474,
+    "sample_at": 1792836439.4748967,
+    "inferred_nap_start": {
+      "energy": 0.3535561911631939,
+      "sleep_pressure": 0.880046043656601
+    },
+    "reason": "按最近真实午睡窗口校正旧恢复曲线和午睡后的精力计费",
+    "audit_ref": "life-recalibration:rest-energy-v2:1792830983"
+  },
+  "source_hashes": {
+    "chatbot": "be615c912c2e53ddd1a39d30149ba7605053ceb4cf16d7ec4289dc6facfcbd1f",
+    "memory-server": "8c713274a4d49bf4fae756f0f6f306fa1ed68f0606375117c3c8813a7146c699"
+  },
+  "file_hashes": {
+    "thingking/src/memory/life.py": "71f2bee3838724de333cde8f0691e1f65e6baa98fa8d69640c28bdbc6cf1310a",
+    "skills/system-control/SKILL.md": "97f6449cc2c1190acb3668209a120602d1ae8b38c07ed5b696cae0696407889a",
+    ".env.example": "7ea854a149e3d0643276aa50c710ef11c93305c0731d7753026c1b5f90523f6b"
+  },
+  "rollback_images": {
+    "chatbot": "bines-launcher:before-rest-energy-20261024-180826",
+    "memory-server": "bines-thinking:before-rest-energy-20261024-180826"
+  },
+  "database_backups": "/Users/bytedance/Bines/thingking/memory_data/backups/rest-energy-20261024-180826",
+  "services": {
+    "chatbot": {
+      "state": "running",
+      "health": "healthy"
+    },
+    "memory-server": {
+      "state": "running",
+      "health": "healthy"
+    },
+    "memory-worker": {
+      "state": "running",
+      "health": ""
+    },
+    "qq-thinking": {
+      "state": "running",
+      "health": ""
+    },
+    "rag-web": {
+      "state": "running",
+      "health": "healthy"
+    }
+  }
+}
