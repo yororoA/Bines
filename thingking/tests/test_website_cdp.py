@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import helpers
 import test_website as fixtures
 from common.website import AgentBrowser, BrowserCommandError, PlanStore, WebsiteService, platform_config
-from common.website_cdp import ExistingBrowserUnavailable, ExistingPageReader
+from common.website_cdp import ExistingBrowserUnavailable, ExistingPageReader, VideoPixelsUnavailable
 from common.website_observer import WebsiteObserver
 
 
@@ -62,6 +62,54 @@ class ExistingReaderTests(unittest.TestCase):
         for call in calls.call_args_list:
             if call.args[1] == "Page.captureScreenshot":
                 self.assertEqual(call.args[0]["id"], "visible")
+                self.assertFalse(call.args[2]["fromSurface"])
+
+    def test_video_pixels_use_evaluate_without_compositor_capture(self):
+        from PIL import Image
+        image = BytesIO()
+        Image.new("RGB", (320, 180), "green").save(image, "JPEG")
+        payload = "data:image/jpeg;base64," + base64.b64encode(image.getvalue()).decode()
+        target = self.page("visible")
+        with patch.object(self.reader, "_target", return_value=target), patch.object(
+            self.reader, "_call", return_value={"result": {"value": {"data": payload, "media_time": 32.5}}},
+        ) as call:
+            path = self.root / "video.jpg"
+            self.assertEqual(self.reader.capture_video(self.config, 0, path), 32.5)
+        self.assertEqual(path.read_bytes(), image.getvalue())
+        self.assertEqual(call.call_args.args[1], "Runtime.evaluate")
+        self.assertIn("drawImage", call.call_args.args[2]["expression"])
+        self.assertNotIn("appendChild", call.call_args.args[2]["expression"])
+
+    def test_tainted_video_can_use_viewport_fallback_but_timeout_does_not_retry(self):
+        service = WebsiteService(PlanStore(self.root / "outbox.db"),
+                                 AgentBrowser(["test"], profile_root=self.root), root=self.root)
+        state = {"video": {"index": 0}}
+        with patch.object(service.browser, "capture_video", side_effect=VideoPixelsUnavailable("cross_origin")), patch.object(
+            service, "read_browser",
+        ) as read:
+            self.assertEqual(service.capture_video_frame(self.config, state, self.root / "frame"), "browser_viewport")
+            self.assertEqual(read.call_count, 1)
+        with patch.object(service.browser, "capture_video", side_effect=ExistingBrowserUnavailable("timeout", stage="Runtime.evaluate")), patch.object(
+            service, "read_browser",
+        ) as read:
+            with self.assertRaises(ExistingBrowserUnavailable):
+                service.capture_video_frame(self.config, state, self.root / "frame")
+            read.assert_not_called()
+
+    def test_transport_receives_have_remaining_deadline_even_with_event_flood(self):
+        import websocket
+        connection = Mock()
+        connection.recv.side_effect = [
+            json.dumps({"method": "event"}), json.dumps({"id": 1, "result": {"result": {"value": 1}}}),
+        ]
+        with patch.object(websocket, "create_connection", return_value=connection), patch(
+            "common.website_cdp.time.monotonic", side_effect=[10, 10.2, 10.2, 11.8, 11.8],
+        ):
+            result = self.reader._call(self.page("a"), "Runtime.evaluate", timeout=2)
+        self.assertEqual(result["result"]["value"], 1)
+        timeouts = [round(call.args[0], 2) for call in connection.settimeout.call_args_list]
+        self.assertEqual(timeouts, [1.8, 0.2])
+        connection.close.assert_called_once()
 
     def test_no_visible_or_ambiguous_pages_do_not_activate_or_open_tabs(self):
         for pages in ([self.page("a", visible=False, focused=False)],
@@ -91,8 +139,56 @@ class ExistingReaderTests(unittest.TestCase):
                 self.reader._pages("bilibili")
         self.assertNotIn("bilibili", self.reader.ports)
 
+    def test_video_watch_preserves_pixel_frames_progress_and_original_dimensions(self):
+        from PIL import Image
+        browser = fixtures.WebsiteWatchTests.browser(self)
+        capture_count = 0
+        def capture(_config, _index, path, **_kwargs):
+            nonlocal capture_count
+            capture_count += 1
+            Image.new("RGB", (320, 180), "green").save(path, "JPEG")
+            return 12 + capture_count * 2
+        browser.capture_video = capture
+        service = WebsiteService(PlanStore(self.root / "outbox.db"), browser, root=self.root)
+        with patch("vlm_client.call_vision", return_value="可见海鸟") as vision, patch("common.website_watch.time.sleep"):
+            result = service.watch("bilibili", duration_seconds=1, frames=3)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual([frame["media_time"] for frame in result["frames"]], [14, 16, 18])
+        self.assertEqual(Image.open(BytesIO(base64.b64decode(vision.call_args.args[0][0]))).size, (320, 180))
+        self.assertTrue(all(frame["capture_method"] == "video_pixels" for frame in result["frames"]))
+        self.assertTrue(result["playback_advanced"])
+        self.assertFalse(any(args[0] == "screenshot" for _, args, _ in browser.calls))
+        self.assertNotIn("data:image", json.dumps(result))
+
+    def test_capture_timeout_returns_named_stage_without_calling_vision(self):
+        browser = fixtures.WebsiteWatchTests.browser(self)
+        browser.capture_video = Mock(side_effect=ExistingBrowserUnavailable("timeout", stage="Runtime.evaluate"))
+        service = WebsiteService(PlanStore(self.root / "outbox.db"), browser, root=self.root)
+        with patch("vlm_client.call_vision") as vision:
+            result = service.watch("bilibili", duration_seconds=1, frames=3)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failed_stage"], "Runtime.evaluate")
+        vision.assert_not_called()
+        self.assertFalse(any(args[0] == "screenshot" for _, args, _ in browser.calls))
+
 
 class BrowserLaunchFailureTests(unittest.TestCase):
+    def test_status_reports_degraded_browser_and_read_only_tools_remain_available(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runner = Mock(return_value=subprocess.CompletedProcess([], 1, stderr="Chrome exited early", stdout=""))
+            browser = AgentBrowser(["test-cli"], profile_root=root, runner=runner)
+            service = WebsiteService(PlanStore(root / "outbox.db"), browser, root=root)
+            with self.assertRaises(BrowserCommandError):
+                browser.run(platform_config("bilibili"), ["open", "https://www.bilibili.com/"])
+            status = service.status("bilibili")
+            self.assertEqual(status["runtime"], "degraded")
+            self.assertTrue(status["bridge_ready"])
+            self.assertEqual(status["browser_failures"]["bilibili"]["stage"], "open")
+            with patch.object(browser, "read_existing", return_value='[{"kind":"video","current_time":22}]'):
+                self.assertEqual(service.media_status("bilibili")["media_state"][0]["current_time"], 22)
+            self.assertEqual(runner.call_count, 1)
+
     def test_paused_bridge_does_not_dispatch_browsing_or_watch(self):
         from website_bridge import dispatch
         service = Mock()
@@ -136,6 +232,31 @@ class BrowserLaunchFailureTests(unittest.TestCase):
                 browser.run.assert_not_called()
             finally:
                 observer.close()
+
+    def test_video_capture_failure_is_suspended_and_busy_watch_keeps_previous_observation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            service = WebsiteService(PlanStore(root / "outbox.db"), fixtures.FakeBrowser(), root=root)
+            observer = WebsiteObserver(service, "t" * 64, min_interval=0)
+            observer.activate("bilibili")
+            state = {"url": "https://www.bilibili.com/", "viewport": {},
+                     "video": {"ready_state": 4, "index": 0}}
+            fingerprint = ((False,) * 64, (False,) * 64)
+            with patch.object(observer, "_capture", return_value=(state, fingerprint, "")), patch.object(
+                service, "watch", return_value={"status": "failed", "reason": "observation_failed",
+                                               "failed_stage": "Page.captureScreenshot"},
+            ):
+                with self.assertRaises(ExistingBrowserUnavailable) as caught:
+                    observer.tick("bilibili")
+            self.assertEqual(caught.exception.stage, "Page.captureScreenshot")
+            previous = {"id": "valid", "status": "ok"}
+            observer.latest["bilibili"]["observation"] = previous
+            observer.active["bilibili"]["last_analysis"] -= 31
+            with patch.object(observer, "_capture", return_value=(state, fingerprint, "")), patch.object(
+                service, "watch", return_value={"status": "observing"},
+            ):
+                observer.tick("bilibili")
+            self.assertEqual(observer.latest["bilibili"]["observation"], previous)
 
     def test_bundled_runtime_uses_native_binary_without_node_child(self):
         from website_runtime import _bundled_command

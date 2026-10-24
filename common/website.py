@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -566,6 +567,19 @@ class AgentBrowser:
         with self.lock:
             return self.page_reader.run(platform, list(args), timeout=timeout)
 
+    def capture_video(self, platform, index, path, timeout=4):
+        with self.lock:
+            return self.page_reader.capture_video(platform, index, path, timeout=timeout)
+
+    def failure(self, platform, stage, reason):
+        self.runtime_failures[platform.key] = {
+            "stage": stage, "reason": reason, "failed_at": time.time(),
+        }
+        logging.getLogger("bines.website.runtime").warning(
+            "browser platform=%s stage=%s reason=%s; automatic relaunch disabled",
+            platform.key, stage, reason,
+        )
+
     def existing_platforms(self):
         result = []
         for config in PLATFORMS.values():
@@ -596,6 +610,7 @@ class AgentBrowser:
     def run(self, platform: Platform, args, timeout=60):
         argv = self._argv(platform, args)
         env = dict(os.environ)
+        env["AGENT_BROWSER_DEBUG"] = "1"
         # Let the browser report its own timeout before the CLI is terminated.
         env["AGENT_BROWSER_DEFAULT_TIMEOUT"] = str(min(25_000, max(1000, int((timeout - 3) * 1000))))
         try:
@@ -607,14 +622,14 @@ class AgentBrowser:
                     env=env,
                 )
         except subprocess.TimeoutExpired as exc:
-            self.runtime_failures[platform.key] = True
+            self.failure(platform, str(args[0]), "command_timeout")
             raise BrowserCommandError("浏览器命令超时，写入结果可能未知", timeout=True) from exc
         except OSError as exc:
             raise BrowserCommandError(f"无法启动浏览器运行时：{exc}") from exc
         if result.returncode:
             output = ((result.stdout or "") + ("\n" + result.stderr if result.stderr else "")).strip()
             if re.search(r"Chrome exited|DevToolsActivePort|browser.*launch|EAGAIN|daemon.*(?:failed|timeout)", output, re.I):
-                self.runtime_failures[platform.key] = True
+                self.failure(platform, str(args[0]), "launch_or_connection_failed")
             raise BrowserCommandError(output[-1500:] or f"浏览器命令退出码 {result.returncode}")
         return (result.stdout or "").strip()[:50_000]
 
@@ -724,9 +739,13 @@ class WebsiteService:
         plans = self.store.recent(20)
         if selected:
             plans = [plan for plan in plans if plan["platform"] == selected]
+        failures = getattr(self.browser, "runtime_failures", {})
+        failed = failures.get(selected) if selected else bool(failures)
         return {
             "status": "ok",
-            "runtime": "paused" if self.paused else "ready",
+            "runtime": "paused" if self.paused else "degraded" if failed else "ready",
+            "browser_failures": {key: value for key, value in failures.items() if not selected or key == selected},
+            "bridge_ready": True,
             "platforms": [
                 {"key": row.key, "label": row.label, "entry_url": row.entry_url}
                 for row in PLATFORMS.values()
@@ -736,6 +755,7 @@ class WebsiteService:
 
     def page_state(self, config):
         """Observe the viewport; a successful scroll command alone proves no movement."""
+        from common.website_cdp import ExistingBrowserUnavailable
         script = """JSON.stringify({url:location.href,title:document.title,
             document_id:performance.timeOrigin,ready_state:document.readyState,
             body_text_length:document.body?.innerText?.trim().length||0,
@@ -753,12 +773,12 @@ class WebsiteService:
                     r.width>0&&r.height>0&&a.innerText.trim()}).slice(0,12).map(
                 a=>({text:a.innerText.trim().slice(0,100),url:a.href}))})"""
         try:
-            output = self.browser.run(config, ["eval", script]).strip()
+            output = self.read_browser(config, ["eval", script], timeout=5).strip()
             if output.startswith("--- AGENT_BROWSER_PAGE_CONTENT "):
                 output = "\n".join(output.splitlines()[1:-1])
             state = json.loads(output)
             return json.loads(state) if isinstance(state, str) else state
-        except (BrowserCommandError, TypeError, ValueError) as exc:
+        except (BrowserCommandError, ExistingBrowserUnavailable, TypeError, ValueError) as exc:
             return {"observation_error": str(exc)[:300]}
 
     def _snapshot_ready(self, config, interactive=True):
@@ -802,6 +822,20 @@ class WebsiteService:
             return reader(config, args, timeout=timeout)
         from common.website_cdp import ExistingBrowserUnavailable
         raise ExistingBrowserUnavailable("浏览器不支持只读连接；后台不会启动窗口")
+
+    def capture_video_frame(self, config, state, path):
+        from common.website_cdp import VideoPixelsUnavailable
+        capture = getattr(self.browser, "capture_video", None)
+        if capture is not None:
+            try:
+                media_time = capture(config, state["video"]["index"], path, timeout=4)
+                if isinstance(media_time, (float, int)):
+                    state["video"]["current_time"] = media_time
+                return "video_pixels"
+            except VideoPixelsUnavailable:
+                pass  # Cross-origin/DRM video keeps the visible-window fallback.
+        self.read_browser(config, ["screenshot", str(path)], timeout=5)
+        return "browser_viewport"
 
     def open(self, platform, url="", snapshot=True):
         config = platform_config(platform)
@@ -865,7 +899,7 @@ class WebsiteService:
             v=>({kind:v.tagName.toLowerCase(),paused:v.paused,ended:v.ended,
                 current_time:v.currentTime,duration:Number.isFinite(v.duration)?v.duration:null,
                 muted:v.muted,ready_state:v.readyState})))"""
-        output = self.browser.run(config, ["eval", script])
+        output = self.read_browser(config, ["eval", script], timeout=5)
         try:
             payload = output.strip()
             if payload.startswith("--- AGENT_BROWSER_PAGE_CONTENT "):

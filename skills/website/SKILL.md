@@ -11,6 +11,7 @@ actions: website_status, website_open, website_snapshot, website_scroll, website
 ## 浏览
 
 1. `website_status()` 查看运行状态、平台和最近计划。
+   `bridge_ready=true` 只证明桥在线；`runtime=degraded` 和 `browser_failures` 表示浏览器控制异常，勿反复open/reload。只读状态仍可查询，自动观察失败不代表页面没有内容。
 2. `website_open(platform="bilibili", url="")` 打开平台首页或同平台 HTTPS 地址，并返回交互快照。
 3. `website_snapshot(platform="bilibili")` 刷新元素；`website_interact(platform, action, ref, value)` 使用最新 `@eN`：click打开视频或帖子；fill输入搜索/正文；select选择；press控制播放或翻页；hover悬停；check勾选；upload上传允许目录媒体；back返回；reload刷新。新标签打开的链接用website_tabs列出标签，再用switch_tab(value="tN")切回搜索结果。每次交互返回新快照，不重复使用失效编号。工具执行后仍需根据页面判断结果。
 4. 打开浏览器后自动感知当前页面；每轮收到带来源与时间的最新视觉描述。视频自动采样连续画面与可见字幕，画面变化触发更新并节流；不需要先调用website_watch。自动观察不会替你决定播放、互动或续接，也不更新元素编号。视频可选择、播放、暂停并切换；website_media_status读取真实播放状态、进度、时长，用播放控件click或press控制。需要针对性或更长片段时，`website_watch(platform="bilibili", question="这段实际在展示什么？", duration_seconds=6, frames=3)` 返回连续画面分析、采样时间、播放位置和可见字幕。可自主选择1–30秒、2–6帧；它不自动播放、跳转或听声音。`audio_observed=false` 时不得编造旁白或声称听懂讲解。只有已采样的小段可作为内容依据，快照和标题不代表看懂视频。暂停/重复画面、没有视频、视觉失败或页面切换均需根据真实结果处理。
@@ -21,6 +22,8 @@ actions: website_status, website_open, website_snapshot, website_scroll, website
 打开、快照、滚动与交互返回 `page_state`，包含真实 URL、滚动位置和可见链接。滚动成功但坐标不变时需重新观察，不能宣称页面动了。`failed/reobserve_required=true` 表示执行前拒绝或导航失败；先刷新快照，再选择下一步，不把它当作已发表或已发送。
 
 `page_state.load_status=loading` 表示页面尚在加载，空快照不代表最终没有内容，稍后重新观察再决定。点击的 `click_evidence` 给出目标href、URL变化和新标签；`navigation_observed=false` 仅表示尚未观察到导航，不证明视频已打开，也不授权重试公开写入。根据实际页面或标签自行选择下一步。
+
+视频帧优先读取已解码的可见视频像素，`capture_method=video_pixels` 不包含播放器外围弹幕或控件；可见字幕单独列出。跨域视频会回退到当前浏览器视口截图，采样超时明确报告 `failed_stage`，不自动重开窗口。
 
 ## 公开写入
 

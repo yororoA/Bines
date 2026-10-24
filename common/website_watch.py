@@ -9,6 +9,7 @@ import tempfile
 import time
 
 from common.website import BrowserCommandError, CHALLENGE_PATTERN, platform_config, validate_url
+from common.website_cdp import ExistingBrowserUnavailable
 
 
 VIDEO_OBSERVATION = """JSON.stringify((()=>{
@@ -50,7 +51,7 @@ VIDEO_OBSERVATION = """JSON.stringify((()=>{
 })())"""
 
 
-def observe(service, config, *, timeout=60):
+def observe(service, config, *, timeout=5):
     output = service.read_browser(config, ["eval", VIDEO_OBSERVATION], timeout=timeout).strip()
     if output.startswith("--- AGENT_BROWSER_PAGE_CONTENT "):
         output = "\n".join(output.splitlines()[1:-1])
@@ -71,18 +72,19 @@ def video_identity(state):
     return state.get("url"), state.get("document_id"), state.get("browser_target"), video.get("index"), video.get("source")
 
 
-def encode_frame(path, state):
+def encode_frame(path, state, *, cropped=False):
     from PIL import Image
     with Image.open(path) as image:
         image = image.convert("RGB")
-        viewport, rect = state["viewport"], state["video"]["rect"]
-        scale_x = image.width / viewport["width"]
-        scale_y = image.height / viewport["height"]
-        box = (rect["left"] * scale_x, rect["top"] * scale_y,
-               rect["right"] * scale_x, rect["bottom"] * scale_y)
-        if box[2] - box[0] < 32 or box[3] - box[1] < 32:
-            raise ValueError("可见视频区域过小")
-        image = image.crop(box)
+        if not cropped:
+            viewport, rect = state["viewport"], state["video"]["rect"]
+            scale_x = image.width / viewport["width"]
+            scale_y = image.height / viewport["height"]
+            box = (rect["left"] * scale_x, rect["top"] * scale_y,
+                   rect["right"] * scale_x, rect["bottom"] * scale_y)
+            if box[2] - box[0] < 32 or box[3] - box[1] < 32:
+                raise ValueError("可见视频区域过小")
+            image = image.crop(box)
         image.thumbnail((1280, 1280))
         encoded = BytesIO()
         image.save(encoded, format="JPEG", quality=82)
@@ -135,18 +137,19 @@ def watch(service, platform, question="", duration_seconds=6, frames=3):
                         return {**result, "status": "interrupted", "reobserve_required": True,
                                 "message": "采样期间页面、视频或播放位置已切换，请重新观察"}
                     path = Path(directory) / f"frame-{index}.png"
-                    service.read_browser(config, ["screenshot", str(path)])
+                    capture_method = service.capture_video_frame(config, state, path)
                     after = observe(service, config)
                     if video_identity(after) != video_identity(state):
                         return {**result, "status": "interrupted", "reobserve_required": True,
                                 "message": "截取画面时视频已切换，请重新观察"}
-                    images.append(encode_frame(path, state))
+                    images.append(encode_frame(path, state, cropped=capture_method == "video_pixels"))
                     samples.append({
                         "elapsed_seconds": round(time.monotonic() - started, 2),
                         "captured_at": time.time(), "media_time": video["current_time"],
                         "paused": video["paused"], "ended": video["ended"],
                         "ready_state": video["ready_state"], "duration": video["duration"],
                         "captions": state.get("captions", [])[:12],
+                        "capture_method": capture_method,
                     })
         result["media_source_id"] = hashlib.sha256(
             str(video_identity(initial)).encode()).hexdigest()[:16]
@@ -177,5 +180,6 @@ def watch(service, platform, question="", duration_seconds=6, frames=3):
                       page_changed=video_identity(current) != video_identity(initial),
                       playback_advanced=samples[-1]["media_time"] > samples[0]["media_time"] + 0.1)
         return result
-    except (BrowserCommandError, OSError, TypeError, ValueError, KeyError) as exc:
+    except (BrowserCommandError, ExistingBrowserUnavailable, OSError, TypeError, ValueError, KeyError) as exc:
+        result["failed_stage"] = getattr(exc, "stage", "observation")
         return {**result, "reason": "observation_failed", "message": f"视频观察失败：{type(exc).__name__}"}

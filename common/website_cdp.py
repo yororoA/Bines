@@ -13,6 +13,12 @@ from urllib.parse import urlsplit
 
 
 class ExistingBrowserUnavailable(RuntimeError):
+    def __init__(self, message, *, stage="connection"):
+        super().__init__(message)
+        self.stage = stage
+
+
+class VideoPixelsUnavailable(ValueError):
     pass
 
 
@@ -94,15 +100,16 @@ class ExistingPageReader:
             connection.send(json.dumps({"id": 1, "method": method, "params": params or {}}))
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
+                connection.settimeout(max(0.05, deadline - time.monotonic()))
                 message = json.loads(connection.recv())
                 if message.get("id") != 1:
                     continue
                 if message.get("error") or message.get("result", {}).get("exceptionDetails"):
-                    raise ExistingBrowserUnavailable("浏览器只读观察返回错误")
+                    raise ExistingBrowserUnavailable("浏览器只读观察返回错误：" + method, stage=method)
                 return message.get("result", {})
-            raise ExistingBrowserUnavailable("浏览器只读观察超时")
+            raise ExistingBrowserUnavailable("浏览器只读观察超时：" + method, stage=method)
         except (OSError, ValueError, websocket.WebSocketException) as exc:
-            raise ExistingBrowserUnavailable("浏览器只读连接失败") from exc
+            raise ExistingBrowserUnavailable("浏览器只读连接失败：" + method, stage=method) from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -111,13 +118,17 @@ class ExistingPageReader:
         from common.website import validate_url
         pages = self._pages(config.key)
         visible = []
+        deadline = time.monotonic() + 5
         for page in pages:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ExistingBrowserUnavailable("浏览器页面选择超时", stage="target_selection")
             try:
                 validate_url(config, page["url"])
                 state = self._call(page, "Runtime.evaluate", {
                     "expression": "({visible:document.visibilityState==='visible',focused:document.hasFocus()})",
                     "returnByValue": True,
-                })["result"].get("value", {})
+                }, timeout=min(2, remaining))["result"].get("value", {})
                 if state.get("visible"):
                     visible.append((page, state.get("focused", False)))
             except (ValueError, ExistingBrowserUnavailable):
@@ -132,6 +143,39 @@ class ExistingPageReader:
         self.targets[config.key] = selected["id"]
         return selected
 
+    def capture_video(self, config, index, path, *, timeout=4):
+        """Read decoded video pixels without asking Chrome for a compositor frame."""
+        target = self._target(config)
+        script = """(()=>{
+            const v=document.querySelectorAll('video')[INDEX];
+            if(!v||v.readyState<2||!v.videoWidth||!v.videoHeight)
+                return {error:'video_not_ready'};
+            const r=v.getBoundingClientRect(),s=getComputedStyle(v);
+            if(r.width<=0||r.height<=0||s.display==='none'||s.visibility==='hidden')
+                return {error:'video_not_visible'};
+            const fit=s.objectFit==='cover'?Math.max:Math.min;
+            const scale=fit(r.width/v.videoWidth,r.height/v.videoHeight);
+            const dw=v.videoWidth*scale,dh=v.videoHeight*scale;
+            const left=r.left+(r.width-dw)/2,top=r.top+(r.height-dh)/2;
+            const x=Math.max(0,r.left,left),y=Math.max(0,r.top,top);
+            const right=Math.min(innerWidth,r.right,left+dw),bottom=Math.min(innerHeight,r.bottom,top+dh);
+            if(right-x<32||bottom-y<32)return {error:'video_not_visible'};
+            const c=document.createElement('canvas'),size=Math.min(1,1280/(right-x),1280/(bottom-y));
+            c.width=Math.round((right-x)*size);c.height=Math.round((bottom-y)*size);
+            try{
+                c.getContext('2d').drawImage(v,(x-left)/scale,(y-top)/scale,
+                    (right-x)/scale,(bottom-y)/scale,0,0,c.width,c.height);
+                return {data:c.toDataURL('image/jpeg',0.82),media_time:v.currentTime};
+            }catch(e){return {error:e.name==='SecurityError'?'cross_origin_video':'video_pixels_unavailable'};}
+        })()""".replace("INDEX", str(int(index)))
+        result = self._call(target, "Runtime.evaluate", {
+            "expression": script, "returnByValue": True, "awaitPromise": False,
+        }, timeout=timeout)["result"].get("value", {})
+        if not isinstance(result, dict) or result.get("error") or not result.get("data", "").startswith("data:image/jpeg;base64,"):
+            raise VideoPixelsUnavailable("当前视频像素无法直接读取")
+        Path(path).write_bytes(base64.b64decode(result["data"].partition(",")[2], validate=True))
+        return result.get("media_time")
+
     def run(self, config, args, *, timeout=5):
         target = self._target(config)
         if args[0] == "eval" and len(args) == 2:
@@ -142,7 +186,7 @@ class ExistingPageReader:
             return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         if args[0] == "screenshot" and len(args) == 2:
             result = self._call(target, "Page.captureScreenshot", {
-                "format": "png", "captureBeyondViewport": False, "fromSurface": True,
+                "format": "png", "captureBeyondViewport": False, "fromSurface": False,
             }, timeout=timeout)
             Path(args[1]).write_bytes(base64.b64decode(result["data"]))
             return "captured"

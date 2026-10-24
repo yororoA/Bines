@@ -15,6 +15,7 @@ import uuid
 
 from common.visual_change import image_difference, image_fingerprint
 from common.website import CHALLENGE_PATTERN, platform_config
+from common.website_cdp import ExistingBrowserUnavailable
 from common.website_spool import atomic_write_json, signed_envelope
 from common.website_watch import observe, video_identity
 
@@ -86,14 +87,18 @@ class WebsiteObserver:
             if self.stop.is_set():
                 return None
             config = platform_config(platform)
-            state = observe(self.service, config, timeout=10)
-            tabs = self.service.read_browser(config, ["tab", "list"], timeout=10)
+            state = observe(self.service, config, timeout=5)
+            tabs = self.service.read_browser(config, ["tab", "list"], timeout=5)
             active_tab = re.search(r"(?:→|\*)\s*\[?(t\d+)\]?", tabs)
             state["tab_id"] = active_tab.group(1) if active_tab else state.get("browser_target", "")
             with tempfile.TemporaryDirectory(prefix="bines-page-") as directory:
                 path = Path(directory) / "page.png"
-                self.service.read_browser(config, ["screenshot", str(path)], timeout=15)
-                after = observe(self.service, config, timeout=10)
+                video_ready = state.get("video") and state["video"].get("ready_state", 0) >= 2
+                if video_ready:
+                    state["capture_method"] = self.service.capture_video_frame(config, state, path)
+                else:
+                    self.service.read_browser(config, ["screenshot", str(path)], timeout=5)
+                after = observe(self.service, config, timeout=5)
                 if page_identity(state) != page_identity(after):
                     return None
                 from PIL import Image
@@ -151,6 +156,12 @@ class WebsiteObserver:
         elif video and video.get("ready_state", 0) >= 2:
             result = {**self.service.watch(platform, duration_seconds=4, frames=3), **common,
                       "kind": "video"}
+            if result.get("status") == "observing":
+                return  # Keep the last valid observation while a manual watch runs.
+            if result.get("reason") == "observation_failed":
+                raise ExistingBrowserUnavailable(
+                    "视频采样失败，自动观察已暂停", stage=result.get("failed_stage", "video_capture"),
+                )
             if result.get("page_changed") or result.get("status") == "interrupted":
                 return
         else:
