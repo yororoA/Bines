@@ -645,7 +645,8 @@ class MemoryRepository:
             params.extend(excluded)
         with self.transaction():
             row = self.conn.execute(sql + " ORDER BY CASE WHEN kind='update_state' THEN 0 "
-                                    "WHEN kind='associate' THEN 1 ELSE 2 END, available_at, id LIMIT 1",
+                                    "WHEN kind='associate' AND COALESCE(json_extract(payload,'$.background'),0)=0 THEN 1 "
+                                    "WHEN kind='associate' THEN 3 ELSE 2 END, available_at, id LIMIT 1",
                                     params).fetchone()
             if not row:
                 return None

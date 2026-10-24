@@ -109,6 +109,15 @@ class MemoryClient:
     def list_memories(self, **filters: Any) -> Dict[str, Any]:
         return self.call("list_memories", **filters)
 
+    def list_association_nodes(self, **filters: Any) -> Dict[str, Any]:
+        return self.call("list_association_nodes", **filters)
+
+    def memory_detail(self, node_id=None, memory_id=None, scope=None):
+        return self.call("memory_detail", node_id=node_id, memory_id=memory_id, scope=scope)
+
+    def list_jobs(self, **filters):
+        return self.call("list_jobs", **filters)
+
     def search(self, query: str, scopes: Sequence[str], kinds: Optional[Sequence[str]] = None, k: int = 10,
                as_of: Optional[float] = None, include_history: bool = False) -> List[Dict[str, Any]]:
         return self.call("search", query=query, scopes=list(scopes), kinds=list(kinds) if kinds else None,

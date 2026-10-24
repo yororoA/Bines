@@ -192,8 +192,7 @@ services:
       start_period: 30s
 
   rag-web:
-    profiles: ["full"]
-    image: bines-thinking:local
+    image: bines-launcher:local
     logging: *bines-logging
     restart: unless-stopped
     user: "${BINES_UID:-1000}:${BINES_GID:-1000}"

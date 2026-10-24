@@ -112,7 +112,7 @@ class MemoryService:
         self.usage = self.repo.usage = UsageStore(repo, self.graph)
         self.retention = self.repo.retention = RetentionStore(repo, self.graph, settings)
         with self.repo.transaction():
-            self.graph.backfill()
+            self.graph.backfill(limit=settings.association_backfill_batch)
 
     # ---------- identity ----------
     def sync_identities(self) -> None:
@@ -1158,7 +1158,7 @@ class MemoryService:
 
     def reconcile_index(self) -> Dict[str, int]:
         with self.repo.transaction():
-            self.graph.backfill()
+            self.graph.backfill(limit=self.settings.association_backfill_batch)
             self.retention.enforce_budget()
         keys = self.retriever.sync(vectors=True)
         if not getattr(self.index, "persistent", True):
@@ -1203,7 +1203,28 @@ class MemoryService:
         stats["life_events"] = self.life.event_count()
         stats["life"] = self.life.snapshot(OWNER_SCOPE)
         stats["retention_enabled"] = self.settings.retention_enabled
+        stats["associations_enabled"] = self.settings.associations_enabled
+        stats["nodes_by_status"] = {r["retrieval_status"]: r["n"] for r in self.repo.conn.execute(
+            "SELECT retrieval_status,COUNT(*) n FROM association_nodes WHERE superseded=0 GROUP BY retrieval_status")}
+        stats["association_ready"] = self.repo.conn.execute(
+            "SELECT COUNT(*) FROM association_nodes WHERE ready=1 AND superseded=0").fetchone()[0]
+        stats["jobs_by_kind"] = [dict(r) for r in self.repo.conn.execute(
+            "SELECT kind,status,COUNT(*) n FROM jobs GROUP BY kind,status")]
         return stats
+
+    def list_association_nodes(self, **filters):
+        from .admin import MemoryAdmin
+        with self.repo.transaction():
+            return MemoryAdmin(self).nodes(**filters)
+
+    def memory_detail(self, node_id=None, memory_id=None, scope=None):
+        from .admin import MemoryAdmin
+        with self.repo.transaction():
+            return MemoryAdmin(self).detail(node_id, memory_id, scope)
+
+    def list_jobs(self, **filters):
+        from .admin import MemoryAdmin
+        return MemoryAdmin(self).jobs(**filters)
 
     def list_memories(self, **filters: Any) -> Dict[str, Any]:
         page_filters = {k: filters.get(k) for k in ("kinds", "scopes", "subject_id", "keyword", "day_key")}

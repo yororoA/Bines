@@ -23,7 +23,7 @@ IMAGE_HASH_LABEL = "io.bines.source-hash"
 BUILD_SERVICES = {"chatbot": "bines-launcher:local", "memory-server": "bines-thinking:local"}
 
 REQUIRED_SERVICES = {
-    "chatbot": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker"),
+    "chatbot": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
     "full": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
 }
 HEALTH_REQUIRED = {"chatbot", "memory-server", "rag-web", "napcat"}
@@ -93,7 +93,7 @@ def run(profile: str, *args: str, timeout: float = 3600) -> subprocess.Completed
 # 每个镜像分别计算内容哈希，QQ 网关独有代码变化不再触发 RAG 镜像重建。
 _SHARED_SOURCES = (
     "*.py", "common/**/*.py", "tools/**/*.py",
-    "thingking/*.py", "thingking/src/**/*.py", "thingking/persona/*.yaml",
+    "thingking/*.py", "thingking/src/**/*.py", "thingking/scripts/*.py", "thingking/persona/*.yaml",
     "skills/**/*.md", "server/skill_actions.json", ".dockerignore",
 )
 IMAGE_SOURCES = {
@@ -101,6 +101,7 @@ IMAGE_SOURCES = {
         "chatBot/**/*.py", "chatBot/api/*.json",
         "server/*.py", "server/templates/*",
         "requirements/launcher.txt", "requirements-chatbot.txt",
+        "thingking/rag_web_static/*",
         "deploy/docker/Dockerfile.launcher",
     ),
     "bines-thinking:local": _SHARED_SOURCES + (

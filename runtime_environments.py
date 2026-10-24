@@ -16,7 +16,7 @@ SERVICE_ENVIRONMENTS = {
     "ChatBot": "launcher", "QQ Thinking": "launcher", "Memory Worker": "launcher",
     "ZMQ Bus": "server", "Classification": "server", "Display": "server", "Speaking": "server",
     "Thinking": "thinking", "Bored Detector": "thinking", "RAG Server": "thinking",
-    "RAG Web": "thinking", "Realtime Screen": "thinking",
+    "RAG Web": "launcher", "Realtime Screen": "thinking",
     "Visual": "visual", "Hearing": "hearing",
 }
 

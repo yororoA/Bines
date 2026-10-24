@@ -33,16 +33,19 @@
   dialog { border:1px solid var(--line); border-radius:8px; width:min(720px, 92vw); }
   table { border-collapse:collapse; width:100%; } td, th { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); font-size:13px; }
 </style>
+<link rel="stylesheet" href="/memory_admin.css">
 </head>
 <body>
 <header>
   <h1>碧波记忆库</h1>
   <nav>
     <button data-tab="memories" class="active">记忆</button>
+    <button data-tab="network">关联网络</button>
     <button data-tab="conversations">会话</button>
     <button data-tab="state">状态</button>
     <button data-tab="overview">概览</button>
   </nav>
+  <span class="header-status" id="service-status">连接中</span>
 </header>
 <main>
   <section id="tab-memories">
@@ -70,14 +73,37 @@
   </section>
 
   <section id="tab-overview" class="hidden">
-    <div class="card"><pre id="stats-json"></pre></div>
+    <div id="overview-cards" class="metrics"></div>
+    <div class="card"><div class="section-heading"><h2>后台任务</h2><select id="job-status"><option value="">全部状态</option><option value="pending">等待中</option><option value="running">处理中</option><option value="failed">失败</option><option value="done">完成</option></select></div><div id="jobs-list"></div></div>
+    <div class="card"><details><summary>查看完整统计</summary><pre id="stats-json"></pre></details></div>
     <div class="card row">
       <button class="btn" id="btn-export">导出全部记忆</button>
       <button class="btn danger" id="btn-rebuild">从 SQLite 重建向量索引</button>
       <span id="overview-msg" class="muted"></span>
     </div>
   </section>
+
+  <section id="tab-network" class="hidden">
+    <div class="section-heading"><div><p class="eyebrow">ASSOCIATIVE MEMORY</p><h2>每一次想起，都有迹可循。</h2><p class="muted">从原始回合到长期记忆，查看建联依据和保留下来的细节。</p></div></div>
+    <div class="card row">
+      <select id="n-scope" aria-label="关联作用域"></select>
+      <select id="n-type" aria-label="来源类型"><option value="">全部来源</option><option value="raw">原始回合</option><option value="episode">情节摘要</option><option value="semantic">长期事实</option><option value="diary">日记</option><option value="excerpt">对话片段</option></select>
+      <select id="n-status" aria-label="记忆层级"><option value="">全部层级</option><option value="hot">活跃记忆</option><option value="cold">冷层记忆</option></select>
+      <select id="n-ready" aria-label="建联状态"><option value="">全部建联状态</option><option value="1">已完成建联</option><option value="0">等待建联</option></select>
+      <input id="n-keyword" placeholder="搜索原文" aria-label="搜索关联原文" style="flex:1;min-width:160px">
+      <button class="btn primary" id="n-search">查询</button>
+    </div>
+    <div class="muted" id="node-summary"></div>
+    <div id="node-list" class="node-grid"></div>
+    <div class="row pagination"><button class="btn" id="n-prev">上一页</button><span id="node-page" class="muted"></span><button class="btn" id="n-next">下一页</button></div>
+  </section>
 </main>
+
+<div id="notice" class="notice hidden" role="status"></div>
+<dialog id="memory-detail" aria-labelledby="detail-title">
+  <div class="detail-header"><div><p class="eyebrow">MEMORY / DETAIL</p><h2 id="detail-title">记忆详情</h2></div><div class="row"><button class="btn" id="detail-edit">编辑</button><button class="btn" id="detail-close" aria-label="关闭记忆详情">关闭</button></div></div>
+  <div id="detail-body"></div>
+</dialog>
 
 <dialog id="editor">
   <h3 id="ed-title" style="margin-top:0">编辑记忆</h3>
@@ -109,7 +135,7 @@ async function api(path, options = {}) {
   if (!data.success) throw new Error(data.error || res.statusText);
   return data.result;
 }
-const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtTs = (ts) => ts ? new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false }) : "";
 
 function scopeLabel(scope) {
@@ -121,19 +147,23 @@ function scopeLabel(scope) {
 
 async function loadStats() {
   const stats = await api("/api/stats");
+  const selectedScope = $("f-scope").value, selectedKind = $("f-kind").value;
   const scopes = new Set(["owner", ...Object.keys(stats.memories), ...Object.keys(stats.messages)]);
   $("f-scope").innerHTML = '<option value="">全部作用域</option>' +
     [...scopes].map((s) => `<option value="${esc(s)}">${esc(scopeLabel(s))}</option>`).join("");
   kinds = Object.keys(KIND_LABEL);
   $("f-kind").innerHTML = '<option value="">全部类型</option>' + kinds.map((k) => `<option value="${k}">${KIND_LABEL[k]}</option>`).join("");
   $("ed-kind").innerHTML = kinds.map((k) => `<option value="${k}">${KIND_LABEL[k]}</option>`).join("");
+  $("f-scope").value = selectedScope;
+  $("f-kind").value = selectedKind;
   $("stats-json").textContent = JSON.stringify(stats, null, 2);
+  renderOverview(stats);
   return stats;
 }
 
 function renderMemory(m) {
   const extra = m.distance !== undefined ? ` · 距离 ${m.distance}` : "";
-  return `<div class="item" data-id="${m.id}">
+  return `<div class="item" data-id="${esc(m.id)}" data-node="${esc(m.node_id || "")}" tabindex="0" role="button" aria-label="查看记忆详情">
     <span class="tag kind-${m.kind}">${KIND_LABEL[m.kind] || m.kind}</span>
     <span class="tag">${esc(scopeLabel(m.scope))}</span>
     ${m.subject_id ? `<span class="tag">主体 ${esc(m.subject_id)}</span>` : ""}
@@ -156,7 +186,12 @@ async function loadMemories() {
   }
   $("mem-summary").textContent = `共 ${total} 条` + ($("f-semantic").checked ? "（语义检索）" : `，当前 ${offset + 1}-${offset + items.length}`);
   $("mem-list").innerHTML = items.map(renderMemory).join("") || '<div class="muted">没有记录</div>';
-  $("mem-list").querySelectorAll(".item").forEach((el) => el.onclick = () => openEditor(el.dataset.id));
+  $("btn-prev").disabled = offset === 0 || $("f-semantic").checked;
+  $("btn-next").disabled = offset + PAGE >= total || $("f-semantic").checked;
+  $("mem-list").querySelectorAll(".item").forEach((el) => {
+    el.onclick = () => openMemoryDetail(el.dataset.node ? { node_id: el.dataset.node } : { memory_id: el.dataset.id }).catch(alertError);
+    el.onkeydown = (e) => { if (e.key === "Enter") el.click(); };
+  });
 }
 
 async function openEditor(id) {
@@ -211,9 +246,9 @@ async function loadState() {
 function switchTab(tab) {
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   document.querySelectorAll("main > section").forEach((s) => s.classList.toggle("hidden", s.id !== "tab-" + tab));
-  ({ memories: loadMemories, conversations: loadConversations, state: loadState, overview: loadStats })[tab]().catch(alertError);
+  ({ memories: loadMemories, network: loadNodes, conversations: loadConversations, state: loadState, overview: loadStats })[tab]().catch(alertError);
 }
-const alertError = (e) => alert("操作失败：" + e.message);
+const alertError = (e) => notify("操作失败：" + e.message);
 
 document.querySelectorAll("nav button").forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
 $("btn-search").onclick = () => { offset = 0; loadMemories().catch(alertError); };
@@ -234,5 +269,6 @@ $("btn-rebuild").onclick = async () => {
 
 loadStats().then(loadMemories).catch(alertError);
 </script>
+<script src="/memory_admin.js"></script>
 </body>
 </html>

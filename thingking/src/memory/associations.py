@@ -210,7 +210,7 @@ class AssociationStore:
             roots.update("experience:" + ref for ref in meta.get("source_experience_refs") or [])
         return roots or {f"memory:{memory['id']}"}
 
-    def _upsert(self, scope, source_type, source_ref, memory_id, message_ids, family, prior=.5):
+    def _upsert(self, scope, source_type, source_ref, memory_id, message_ids, family, prior=.5, background=False):
         node_id = "n:" + digest([scope, source_type, source_ref])[:32]
         old = self.get(node_id)
         prototype = dict(id=node_id, scope=scope, source_type=source_type, source_ref=source_ref,
@@ -255,13 +255,14 @@ class AssociationStore:
         self.conn.execute("INSERT OR IGNORE INTO association_events(event_key,scope) VALUES(?,?)",
                           (f"source:{node_id}:{revision}", scope))
         if self.settings.associations_enabled:
-            self.repo.enqueue_job(JOB_ASSOCIATE, scope, {"node_id": node_id, "revision": revision},
+            self.repo.enqueue_job(JOB_ASSOCIATE, scope, {"node_id": node_id, "revision": revision,
+                                                       "background": background},
                                   f"associate:{node_id}:{revision}")
         else:
             self.conn.execute("UPDATE association_nodes SET ready=1 WHERE id=?", (node_id,))
         return self.get(node_id)
 
-    def register_raw(self, messages, source_ref=None):
+    def register_raw(self, messages, source_ref=None, background=False):
         if not messages:
             return None
         scopes = {m["scope"] for m in messages}
@@ -276,14 +277,15 @@ class AssociationStore:
                     self.conn.execute("UPDATE messages SET day_key=? WHERE id=?", (first_day, message["id"]))
         ids = sorted({m["id"] for m in messages})
         return self._upsert(messages[0]["scope"], "raw", source_ref or f"message:{ids[0]}",
-                            None, ids, {f"message:{i}" for i in ids})
+                            None, ids, {f"message:{i}" for i in ids}, background=background)
 
-    def register_memory(self, memory_id):
+    def register_memory(self, memory_id, background=False):
         memory = self.repo.get_memory(memory_id)
         if not memory:
             return None
         node = self._upsert(memory["scope"], memory["kind"], f"memory:{memory_id}", memory_id,
-                            [], self._roots(memory), .2 + min(10, max(0, memory["importance"])) * .06)
+                            [], self._roots(memory), .2 + min(10, max(0, memory["importance"])) * .06,
+                            background=background)
         if node and memory["meta"].get("status") == "started":
             self.conn.execute("UPDATE association_nodes SET waiting_until=? WHERE id=?",
                               (self.repo.clock() + 2 * self.settings.job_lease_seconds, node["id"]))
@@ -296,17 +298,17 @@ class AssociationStore:
         rows = self.conn.execute("""SELECT m.* FROM memories m LEFT JOIN association_nodes n
             ON n.memory_id=m.id WHERE m.deleted=0 AND n.id IS NULL AND NOT EXISTS
             (SELECT 1 FROM association_backfill b WHERE b.source_type='memory' AND b.source_id=m.id)
-            ORDER BY m.created_at,m.id LIMIT ?""",
+            ORDER BY m.created_at DESC,m.id DESC LIMIT ?""",
                                  (limit,)).fetchall()
         for row in rows:
-            count += bool(self.register_memory(row["id"]))
+            count += bool(self.register_memory(row["id"], background=True))
             self.conn.execute("INSERT OR IGNORE INTO association_backfill VALUES('memory',?)", (row["id"],))
         rows = self.conn.execute("""SELECT m.* FROM messages m LEFT JOIN association_message_nodes n
             ON n.message_id=m.id WHERE n.message_id IS NULL AND NOT EXISTS
             (SELECT 1 FROM association_backfill b WHERE b.source_type='message' AND b.source_id=CAST(m.id AS TEXT))
-            ORDER BY m.id LIMIT ?""", (limit,)).fetchall()
+            ORDER BY m.id DESC LIMIT ?""", (limit,)).fetchall()
         for row in rows:
-            count += bool(self.register_raw([dict(row)]))
+            count += bool(self.register_raw([dict(row)], background=True))
             self.conn.execute("INSERT OR IGNORE INTO association_backfill VALUES('message',?)", (str(row["id"]),))
         return count
 

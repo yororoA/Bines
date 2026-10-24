@@ -46,6 +46,7 @@ class MemorySettings:
     associations_enabled: bool = True
     retention_enabled: bool = False
     association_candidates: int = 20
+    association_backfill_batch: int = 16
     graph_max_hops: int = 2
     graph_candidate_limit: int = 40
     raw_protect_k: int = 3
@@ -83,6 +84,7 @@ def load_settings() -> MemorySettings:
         associations_enabled=os.environ.get("BINES_MEMORY_ASSOCIATIONS", "true").lower() in {"true", "1", "yes", "on"},
         retention_enabled=os.environ.get("BINES_MEMORY_RETENTION", "false").lower() in {"true", "1", "yes", "on"},
         association_candidates=max(1, min(40, int(os.environ.get("BINES_MEMORY_ASSOCIATION_CANDIDATES", "20")))),
+        association_backfill_batch=max(1, min(200, int(os.environ.get("BINES_MEMORY_BACKFILL_BATCH", "16")))),
         raw_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_RAW_HOT_BUDGET", "512"))),
         episode_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_EPISODE_HOT_BUDGET", "256"))),
     )

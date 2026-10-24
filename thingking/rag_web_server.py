@@ -13,13 +13,16 @@ for path in (PROJECT_ROOT, os.path.join(THINKING_DIR, "src")):
         sys.path.insert(0, path)
 
 from config import HTTP_HOST, HTTP_PORTS, ZMQ_HOST, ZMQ_PORTS  # noqa: E402
-from memory.client import MemoryClient  # noqa: E402
+from memory.client import MemoryClient, MemoryUnavailable  # noqa: E402
 from memory.models import MEMORY_KINDS  # noqa: E402
 
 app = Flask(__name__, static_folder="rag_web_static", static_url_path="")
 app.config["JSON_AS_ASCII"] = False
 CORS(app)
 client = MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
+if not client.ping(timeout_ms=2000):
+    from chatBot.memory_hub import GatewayMemoryClient
+    client = GatewayMemoryClient()
 
 
 def _ok(result=None, **extra):
@@ -28,7 +31,11 @@ def _ok(result=None, **extra):
 
 @app.errorhandler(Exception)
 def _error(exc):
-    return jsonify({"success": False, "error": str(exc)}), 500
+    from werkzeug.exceptions import HTTPException
+    status = (exc.code if isinstance(exc, HTTPException)
+              else 400 if isinstance(exc, (ValueError, TypeError))
+              else 503 if isinstance(exc, MemoryUnavailable) else 500)
+    return jsonify({"success": False, "error": str(exc)}), status
 
 
 def _list_arg(name):
@@ -58,6 +65,32 @@ def list_memories():
         limit=int(request.args.get("limit") or 50),
         order=request.args.get("order") or "recent",
     ))
+
+@app.route("/api/nodes")
+def list_nodes():
+    return _ok(client.list_association_nodes(
+        scopes=_list_arg("scopes"), source_type=request.args.get("source_type", ""),
+        status=request.args.get("status", ""), keyword=request.args.get("keyword", ""),
+        ready=int(request.args["ready"]) if request.args.get("ready") else None,
+        offset=int(request.args.get("offset", 0)), limit=int(request.args.get("limit", 50)),
+    ))
+
+
+@app.route("/api/detail")
+def memory_detail():
+    result = client.memory_detail(node_id=request.args.get("node_id") or None,
+                                  memory_id=request.args.get("memory_id") or None,
+                                  scope=request.args.get("scope") or None)
+    if result is None:
+        return jsonify({"success": False, "error": "记录不存在或来源已失效"}), 404
+    return _ok(result)
+
+
+@app.route("/api/jobs")
+def list_jobs():
+    return _ok(client.list_jobs(offset=int(request.args.get("offset", 0)),
+                                limit=int(request.args.get("limit", 30)),
+                                status=request.args.get("status", "")))
 
 
 @app.route("/api/search", methods=["POST"])

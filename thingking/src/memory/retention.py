@@ -28,13 +28,16 @@ class RetentionStore:
         old = self.get(job["id"])
         if old:
             return old if old["source_hash"] == self.source_hash(sources) else None
-        cutoff = max((n["seq"] for n in nodes), default=0)
+        node_ids = [n["id"] for n in nodes]
+        # Only this batch's sources must be ready. Unrelated historical backfill
+        # cannot indefinitely hold up a new conversation's frozen decision.
         waiting = self.conn.execute("""SELECT 1 FROM association_nodes n JOIN jobs j
             ON json_extract(j.payload,'$.node_id')=n.id
             AND json_extract(j.payload,'$.revision')=n.revision
-            WHERE n.scope=? AND n.seq<=? AND n.ready=0 AND n.superseded=0
-            AND j.kind='associate' AND j.status IN ('pending','running') LIMIT 1""",
-            (job["scope"], cutoff)).fetchone()
+            WHERE n.scope=? AND n.ready=0 AND n.superseded=0
+            AND j.kind='associate' AND j.status IN ('pending','running') AND n.id IN ("""
+            + ",".join("?" for _ in node_ids) + ") LIMIT 1",
+            (job["scope"], *node_ids)).fetchone() if node_ids else None
         if waiting:
             return False
         scores, seen, ranked = {}, set(), []

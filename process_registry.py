@@ -153,7 +153,7 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
         },
     ]
     if profile == "chatbot":
-        rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking", "Memory Worker"}]
+        rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking", "Memory Worker", "RAG Web"}]
     if docker_mode():
         rows = [row for row in rows if row["name"] not in DOCKER_MANAGED]
     dependencies = {
@@ -164,7 +164,7 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
         "Hearing": ["ZMQ Bus"],
         "Thinking": ["Classification", "Display", "Speaking", "Visual", "Hearing", "RAG Server"],
         "ChatBot": ["RAG Server"] if profile == "full" else [],
-        "RAG Web": ["RAG Server"],
+        "RAG Web": ["ChatBot"] if profile == "chatbot" else ["RAG Server"],
         "Bored Detector": ["Thinking"],
         "QQ Thinking": ["ChatBot"],
         "Memory Worker": ["ChatBot"],
@@ -175,7 +175,7 @@ def get_processes(display_script: str = "gui_display.py", profile: str | None = 
         row["depends_on"] = dependencies.get(name, [])
         if docker_mode():
             row["depends_on"] = [item for item in row["depends_on"] if item not in DOCKER_MANAGED]
-        row["autostart"] = name != "RAG Web"
+        row["autostart"] = True
         if name == "Realtime Screen":
             from realtime_screen_config import load_realtime_screen_config
             row["autostart"] = bool(load_realtime_screen_config(
