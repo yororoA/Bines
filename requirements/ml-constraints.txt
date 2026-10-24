@@ -1,0 +1,6 @@
+# Matched Torch ABI; prevent audio-separator from silently selecting another build.
+torch==2.7.1
+torchaudio==2.7.1
+torchvision==0.22.1
+numpy==1.26.4
+opencv-python-headless==4.11.0.86

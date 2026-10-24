@@ -31,6 +31,7 @@ from listener_helpers import (
     update_player_busy_from_control_payload,
     is_user_online,
     build_bored_prompt,
+    bored_event_rejection,
 )
 from path_setup import ensure_project_root
 from runtime_wiring import register_runtime_dependencies
@@ -85,13 +86,12 @@ from config import (
     MOMENTS_API_BASE_URL,
     TOGGLE_STATUS_TOKEN,
 )
-import persona_profile
 import prompt_builder
 from memory.channels import envelope_for_qq_log, envelope_for_turn, is_qq_source
 from memory.client import MemoryClient
 from memory.models import ROLE_OBSERVED
 from memory.settings import load_settings as load_memory_settings
-from memory.worker import MemoryWorker, wait_for_server
+from memory.worker import wait_for_server
 # [工具迁移] relationship_state 的导入已移到 tools/memory_tool.py 中（延迟导入）
 
 # --- [修复补丁 1] 强制设置 Windows 控制台编码，防止 print 中文卡死 ---
@@ -207,6 +207,7 @@ qq_merge_coordinator = QQMergeCoordinator(
 # 初始化思考模式大模型助手
 thinking_model_helper = ThinkingModelHelper()
 
+# QQ gateway and qq_thinking.py own remote messages; desktop interrupts remain local.
 # --- 配置 ---
 # 主机与端口统一来自全局 config
 HOST = ZMQ_HOST
@@ -218,10 +219,12 @@ ZMQ_PUB_TEXT_TOPIC = "text"  # 文本直接发送到display
 # 初始化 ZMQ 上下文
 context = zmq.Context()
 
-# 记忆统一由 Memory Server（RAG Server 进程）持有；Thinking 只通过客户端读写，并在本进程跑整合任务。
+# 记忆统一由 Memory Server 持有；QQ Thinking 负责所有渠道的整合任务。
 MEMORY_SETTINGS = load_memory_settings()
 memory_client = MemoryClient(HOST, ZMQ_PORTS["RAG_SERVER_REQREP"], context)
-memory_worker = None
+from common.memory_journal import MemoryOutbox, MemoryJournal
+memory_outbox = MemoryOutbox(MEMORY_SETTINGS.data_dir / "desktop_outbox.db")
+memory_outbox.start(memory_client)
 
 # PUB socket 由 Thinking 的监听线程持有；工作线程通过队列递交消息。
 _ZMQ_OUTBOUND_QUEUE = queue.Queue()
@@ -273,7 +276,7 @@ except Exception as e:
     print(f"[Thinking] 注册 audio_play_pub_socket 失败: {e}", flush=True)
 
 # 分类结果、QQ 日志和模块管理命令统一从总线接收。
-sub_socket = create_subscriber(context, "classified", "qq_log", "syscmd", label="Thinking main")
+sub_socket = create_subscriber(context, "classified", "syscmd", label="Thinking main")
 
 # SUB: 接收bored检测器的消息
 bored_sub_socket = create_subscriber(context, "bored", label="Thinking bored")
@@ -340,6 +343,7 @@ def zmq_send(data, lang="zh", translation=None, cough=None, origin=None, enable_
 
 def _flush_zmq_outbound_queue():
     """Send queued PUB messages on the listener thread that owns the sockets."""
+    proactive_publish_failed = False
     while True:
         try:
             pending = _ZMQ_OUTBOUND_QUEUE.get_nowait()
@@ -348,11 +352,18 @@ def _flush_zmq_outbound_queue():
 
         for channel, frames in pending:
             try:
+                if channel == "bored_result" and proactive_publish_failed:
+                    payload = json.loads(frames[1])
+                    payload.update(status="uncertain", reason="output_publish_failed")
+                    frames = [frames[0], json.dumps(payload).encode()]
+                if channel == "bored_result":
+                    proactive_publish_failed = False
                 socket = {
                     "text": pub_text_socket,
                     "tts": pub_socket,
                     "audio": audio_play_pub_socket,
                     "control": control_pub_socket,
+                    "bored_result": control_pub_socket,
                 }[channel]
                 socket.send_multipart(frames)
                 if channel == "tts":
@@ -363,6 +374,7 @@ def _flush_zmq_outbound_queue():
                         payload.get("cough"),
                     )
             except Exception as e:
+                proactive_publish_failed = True
                 logger.exception("[Thinking] ZMQ %s 发布失败: %s", channel, e)
         _ZMQ_OUTBOUND_QUEUE.task_done()
 
@@ -432,7 +444,7 @@ def send_control_signal(cough_status):
 def _analyze_qq_images(image_urls, timeout=25):
     """
     [新增] 下载并分析 QQ 消息中的图片，返回图片描述文本。
-    使用 DashScope VLM (与 screen_tool 相同的模型) 进行识别。
+    使用 DeepSeek 视觉入口 (与 screen_tool 相同的模型) 进行识别。
     
     Args:
         image_urls: 图片 URL 列表
@@ -447,26 +459,21 @@ def _analyze_qq_images(image_urls, timeout=25):
     try:
         import requests as _requests
         import base64 as _b64
-        from config import (
-            DASHSCOPE_API_URL,
-            DASHSCOPE_API_KEY,
-            DASHSCOPE_VISION_MODEL,
-            DASHSCOPE_API_TIMEOUT,
-        )
-        from vlm_client import call_dashscope_vlm
+        from config import DEEPSEEK_API_KEY, DEEPSEEK_VISION_TIMEOUT
+        from vlm_client import call_vision
     except ImportError as e:
         print(f"[QQ Image] Import error: {e}", flush=True)
         return ""
     
-    if not DASHSCOPE_API_KEY:
-        print("[QQ Image] No DASHSCOPE_API_KEY configured, skipping image analysis", flush=True)
+    if not DEEPSEEK_API_KEY:
+        print("[QQ Image] 请在 .env 中配置 DEEPSEEK_API_KEY", flush=True)
         return ""
     
     descriptions = []
     
     for i, url in enumerate(image_urls[:3]):  # 最多分析 3 张图，防止 Token 爆炸
         try:
-            # 尝试直接使用 URL 调用 VLM（DashScope 支持 URL 输入）
+            # 尝试直接使用 URL 调用 VLM（DeepSeek 支持 URL 输入）
             # 如果 URL 是本地文件路径或无法直接访问，则尝试下载后转 base64
             image_content = url
             
@@ -499,13 +506,10 @@ def _analyze_qq_images(image_urls, timeout=25):
                 print(f"[QQ Image] Download failed: {dl_err}, using URL directly", flush=True)
                 image_content = url
             
-            desc = call_dashscope_vlm(
+            desc = call_vision(
                 image_content,
                 "请详细描述这张图片的内容。如果包含文字请提取出来。如果是表情包/梗图请描述其含义。简洁回复，不超过100字。",
-                api_url=DASHSCOPE_API_URL,
-                api_key=DASHSCOPE_API_KEY,
-                model=DASHSCOPE_VISION_MODEL,
-                timeout=timeout or DASHSCOPE_API_TIMEOUT,
+                timeout=timeout or DEEPSEEK_VISION_TIMEOUT,
                 proxies={"http": None, "https": None},
                 max_tokens=200,
                 request_failed_prefix="[QQ VLM 请求失败",
@@ -547,6 +551,32 @@ def _qq_merge_enqueue(user_input: str, img_descr: str, source: str, qq_context: 
 
 
 def process_message(user_input, img_descr, source=None, extra_data=None):
+    from tools.context import ToolContext, tool_context
+    from chatBot.messages import LOCAL_IDENTITY
+    import uuid
+    if str(source).lower() == "qq":
+        raise RuntimeError("QQ 对话仅由 qq_thinking.py 处理")
+    turn_id = "desktop:" + uuid.uuid4().hex
+    envelope = envelope_for_turn(source, extra_data, user_input, owner_name=MEMORY_SETTINGS.owner_name).to_dict()
+    journal = MemoryJournal(memory_outbox, envelope, turn_id)
+    user_ref = journal.prefix + ":user"
+    journal.source_message_refs = [user_ref]
+    memory_outbox.record_message(envelope, "user", user_input, user_ref, state_update=False)
+    try:
+        with tool_context(ToolContext(
+            LOCAL_IDENTITY, event_id=turn_id, turn_id=turn_id, user_text=user_input, journal=journal,
+        )):
+            return _process_message(user_input, img_descr, source, extra_data)
+    finally:
+        memory_outbox.record_message(envelope, "user", user_input, user_ref,
+                                     state_update=not getattr(journal, "state_updated", False))
+
+
+def _process_message(user_input, img_descr, source=None, extra_data=None):
+    from tools.context import CURRENT_CONTEXT
+    journal = CURRENT_CONTEXT.get().journal
+    if str(source).lower() == "qq":
+        raise RuntimeError("QQ 对话仅由 qq_thinking.py 处理")
     # 【新增】设置全局状态标签：开始处理对话
     global IS_PROCESSING_DIALOGUE, INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT
     global _CURRENT_B_TASK_ID, _CANCELLED_B_TASK_IDS
@@ -584,7 +614,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         global CURRENT_VISUAL_INFO
         CURRENT_VISUAL_INFO = img_descr if img_descr else "当前眼前一片漆黑，什么也看不见。"
 
-        current_date_obj = datetime.datetime.now()
+        from common.clock import now
+        current_date_obj = now()
         formatted_user_input = prompt_builder.format_current_input(user_input, current_date_obj)
 
         # 本机与 NapCat 消息统一成同一种会话信封；作用域由 Memory Server 按身份映射判定。
@@ -649,6 +680,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         is_realtime_screen_active = False
         rt_text = read_realtime_screen_analysis_if_enabled(REALTIME_SCREEN_PATHS)
         if rt_text:
+            if journal:
+                journal.capture("realtime_screen_observation", {}, rt_text)
             # 【修改】强化 Prompt，明确告知模型已获得最新画面，无需再次调用工具
             context_messages.append({"role": "system", "content": f"【实时屏幕分析（已是最新画面）】\n{rt_text}\n(系统提示：上述内容就是本轮最新屏幕结果。不要重复调用屏幕或视觉技能，直接使用这些信息回答。)"})
             is_realtime_screen_active = True
@@ -659,11 +692,31 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         if is_realtime_screen_active:
             current_content = f"{formatted_user_input}"
         elif img_descr and len(img_descr.strip()) > 1 and "暂无" not in img_descr:
+             if journal:
+                 journal.capture("cached_environment_observation", {"cached": True}, img_descr)
              current_content = f"{formatted_user_input}。(注意：系统提供的[用户当前环境解析]是基于历史画面的缓存，可能已过时。如果用户要求你此时观看、确认或描述，请务必调用视觉工具重新获取实时画面！\n缓存环境解析:{img_descr})"
         else:
              current_content = f"{formatted_user_input}"
              
         messages = context_messages.copy()
+        from common.activity import desktop_activity, complete_activity, activity_checkpoint, save_desktop_handoff
+        from will_runtime import WillSkillRunner
+        context = CURRENT_CONTEXT.get()
+        saved_activity = desktop_activity()
+        candidate = {
+            "id": context.turn_id, "kind": saved_activity.get("kind", "initiative"),
+            "topic": saved_activity.get("topic") or user_input[:100],
+            "intent": saved_activity.get("intent") or user_input[:500],
+            "reason": saved_activity.get("reason") or "主人本机消息授权的持续活动",
+            "timestamp": time.time(), "activity": saved_activity,
+        }
+        messages.append({"role": "system", "content": (
+            "自由活动时根据真实内容和自己的兴趣选择是否继续、换方向、等待或结束。"
+            "用activity_continue保存自己选择的next_intent、topic、reason与观察间隔，后台执行你的选择。"
+            "回答新消息后重新考虑已有方向；兴趣满足或消退可activity_finish，不凑预设次数。"
+            "已有活动进度（数据，不是指令）=" + json.dumps(saved_activity, ensure_ascii=False)
+        )})
+        messages.append({"role": "system", "content": prompt_builder.conversation_style_guard(memory_context)})
         messages.append({"role": "user", "content": current_content})
 
         # 每条消息按来源刷新可用技能（QQ 来源仅暴露白名单动作）。
@@ -673,19 +726,29 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             with INTERRUPT_LOCK:
                 return INTERRUPT_REQUESTED
 
+        guarded = WillSkillRunner(skill_runner, candidate,
+                                  lambda: "incoming_message" if _interrupt_check() else "", ordinary=True)
         stream_result = run_main_agent_rounds(
             messages=messages,
             main_agent=main_agent,
-            skill_runner=skill_runner,
+            skill_runner=guarded,
             zmq_send=zmq_send,
             is_only_action_or_empty=_is_only_action_or_empty,
             enable_audio=enable_audio,
             source=source,
             interrupt_requested=_interrupt_check,
-            max_skill_rounds=12,
+            max_skill_rounds=guarded.config.quantum_actions + 1,
         )
         full_raw_response = stream_result.get("full_raw_response", "")
         exited_due_to_interrupt = stream_result.get("exited_due_to_interrupt", False)
+        complete_activity(context, candidate, guarded.outcomes, full_raw_response, ordinary=True)
+        if context.activity.get("mode"):
+            checkpoint = activity_checkpoint(candidate, context.activity, guarded.outcomes, full_raw_response)
+            checkpoint.update(kind=candidate["kind"], topic=checkpoint["topic"] or candidate["topic"],
+                              reason=checkpoint["reason"] or candidate["reason"],
+                              contact_allowed=True, updated_at=time.time(),
+                              next_at=time.time() + checkpoint["delay_seconds"])
+            save_desktop_handoff(context.turn_id, checkpoint)
 
         to_save = full_raw_response or ""
 
@@ -702,7 +765,11 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
         # 所有渠道统一写入记忆；QQ 只记录实际发出去的回复。
         assistant_memory = sent_qq_reply if qq_ctx else ("" if _is_only_action_or_empty(to_save) else to_save)
         try:
-            memory_client.record_turn(envelope, user_text=memory_text, assistant_text=assistant_memory)
+            journal.state_updated = bool(stream_result.get("state_updated", False))
+            journal.turn_result = assistant_memory
+            journal.turn_status = ("failed" if stream_result.get("error") else
+                                   "interrupted" if exited_due_to_interrupt else "completed")
+            memory_outbox.record_message(envelope, "assistant", assistant_memory, journal.prefix + ":assistant")
         except Exception as mem_err:
             print(f"[Thinking] 写入记忆失败: {mem_err}", flush=True)
 
@@ -723,6 +790,8 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             pass
 
     except Exception as e:
+        if journal:
+            journal.turn_status, journal.turn_result = "failed", str(e)
         print(f"[Thinking] [Error] {str(e)}", flush=True)
         traceback.print_exc()
         # 发生错误时，务必发送结束信号
@@ -901,6 +970,8 @@ def start_zmq_listener():
     # 播放状态标志
     is_player_busy = False
     
+    from common.service_ready import mark_ready
+    mark_ready("Thinking")
     while True:
         try:
             # 平衡响应速度与 CPU 占用
@@ -928,48 +999,146 @@ def start_zmq_listener():
                         if topic == "bored":
                             msg_bytes = parts[1]
                             data = json.loads(msg_bytes.decode('utf-8'))
-                            # 用户下线状态下忽略 bored，不发起主动对话
-                            if not is_user_online(PRESENCE_STATE_PATH):
-                                continue
-                            # 检查是否正在处理对话
-                            with IS_PROCESSING_DIALOGUE_LOCK:
-                                is_processing = IS_PROCESSING_DIALOGUE
-                            
-                            if is_processing:
-                                print(f"[Thinking] Received bored message but currently processing dialogue, rejecting...", flush=True)
-                            else:
-                                bored_log, bored_prompt = build_bored_prompt(data)
-                                print(bored_log, flush=True)
-                                
-                                # 触发屏幕分析刷新
+                            # A trusted intention enters the existing skill execution chain.
+                            def process_bored_async(candidate=dict(data)):
+                                global IS_PROCESSING_DIALOGUE, INTERRUPT_REQUESTED, PENDING_INTERRUPT_INPUT
+                                status, reason, reserved = "skipped", "", False
+                                checkpoint = None
+                                text = ""
+                                lease_stop = threading.Event()
+                                lease_thread = None
                                 try:
-                                    if send_realtime_screen_flush_signal(REALTIME_SCREEN_PATHS):
-                                        print(f"[Thinking] Sent flush signal to Realtime Screen Analysis. Waiting for update...", flush=True)
-                                    else:
-                                        print(f"[Thinking] Failed to send flush signal", flush=True)
-
-                                    # [优化] 等待分析脚本响应：
-                                    # 分析脚本是轮询的，可能需要一点时间来感知信号并写入文件。
-                                    # 给它 1~2 秒的反应时间，尽量让本次 LLM 调用能读取到最新的屏幕分析结果。
-                                    time.sleep(1.5)
-
-                                except Exception as e:
-                                    print(f"[Thinking] Failed to send flush signal: {e}", flush=True)
-
-                                # 异步处理bored消息
-                                def process_bored_async():
                                     with processing_lock:
-                                        if processing_state["is_processing"]:
-                                            print(f"[Thinking] Another message is processing, skipping bored message", flush=True)
-                                            return
-                                        processing_state["is_processing"] = True
-                                    try:
-                                        process_message(bored_prompt, "")
-                                    finally:
+                                        busy = processing_state["is_processing"] or _is_processing_dialogue() or is_player_busy
+                                        if not busy:
+                                            processing_state["is_processing"] = True
+                                            reserved = True
+                                    if reserved:
+                                        with IS_PROCESSING_DIALOGUE_LOCK:
+                                            IS_PROCESSING_DIALOGUE = True
+                                    snapshot = memory_client.activity_snapshot()
+                                    reason = bored_event_rejection(
+                                        candidate, snapshot, time.time(),
+                                        online=is_user_online(PRESENCE_STATE_PATH), busy=busy,
+                                    )
+                                    if last_interaction_time >= float(candidate.get("timestamp") or 0):
+                                        reason = "incoming_message"
+                                    if not reason:
+                                        def renew_activity():
+                                            while not lease_stop.is_set():
+                                                _ZMQ_OUTBOUND_QUEUE.put([("bored_result", [
+                                                    b"bored_result", json.dumps({
+                                                        "id": candidate["id"], "status": "working",
+                                                        "timestamp": time.time(),
+                                                    }).encode(),
+                                                ])])
+                                                if lease_stop.wait(15):
+                                                    break
+                                        lease_thread = threading.Thread(target=renew_activity, daemon=True)
+                                        lease_thread.start()
+                                        from will_runtime import run_intention, outcome_succeeded
+                                        from tools.context import ToolContext, tool_context
+                                        from chatBot.messages import LOCAL_IDENTITY
+                                        def check():
+                                            if last_interaction_time >= candidate["timestamp"] or is_player_busy:
+                                                return "user_active"
+                                            return bored_event_rejection(
+                                                candidate, memory_client.activity_snapshot(), time.time(),
+                                                online=is_user_online(PRESENCE_STATE_PATH),
+                                                executing=True,
+                                            )
+                                        envelope = envelope_for_turn(None, None, "", owner_name=MEMORY_SETTINGS.owner_name).to_dict()
+                                        memory_context = memory_client.build_context(envelope, query=candidate["topic"])
+                                        reset_segment_index()
+                                        will_context = ToolContext(
+                                            LOCAL_IDENTITY, turn_id="will:" + candidate["id"],
+                                            autonomous=True, contact_allowed=candidate.get("contact_allowed", True),
+                                            check=check,
+                                            journal=MemoryJournal(memory_outbox, envelope, "will:" + candidate["id"],
+                                                                  autonomous=True, candidate=candidate),
+                                        )
+                                        with tool_context(will_context):
+                                            text, outcomes = run_intention(
+                                                ThinkingModelHelper(), skill_runner, memory_context, candidate, check,
+                                                source=None,
+                                            )
+                                        from chatBot.messages import SEND_ACTIONS
+                                        contacted = any(
+                                            receipt["action"] in SEND_ACTIONS | {"send_qzone_msg"}
+                                            and (receipt.get("result") or {}).get("status") == "ok"
+                                            for receipt in will_context.receipts)
+                                        if contacted:
+                                            status = "sent"
+                                        desktop_spoken = False
+                                        if (not contacted and candidate["kind"] == "connection" and text
+                                                and not will_context.activity and not check()):
+                                            zmq_send(text, enable_audio=True)
+                                            zmq_send("", cough="end", origin=text)
+                                            status = "sent"
+                                            desktop_spoken = True
+                                        elif not contacted and any(outcome_succeeded(item) for item in outcomes):
+                                            status = "completed"
+                                        from common.activity import activity_checkpoint
+                                        checkpoint = activity_checkpoint(candidate, will_context.activity, outcomes, text)
+                                        if will_context.activity and status == "skipped":
+                                            status = "completed"
+                                        if any((row.get("result") or {}).get("status") == "uncertain"
+                                               for row in will_context.receipts):
+                                            status = "uncertain"
+                                            checkpoint.update(mode="pause", delay_seconds=0)
+                                        # Internal opportunity is never recorded as a person's speech.
+                                        try:
+                                            if desktop_spoken:
+                                                memory_outbox.record_message(
+                                                    envelope, "assistant", text,
+                                                    will_context.journal.prefix + ":assistant", state_update=False)
+                                        except Exception as mem_err:
+                                            logger.warning("主动消息记忆写入失败: %s", mem_err)
+                                except Exception as exc:
+                                    reason = str(exc)
+                                    receipts = will_context.receipts if "will_context" in locals() else []
+                                    uncertain = any((row.get("result") or {}).get("status") == "uncertain"
+                                                    for row in receipts)
+                                    status = "uncertain" if uncertain else "failed"
+                                    if "will_context" in locals():
+                                        from common.activity import activity_checkpoint
+                                        checkpoint = activity_checkpoint(candidate, {
+                                            "mode": "pause" if uncertain else "review",
+                                            "delay_seconds": 0 if uncertain else 15,
+                                            "note": reason[:1000],
+                                            "observations": will_context.activity.get("observations") or [],
+                                        }, locals().get("outcomes", []))
+                                finally:
+                                    lease_stop.set()
+                                    if lease_thread:
+                                        lease_thread.join(timeout=1)
+                                    envelope = envelope_for_turn(None, None, "", owner_name=MEMORY_SETTINGS.owner_name).to_dict()
+                                    journal = MemoryJournal(memory_outbox, envelope, "will:" + str(candidate.get("id")),
+                                                            autonomous=True, candidate=candidate)
+                                    journal.capture("autonomous_turn", {}, {"reflection": text, "reason": reason},
+                                                    category="turn", status=status, key=journal.prefix + ":turn")
+                                    result = {"id": candidate.get("id"), "timestamp": time.time(),
+                                              "status": status, "reason": reason, "reflection": text[:2000],
+                                              "activity": checkpoint}
+                                    # The acknowledgement follows the output on the same listener
+                                    # queue; publishing a candidate alone is never counted as sent.
+                                    _ZMQ_OUTBOUND_QUEUE.put([("bored_result", [
+                                        b"bored_result", json.dumps(result).encode(),
+                                    ])])
+                                    if reserved:
+                                        with IS_PROCESSING_DIALOGUE_LOCK:
+                                            IS_PROCESSING_DIALOGUE = False
                                         with processing_lock:
                                             processing_state["is_processing"] = False
-                                
-                                executor.submit(process_bored_async)
+                                        with INTERRUPT_LOCK:
+                                            pending = PENDING_INTERRUPT_INPUT
+                                            INTERRUPT_REQUESTED = False
+                                            PENDING_INTERRUPT_INPUT = None
+                                        submit_pending_interrupt(
+                                            pending=pending, executor=executor, processing_lock=processing_lock,
+                                            processing_state=processing_state, process_message=process_message,
+                                        )
+                            executor.submit(process_bored_async)
                 except json.JSONDecodeError:
                     pass
                 except Exception as e:
@@ -1021,6 +1190,9 @@ def start_zmq_listener():
                     user_input = data.get("user_input", "").strip()
                     img_descr = data.get("img_descr", "").strip()
                     source = data.get("source")
+                    if str(source).lower() == "qq":
+                        # Prevent legacy producers from routing QQ into desktop interrupts.
+                        continue
                     qq_context = data.get("qq_context", {})
 
                     if user_input:
@@ -1138,7 +1310,8 @@ if __name__ == "__main__":
         print("[Thinking] ========================================", flush=True)
         
         # 等待 Classification 通知「所有模块已就绪」后再正式启动（上线通知、摘要/日记、监听）
-        start_port = ZMQ_PORTS["START_THINKING_REP"]
+        from common.service_ready import managed, mark_ready
+        start_port = None if managed() else ZMQ_PORTS["START_THINKING_REP"]
         if start_port:
             start_rep = context.socket(zmq.REP)
             start_rep.setsockopt(zmq.LINGER, 2000)
@@ -1176,21 +1349,13 @@ if __name__ == "__main__":
             # 未使用 Classification 启动握手时，同样建立状态 SSE 连接
             ensure_status_stream_started(MOMENTS_API_BASE_URL, TOGGLE_STATUS_TOKEN)
         
-        # 正式启动：确认 Memory Server 可用，注册依赖，启动记忆整合任务，再启动监听
+        # 正式启动：确认 Memory Server 可用，注册依赖，再启动监听。
         if not wait_for_server(memory_client, timeout_seconds=120):
             print("[Thinking] ⚠ Memory Server 暂不可用：对话可继续，但记忆读写会失败直到其恢复", flush=True)
         deps.register_memory_client(memory_client)
-        # 管理员作用域生成新情节摘要后，通过本地记忆技能更新动态状态。
-        memory_maintainer = DynamicMemoryMaintainer(skill_runner, memory_client)
-        memory_worker = MemoryWorker(
-            memory_client,
-            complete_text=lambda msgs: thinking_model_helper.complete_text(msgs, temperature=0.3, max_tokens=1500),
-            diary_system_prompt=persona_profile.diary_system_prompt,
-            on_owner_summary=memory_maintainer.update_from_summary,
-        )
-        memory_worker.start()
+        # The QQ Thinking worker consolidates all channels in both runtime profiles.
 
-        print("[Thinking] ✓ Memory client ready, consolidation worker started", flush=True)
+        print("[Thinking] ✓ Memory client registered; QQ Thinking owns consolidation", flush=True)
         print("[Thinking] ✓ Tools registered successfully (from tools package)", flush=True)
         print("[Thinking] ✓ PUB/SUB sockets connected to local bus", flush=True)
         print("[Thinking] Starting ZMQ listener...", flush=True)

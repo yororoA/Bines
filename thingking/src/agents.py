@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from config import DEEPSEEK_MODEL
 from common.deepseek_client import get_deepseek_client
+from common.clock import with_current_time
 from thinking_model_helper import ThinkingModelHelper
 from skill_runner import SkillRunner
 
@@ -60,6 +61,7 @@ class MainAgent:
     def _post_chat_completion(self, payload: Dict[str, Any], stream: bool = False):
         request = dict(payload)
         request.pop("stream", None)
+        request["messages"] = with_current_time(request.get("messages") or [])
         return self.client.chat.completions.create(**request, stream=stream)
 
     def _ensure_system_prompt(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

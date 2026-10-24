@@ -23,6 +23,7 @@ from config import HTTP_HOST, HTTP_PORTS, PRESENCE_STATE_PATH
 from common.zmq_bus import create_publisher
 from process_registry import get_processes
 from process_runtime import ProcessTree, build_python_runtime_env, find_port_listeners, resolve_process_command
+from service_supervisor import ServiceSupervisor
 from realtime_screen_config import (
     DEFAULT_REALTIME_SCREEN_CONFIG,
     load_realtime_screen_config,
@@ -123,7 +124,7 @@ def log_output(process_name, pipe, log_queue, stream_type="STDOUT"):
     finally:
         log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {stream_type} 输出流已关闭")
 
-def start_process(config):
+def _legacy_start_process(config):
     """启动进程（后台运行，不显示窗口）"""
     name = config['name']
     
@@ -197,7 +198,7 @@ def start_process(config):
         except Exception as e:
             return {"success": False, "message": f"启动 {name} 失败: {e}"}
 
-def stop_process(name):
+def _legacy_stop_process(name):
     """停止进程"""
     with process_lock:
         if name not in processes:
@@ -229,7 +230,7 @@ def stop_process(name):
         except Exception as e:
             return {"success": False, "message": f"停止 {name} 失败: {e}"}
 
-def get_process_logs(name, max_lines=1000):
+def _legacy_get_process_logs(name, max_lines=1000):
     """获取进程日志"""
     with process_lock:
         if name not in processes:
@@ -255,7 +256,7 @@ def get_process_logs(name, max_lines=1000):
         # 返回最后 max_lines 条（用于初始显示）
         return logs[-max_lines:] if len(logs) > max_lines else logs
 
-def get_process_status(name):
+def _legacy_get_process_status(name):
     """获取进程状态"""
     with process_lock:
         if name not in processes:
@@ -276,6 +277,31 @@ def get_process_status(name):
         }
 
 # Flask 路由
+# Legacy process helpers above are retained for reference; all entry points below
+# use the shared supervisor instead of list-order sleeps and ad-hoc Popen calls.
+supervisor = ServiceSupervisor(PROCESSES)
+
+
+def start_process(config):
+    results = supervisor.start([config["name"]])
+    result = next(row for row in results if row["name"] == config["name"])
+    return {**result, "dependencies": results}
+
+
+def stop_process(name):
+    results = supervisor.stop(name)
+    success = all(row["success"] for row in results)
+    return {"success": success, "message": "已停止服务及依赖它的服务" if success else "部分服务停止失败，请查看结果", "results": results}
+
+
+def get_process_logs(name, max_lines=1000):
+    return supervisor.logs(name, max_lines)
+
+
+def get_process_status(name):
+    return supervisor.status(name)
+
+
 @app.route('/')
 def index():
     """主页面"""
@@ -292,9 +318,11 @@ def get_services():
             "name": name,
             "running": status.get("running", False),
             "pid": status.get("pid"),
-            "start_time": status.get("start_time")
+            "start_time": status.get("start_time"),
+            "state": status["state"], "message": status["message"],
+            "depends_on": config.get("depends_on", []), "autostart": config.get("autostart", True),
         })
-    return jsonify({"services": services})
+    return jsonify({"services": services, "startup": supervisor.startup_status()})
 
 @app.route('/api/services/<path:name>/start', methods=['POST'])
 def start_service(name):
@@ -303,12 +331,14 @@ def start_service(name):
     if not config:
         return jsonify({"success": False, "message": f"未找到服务: {name}"}), 404
     
-    result = start_process(config)
-    return jsonify(result)
+    accepted = supervisor.start_background([name])
+    return jsonify({"success": accepted, "message": "正在自动启动前置依赖与当前服务" if accepted else "已有启动任务，请查看状态"})
 
 @app.route('/api/services/<path:name>/stop', methods=['POST'])
 def stop_service(name):
     """停止服务（使用 path 转换器以支持空格）"""
+    if name not in supervisor.definitions:
+        return jsonify({"success": False, "message": f"未找到服务: {name}"}), 404
     result = stop_process(name)
     return jsonify(result)
 
@@ -416,27 +446,16 @@ def api_presence():
 
 @app.route('/api/services/start-all', methods=['POST'])
 def start_all_services():
-    """按注册顺序启动所有服务，不会终止占用端口的外部进程。"""
-    results = []
-    for config in PROCESSES:
-        result = start_process(config)
-        results.append({"name": config['name'], **result})
-        time.sleep(1)  # 延迟启动
-    
-    return jsonify({"results": results})
+    """异步按依赖启动，管理页可持续查看启动状态。"""
+    accepted = supervisor.start_background()
+    return jsonify({"success": accepted, "message": "正在按依赖启动 Bines" if accepted else "已有启动任务"})
 
 @app.route('/api/services/stop-all', methods=['POST'])
 def stop_all_services():
     """停止所有服务"""
-    results = []
-    with process_lock:
-        names = list(processes.keys())
-    
-    for name in names:
-        result = stop_process(name)
-        results.append({"name": name, **result})
-    
-    return jsonify({"results": results})
+    results = supervisor.stop()
+    success = all(row["success"] for row in results)
+    return jsonify({"success": success, "message": "已停止本次管理的服务" if success else "部分服务停止失败，请查看结果", "results": results})
 
 # ---------- 本地技能动作启用配置 ----------
 SKILL_ACTIONS_PATH = os.path.join(ROOT_DIR, "server", "skill_actions.json")
@@ -451,6 +470,11 @@ def get_skill_actions():
             with open(SKILL_ACTIONS_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             all_actions = data.get("actions") or []
+            from tools import TOOLS_REGISTRY
+            listed = {action["name"] for action in all_actions}
+            for name in TOOLS_REGISTRY:
+                if name not in listed:
+                    all_actions.append({"name": name, "description": name, "enabled": True})
             all_actions = sorted(all_actions, key=lambda t: (t.get("name") or ""))
         except Exception as e:
             return jsonify({"success": False, "message": str(e), "actions": []}), 500
@@ -471,6 +495,10 @@ def save_skill_actions():
         with open(SKILL_ACTIONS_PATH, 'r', encoding='utf-8') as f:
             data = json.load(f)
         actions = data.get("actions") or []
+        from tools import TOOLS_REGISTRY
+        listed = {action["name"] for action in actions}
+        actions.extend({"name": name, "description": name, "enabled": True}
+                       for name in TOOLS_REGISTRY if name not in listed)
         for action in actions:
             action["enabled"] = action.get("name") in enabled_set
         data["actions"] = sorted(actions, key=lambda action: (action.get("name") or ""))
@@ -491,7 +519,7 @@ REALTIME_SCREEN_SCRIPT = os.path.join(ROOT_DIR, "realtime_screen_analysis_standa
 REALTIME_SCREEN_LOG_PATH = os.path.join(ROOT_DIR, "server", "realtime_screen_analysis.log")
 
 
-def _realtime_screen_is_running():
+def _legacy_realtime_screen_is_running():
     """根据 PID 文件判断实时屏幕分析脚本是否在运行。"""
     if not os.path.exists(REALTIME_SCREEN_PID_PATH):
         return False
@@ -530,7 +558,7 @@ def _realtime_screen_process_matches(pid):
         return False
 
 
-def _realtime_screen_stop():
+def _legacy_realtime_screen_stop():
     """结束实时屏幕分析脚本进程（读 PID 文件后发 SIGTERM）。"""
     if not os.path.exists(REALTIME_SCREEN_PID_PATH):
         return True
@@ -590,7 +618,7 @@ def _update_skill_action_enabled(tool_name, enabled):
         pass
 
 
-def _realtime_screen_start():
+def _legacy_realtime_screen_start():
     """在项目根目录启动 realtime_screen_analysis_standalone.py。优先使用 thinking_venv 的 Python（含 pyautogui/PIL 等依赖）。"""
     if not os.path.isfile(REALTIME_SCREEN_SCRIPT):
         return False, "未找到脚本 realtime_screen_analysis_standalone.py"
@@ -618,13 +646,38 @@ def _realtime_screen_start():
         time.sleep(1.5)
         if _realtime_screen_is_running():
             return True, "已启动实时屏幕分析脚本"
-        return False, "脚本未运行，请查看下方「最近日志」排查（如依赖缺失、DASHSCOPE_API_KEY 未设置等）"
+        return False, "脚本未运行，请查看下方「最近日志」排查（如依赖缺失、.env 中 DEEPSEEK_API_KEY 未设置等）"
     except Exception as e:
         return False, str(e)
 
 
+# Legacy PID helpers above are retained for standalone-script compatibility.
+# Managed screen analysis now shares the same supervisor as all other modules.
+def _realtime_screen_is_running():
+    return "Realtime Screen" in supervisor.definitions and supervisor.status("Realtime Screen")["running"]
+
+
+def _realtime_screen_start():
+    if "Realtime Screen" not in supervisor.definitions:
+        return False, "当前模式不启动屏幕模块"
+    if _realtime_screen_is_running():
+        return True, "屏幕分析已运行"
+    supervisor.definitions["Realtime Screen"]["autostart"] = True
+    accepted = supervisor.start_background(["Realtime Screen"])
+    return accepted, "已排队启动屏幕分析和前置依赖" if accepted else "等待当前启动任务完成"
+
+
+def _realtime_screen_stop():
+    if "Realtime Screen" in supervisor.definitions:
+        supervisor.definitions["Realtime Screen"]["autostart"] = False
+        supervisor.stop("Realtime Screen")
+    return True
+
+
 def _realtime_screen_ensure_from_config():
     """根据保存的配置决定是否启动实时屏幕分析（仅当 enabled 且未在运行时启动）。供其他模块就绪后调用。"""
+    if os.environ.get("BINES_PROFILE", "full") == "chatbot":
+        return False, "纯 ChatBot 模式不启动屏幕模块"
     data = load_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH)
 
     # 【新增】无论是否启动，都同步工具 schema 状态
@@ -634,6 +687,8 @@ def _realtime_screen_ensure_from_config():
 
     if not realtime_enabled:
         return False, "配置中未启用，不启动"
+    if supervisor.startup_status()["active"]:
+        return False, "已由统一启动任务处理屏幕模块"
     if _realtime_screen_is_running():
         return True, "已在运行"
     ok, msg = _realtime_screen_start()
@@ -711,4 +766,7 @@ if __name__ == '__main__':
     print()
     
     # 使用 use_reloader=False 和 use_debugger=False 来减少输出信息
-    app.run(host=HTTP_HOST, port=HTTP_PORTS["MODULE_MANAGER"], debug=False, threaded=True, use_reloader=False)
+    try:
+        app.run(host=HTTP_HOST, port=HTTP_PORTS["MODULE_MANAGER"], debug=False, threaded=True, use_reloader=False)
+    finally:
+        supervisor.close()

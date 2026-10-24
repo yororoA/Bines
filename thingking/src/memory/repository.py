@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
-from .models import content_hash
+from .models import ROLES, content_hash, is_system_event
 
 SCHEMA_VERSION = 1
 
@@ -114,6 +114,18 @@ _MEMORY_COLUMNS = (
     "id, kind, scope, conversation_id, subject_id, content, importance, start_ts, end_ts, day_key, "
     "tags, meta, origin, content_hash, source_ref, created_at, updated_at, indexed_at, deleted"
 )
+_PENDING_MESSAGES = "episode_id IS NULL AND consolidation_candidate(role, content, origin)"
+
+
+def consolidation_candidate(role: str, content: str, origin: str) -> bool:
+    text = (content or "").strip()
+    return (
+        role in ROLES and bool(text) and not is_system_event(text)
+        and text.lower() not in ("[消息已撤回]", "[message recalled]", "[message deleted]")
+        and (origin or "").strip().lower() not in (
+            "archived", "recalled", "withdrawn", "retracted", "deleted", "system",
+        )
+    )
 
 
 class StateConflict(RuntimeError):
@@ -136,6 +148,7 @@ class MemoryRepository:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.create_function("consolidation_candidate", 3, consolidation_candidate, deterministic=True)
         self.conn.execute("PRAGMA foreign_keys = ON")
         if str(db_path) != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")
@@ -248,7 +261,8 @@ class MemoryRepository:
 
     def recent_messages(self, conversation_id: str, limit: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY ts DESC, id DESC LIMIT ?",
+            "SELECT * FROM messages WHERE conversation_id = ? AND LOWER(origin) != 'archived' "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
             (conversation_id, limit),
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
@@ -258,7 +272,7 @@ class MemoryRepository:
     ) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM messages WHERE scope = ? AND conversation_id != ? AND ts >= ? "
-            "ORDER BY ts DESC, id DESC LIMIT ?",
+            "AND LOWER(origin) != 'archived' ORDER BY ts DESC, id DESC LIMIT ?",
             (scope, exclude_conversation, since_ts, limit),
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
@@ -271,7 +285,7 @@ class MemoryRepository:
         return [dict(r) for r in rows]
 
     def last_message(self, conversation_id: str, role: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        sql = "SELECT * FROM messages WHERE conversation_id = ?"
+        sql = "SELECT * FROM messages WHERE conversation_id = ? AND LOWER(origin) != 'archived'"
         params: List[Any] = [conversation_id]
         if role:
             sql += " AND role = ?"
@@ -281,16 +295,36 @@ class MemoryRepository:
 
     def pending_message_count(self, conversation_id: str) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND episode_id IS NULL", (conversation_id,)
+            f"SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND {_PENDING_MESSAGES}",
+            (conversation_id,),
         ).fetchone()
         return int(row["n"])
 
     def oldest_pending_messages(self, conversation_id: str, limit: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
-            "SELECT * FROM messages WHERE conversation_id = ? AND episode_id IS NULL ORDER BY id LIMIT ?",
+            f"SELECT * FROM messages WHERE conversation_id = ? AND {_PENDING_MESSAGES} ORDER BY ts, id LIMIT ?",
             (conversation_id, limit),
         )
+        chunk = [dict(r) for r in rows]
+        return [m for m in chunk if m["day_key"] == chunk[0]["day_key"]] if chunk else []
+
+    def idle_pending_conversations(
+        self, before_ts: float, minimum: int, before_day: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Conversations with a small but idle tail; used to flush summaries without waiting for 40 messages."""
+        rows = self.conn.execute(
+            "SELECT conversation_id, scope, day_key, COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts "
+            f"FROM messages WHERE {_PENDING_MESSAGES} GROUP BY conversation_id, scope, day_key "
+            "HAVING (COUNT(*) >= ? AND MAX(ts) <= ?) OR day_key < ? ORDER BY MIN(ts), conversation_id",
+            (int(minimum), float(before_ts), before_day),
+        )
         return [dict(r) for r in rows]
+
+    def has_pending_messages_for_day(self, scope: str, day: str) -> bool:
+        return self.conn.execute(
+            f"SELECT 1 FROM messages WHERE scope = ? AND day_key = ? AND {_PENDING_MESSAGES} LIMIT 1",
+            (scope, day),
+        ).fetchone() is not None
 
     def messages_in_range(self, conversation_id: str, from_id: int, to_id: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
@@ -305,6 +339,27 @@ class MemoryRepository:
             (episode_id, conversation_id, from_id, to_id),
         )
         return cursor.rowcount
+
+    def pending_messages_in_range(self, conversation_id: str, from_id: int, to_id: int) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            f"SELECT * FROM messages WHERE conversation_id = ? AND id BETWEEN ? AND ? AND {_PENDING_MESSAGES} "
+            "ORDER BY ts, id",
+            (conversation_id, from_id, to_id),
+        )
+        return [dict(r) for r in rows]
+
+    def mark_consolidated_ids(self, conversation_id: str, message_ids: Sequence[int], episode_id: str) -> int:
+        changed = 0
+        for offset in range(0, len(message_ids), 400):
+            chunk = message_ids[offset:offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"UPDATE messages SET episode_id = ? WHERE conversation_id = ? AND id IN ({placeholders}) "
+                f"AND {_PENDING_MESSAGES}",
+                (episode_id, conversation_id, *chunk),
+            )
+            changed += cursor.rowcount
+        return changed
 
     # ---------- memories ----------
     def add_memory(
@@ -404,7 +459,10 @@ class MemoryRepository:
         order: str = "recent",
     ) -> List[Dict[str, Any]]:
         sql, params = self._memory_filter(kinds, scopes, subject_id, keyword, day_key)
-        order_sql = "importance DESC, updated_at DESC" if order == "importance" else "COALESCE(end_ts, created_at) DESC"
+        if order == "profile":
+            order_sql = "CASE WHEN origin = 'legacy' THEN 0 ELSE 1 END, importance DESC, updated_at DESC"
+        else:
+            order_sql = "importance DESC, updated_at DESC" if order == "importance" else "COALESCE(end_ts, created_at) DESC"
         rows = self.conn.execute(
             f"SELECT {_MEMORY_COLUMNS} FROM memories WHERE {sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
             (*params, limit, offset),
@@ -451,14 +509,22 @@ class MemoryRepository:
     def episodes_for_day(self, scope: str, day: str) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             f"SELECT {_MEMORY_COLUMNS} FROM memories WHERE scope = ? AND kind = 'episode' AND day_key = ? AND deleted = 0 "
-            "ORDER BY COALESCE(start_ts, created_at)",
+            "ORDER BY COALESCE(start_ts, created_at), id",
             (scope, day),
         )
         return [_memory_row(r) for r in rows]
 
+    def episode_days_before(self, scope: str, before_day: str) -> List[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT day_key FROM memories WHERE scope = ? AND kind = 'episode' "
+            "AND deleted = 0 AND day_key < ? ORDER BY day_key",
+            (scope, before_day),
+        )
+        return [r["day_key"] for r in rows]
+
     def undiaried_live_days(self, scope: str, before_day: str) -> List[str]:
         rows = self.conn.execute(
-            "SELECT DISTINCT e.day_key FROM memories e WHERE e.scope = ? AND e.kind = 'episode' AND e.origin = 'live' "
+            "SELECT DISTINCT e.day_key FROM memories e WHERE e.scope = ? AND e.kind = 'episode' "
             "AND e.deleted = 0 AND e.day_key < ? AND NOT EXISTS (SELECT 1 FROM memories d WHERE d.scope = e.scope "
             "AND d.kind = 'diary' AND d.day_key = e.day_key AND d.deleted = 0) ORDER BY e.day_key",
             (scope, before_day),
@@ -506,7 +572,8 @@ class MemoryRepository:
             return {"data": {}, "version": 0, "updated_at": None}
         return {"data": json.loads(row["data"]), "version": int(row["version"]), "updated_at": row["updated_at"]}
 
-    def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None) -> int:
+    def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
+                  source_ref: Optional[str] = None, effective_at: Optional[float] = None) -> int:
         with self.transaction():
             current = self.get_state(scope)
             if expected_version is not None and current["version"] != expected_version:
@@ -518,6 +585,11 @@ class MemoryRepository:
                 "updated_at = excluded.updated_at",
                 (scope, json.dumps(data, ensure_ascii=False), version, self.clock()),
             )
+            # 时态历史是可选派生层；只有 MemoryService 挂载 TemporalStore 后才记录。
+            temporal = getattr(self, "temporal", None)
+            if temporal is not None:
+                temporal.snapshot_state(scope, version, data, self.clock(),
+                                        effective_at=effective_at, source_ref=source_ref)
         return version
 
     # ---------- jobs ----------
@@ -543,6 +615,19 @@ class MemoryRepository:
             (kind, conversation_id),
         ).fetchone()
         return row is not None
+
+    def has_open_diary_job(self, scope: str, day: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM jobs WHERE kind = 'diary' AND scope = ? AND status IN ('pending', 'running') "
+            "AND json_extract(payload, '$.day_key') = ? LIMIT 1",
+            (scope, day),
+        ).fetchone() is not None
+
+    def update_job_payload(self, job_id: int, payload: Dict[str, Any]) -> None:
+        self.conn.execute(
+            "UPDATE jobs SET payload = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+            (json.dumps(payload, ensure_ascii=False), self.clock(), job_id),
+        )
 
     def claim_job(self, lease_seconds: int, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
         now = self.clock()
@@ -574,16 +659,19 @@ class MemoryRepository:
         job["payload"] = json.loads(job["payload"])
         return job
 
-    def finish_job(self, job_id: int) -> None:
+    def finish_job(self, job_id: int, *, release_dedupe: bool = False) -> None:
         self.conn.execute(
-            "UPDATE jobs SET status = 'done', lease_until = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
-            (self.clock(), job_id),
+            "UPDATE jobs SET status = 'done', lease_until = NULL, last_error = NULL, "
+            "dedupe_key = CASE WHEN ? THEN NULL ELSE dedupe_key END, updated_at = ? WHERE id = ?",
+            (release_dedupe, self.clock(), job_id),
         )
 
     def fail_job(self, job_id: int, error: str, max_attempts: int) -> str:
         job = self.get_job(job_id)
         if not job:
             return "missing"
+        if job["status"] != "running":
+            return job["status"]  # 撤回或手动更新取消的任务不能因迟到的失败通知复活。
         now = self.clock()
         if job["attempts"] >= max_attempts:
             status, available_at = "failed", now

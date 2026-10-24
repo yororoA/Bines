@@ -1,0 +1,7 @@
+# Manager + QQ + DeepSeek + MCP, with no camera/audio ML dependencies.
+-r ../requirements-chatbot.txt
+Flask>=3.0,<4
+flask-cors>=4,<7
+pyzmq>=25,<28
+# Host website bridge crops/compresses visible video frames.
+Pillow>=10,<13

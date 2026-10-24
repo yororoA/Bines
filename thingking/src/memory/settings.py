@@ -5,6 +5,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import FrozenSet
+from common.env import load_env
+
+load_env()
 
 THINKING_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = THINKING_DIR / "src"
@@ -15,11 +18,7 @@ def _owner_qq_ids_from_env() -> FrozenSet[str]:
     raw = os.environ.get("BINES_OWNER_QQ_IDS", "").strip()
     if raw:
         return frozenset(part.strip() for part in raw.split(",") if part.strip())
-    try:
-        from chatBot.config import ADMIN_QQ_LIST
-    except Exception:
-        return frozenset()
-    return frozenset(str(qq) for qq in ADMIN_QQ_LIST)
+    return frozenset()
 
 
 @dataclass(frozen=True)
@@ -30,12 +29,20 @@ class MemorySettings:
     working_window: int = 30
     summarize_trigger: int = 40
     summarize_chunk: int = 30
+    summarize_idle_seconds: int = 1800
+    summarize_idle_min: int = 4
     recall_k: int = 5
     diary_k: int = 2
     profile_k: int = 8
     day_start_hour: int = 4
     job_lease_seconds: int = 300
     job_max_attempts: int = 5
+    state_updates: bool = True
+    retrieval_candidates: int = 40
+    retrieval_rrf_constant: int = 60
+    retrieval_max_distance: float = 0.7
+    evidence_limit: int = 3
+    reranker_model: str = ""
 
     @property
     def db_path(self) -> Path:
@@ -52,8 +59,15 @@ class MemorySettings:
 
 def load_settings() -> MemorySettings:
     data_dir = Path(os.environ.get("BINES_MEMORY_DIR", str(DEFAULT_DATA_DIR)))
+    if not data_dir.is_absolute():
+        data_dir = THINKING_DIR.parent / data_dir
     return MemorySettings(
         data_dir=data_dir,
         owner_qq_ids=_owner_qq_ids_from_env(),
         owner_name=os.environ.get("BINES_OWNER_NAME", "管理员"),
+        state_updates=os.environ.get("BINES_MEMORY_STATE_UPDATES", "true").strip().lower() in {"true", "1", "yes", "on"},
+        retrieval_candidates=max(10, min(100, int(os.environ.get("BINES_MEMORY_CANDIDATES", "40")))),
+        reranker_model=os.environ.get("BINES_MEMORY_RERANKER", "").strip(),
+        summarize_idle_seconds=max(60, int(os.environ.get("BINES_MEMORY_IDLE_SUMMARY_SECONDS", "1800"))),
+        summarize_idle_min=max(2, min(40, int(os.environ.get("BINES_MEMORY_IDLE_SUMMARY_MIN", "4")))),
     )

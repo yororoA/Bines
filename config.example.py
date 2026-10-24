@@ -1,28 +1,11 @@
-"""Safe starter configuration. Copy to config.py and set credentials in the environment."""
+"""Application defaults. Configure this installation in the root .env file."""
 import os
 from pathlib import Path
+from common.env import load_env
+from runtime_environments import environment_python
 
 ROOT_DIR = Path(__file__).resolve().parent
-
-
-def _load_dotenv(path: Path) -> None:
-    # Existing process/system environment variables take precedence over .env.
-    if not path.is_file():
-        return
-    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip().removeprefix("export ").strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        if key:
-            os.environ.setdefault(key, value)
-
-
-_load_dotenv(ROOT_DIR / ".env")
+load_env()
 PRESENCE_STATE_PATH = ROOT_DIR / "presence_state.json"
 BROWSER_AUTOMATION_USER_DATA_DIR = str(ROOT_DIR / "static" / "Bines Data Automation")
 
@@ -79,13 +62,22 @@ HEARING_PUNC_MODEL_REVISION = os.environ.get("HEARING_PUNC_MODEL_REVISION", "v2.
 HEARING_ASR_DEVICE = os.environ.get("HEARING_ASR_DEVICE", "cuda")
 HEARING_VAD_MODEL = os.environ.get("HEARING_VAD_MODEL", "fsmn-vad")
 
-# All text tasks use this single credential and model. Vision/ASR/TTS remain separate modalities.
+# Text, vision and Search/Fetch share one DeepSeek credential. ASR/TTS remain separate.
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 DEEPSEEK_API_TIMEOUT = int(os.environ.get("DEEPSEEK_API_TIMEOUT", "60"))
 # deepseek-flash reasons by default; "disabled" keeps short classification calls from returning empty text.
 DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "disabled")
+_DEEPSEEK_API_ROOT = DEEPSEEK_BASE_URL.rstrip("/").removesuffix("/v1")
+DEEPSEEK_VISION_API_URL = f"{_DEEPSEEK_API_ROOT}/chat/completions"
+DEEPSEEK_VISION_MODEL = os.environ.get("DEEPSEEK_VISION_MODEL", "deepseek-flash")
+DEEPSEEK_VISION_TIMEOUT = int(os.environ.get("DEEPSEEK_VISION_TIMEOUT", "60"))
+DEEPSEEK_VISION_DETAIL = os.environ.get("DEEPSEEK_VISION_DETAIL", "original")
+DEEPSEEK_SEARCH_URL = f"{_DEEPSEEK_API_ROOT}/v1/tools/search"
+DEEPSEEK_FETCH_URL = f"{_DEEPSEEK_API_ROOT}/v1/tools/fetch"
+DEEPSEEK_WEB_TIMEOUT = int(os.environ.get("DEEPSEEK_WEB_TIMEOUT", "30"))
+DEEPSEEK_SEARCH_COUNT = int(os.environ.get("DEEPSEEK_SEARCH_COUNT", "5"))
 
 TTS_HTTP_BASE_URL = os.environ.get("BINES_TTS_URL", "http://127.0.0.1:9880")
 # Optional local GPT-SoVITS install; when set, the module manager starts its api_v2.py.
@@ -93,7 +85,10 @@ GPT_SOVITS_DIR = os.environ.get("GPT_SOVITS_DIR", "")
 
 # Singing: separate vocals -> so-vits-svc -> remix, cached per song (see singing/README.md).
 SOVITS_SVC_DIR = os.environ.get("SOVITS_SVC_DIR", "")
-SINGING_PYTHON = os.environ.get("SINGING_PYTHON", "")
+_INSTALLED_SINGING_PYTHON = environment_python("singing", ROOT_DIR)
+SINGING_PYTHON = os.environ.get("SINGING_PYTHON") or (
+    str(_INSTALLED_SINGING_PYTHON) if _INSTALLED_SINGING_PYTHON.is_file() else ""
+)
 SINGING_WORK_DIR = Path(os.environ.get("SINGING_WORK_DIR", str(ROOT_DIR / "singing" / "work")))
 SINGING_LIBRARY_DIR = Path(os.environ.get("SINGING_LIBRARY_DIR", str(ROOT_DIR / "static" / "music" / "library")))
 SINGING_SVC_MODEL = os.environ.get("SINGING_SVC_MODEL", "logs/44k/G_36000.pth")
@@ -107,13 +102,19 @@ MOMENTS_API_BASE_URL = os.environ.get("MOMENTS_API_BASE_URL", "")
 MOMENTS_API_TIMEOUT = int(os.environ.get("MOMENTS_API_TIMEOUT", "15"))
 TOGGLE_STATUS_TOKEN = os.environ.get("TOGGLE_STATUS_TOKEN", "")
 
-DASHSCOPE_API_URL = os.environ.get(
-    "DASHSCOPE_API_URL",
-    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-)
-DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
-DASHSCOPE_VISION_MODEL = os.environ.get("DASHSCOPE_VISION_MODEL", "qwen3-vl-flash")
-DASHSCOPE_API_TIMEOUT = int(os.environ.get("DASHSCOPE_API_TIMEOUT", "30"))
+# Ark 独立身份：在 Ark /bines 管理页签发。配置后不会回落旧 REST。
+ARK_TRANSPORT = os.environ.get("ARK_TRANSPORT", "auto")  # auto | mcp | legacy
+ARK_MCP_URL = os.environ.get("ARK_MCP_URL", "")
+ARK_MCP_UID = os.environ.get("ARK_MCP_UID", "")  # 与 arkserver 的 BINES_UID 一致
+ARK_MCP_TOKEN = os.environ.get("ARK_MCP_TOKEN", "")
+ARK_MCP_TIMEOUT = float(os.environ.get("ARK_MCP_TIMEOUT", "20"))
+
+# Historical DashScope constants are aliases for old external consumers.
+# All in-repository vision callers use the DeepSeek names below.
+DASHSCOPE_API_URL = DEEPSEEK_VISION_API_URL
+DASHSCOPE_API_KEY = DEEPSEEK_API_KEY
+DASHSCOPE_VISION_MODEL = DEEPSEEK_VISION_MODEL
+DASHSCOPE_API_TIMEOUT = DEEPSEEK_VISION_TIMEOUT
 VISUAL_FACE_MODEL = os.environ.get("VISUAL_FACE_MODEL", "buffalo_l")
 
 _LOCAL_EMBEDDING_DIR = ROOT_DIR / "thingking" / "models" / "all-MiniLM-L6-v2"
@@ -128,5 +129,5 @@ VOCU_MODEL_ID = os.environ.get("VOCU_MODEL_ID", "")
 
 def require_env(name: str, value: str | None) -> str:
     if not value:
-        raise RuntimeError(f"Environment variable '{name}' is required but not set.")
+        raise RuntimeError(f"请在项目 .env 文件中配置 {name}。")
     return value

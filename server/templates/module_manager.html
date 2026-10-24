@@ -420,11 +420,12 @@
                 <span id="presenceLabel" class="presence-label" style="margin-right:8px;align-self:center;font-size:14px;">用户在线</span>
                 <button id="presenceBtn" class="btn btn-secondary" onclick="togglePresence()" title="切换后：下线时不会主动发起无聊对话">上下线切换</button>
                 <div style="width: 1px; height: 24px; background: #444; margin: 0 10px; align-self: center;"></div>
-                <button class="btn btn-primary" onclick="startAllServices()">启动所有服务</button>
+                <button class="btn btn-primary" onclick="startAllServices()">启动 Bines</button>
                 <button class="btn btn-danger" onclick="stopAllServices()">停止所有服务</button>
             </div>
         </div>
 
+        <div id="startupStatus" role="status" style="padding: 12px 20px; color: #666;"></div>
         <div class="main-content">
             <div class="sidebar">
                 <ul class="service-list" id="serviceList">
@@ -597,6 +598,13 @@
                 const response = await fetch('/api/services');
                 const data = await response.json();
                 renderServiceList(data.services);
+                const problems = data.services.filter(service => ['blocked', 'failed'].includes(service.state));
+                const message = data.startup?.active ? '正在启动，请等待服务就绪' : '启动任务已结束';
+                const details = problems.map(service => `${service.name}: ${service.message}`).join('；');
+                document.getElementById('startupStatus').textContent =
+                    [message, data.startup?.napcat, details].filter(Boolean).join(' · ');
+                const title = data.startup?.active ? 'Bines · 启动中' : 'Bines · 模块管理';
+                document.title = title;
             } catch (error) {
                 console.error('加载服务列表失败:', error);
             }
@@ -614,9 +622,13 @@
                 item.className = 'service-item' + (currentServiceName === service.name ? ' active' : '');
                 item.onclick = () => selectService(service.name);
 
+                const stateLabels = {ready: '已就绪', starting: '启动中', waiting: '等待依赖', blocked: '依赖阻塞', failed: '启动失败', stopped: '已停止'};
+                const state = stateLabels[service.state] || '已停止';
+                item.title = service.message || state;
                 item.innerHTML = `
                     <span class="service-name">${service.name}</span>
-                    <span class="service-status ${service.running ? 'running' : 'stopped'}"></span>
+                    <span>${state}${service.autostart === false ? ' · 按需' : ''}</span>
+                    <span class="service-status ${service.state === 'ready' ? 'running' : 'stopped'}"></span>
                 `;
 
                 list.appendChild(item);
@@ -969,14 +981,12 @@
 
         // 启动所有服务
         async function startAllServices() {
-            if (!confirm('确定要启动所有服务吗？')) return;
-
             try {
                 const response = await fetch('/api/services/start-all', {
                     method: 'POST'
                 });
                 const data = await response.json();
-                showNotification('正在启动所有服务...', 'success');
+                showNotification(data.message, data.success ? 'success' : 'error');
                 loadServices();
             } catch (error) {
                 showNotification('启动所有服务失败: ' + error.message, 'error');
@@ -992,7 +1002,7 @@
                     method: 'POST'
                 });
                 const data = await response.json();
-                showNotification('正在停止所有服务...', 'success');
+                showNotification(data.message, data.success ? 'success' : 'error');
                 loadServices();
             } catch (error) {
                 showNotification('停止所有服务失败: ' + error.message, 'error');

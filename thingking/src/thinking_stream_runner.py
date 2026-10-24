@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable, Dict
 
 from skill_runner import CALL_END, CALL_START, SkillProtocolError, SkillRunner
+from will_runtime import ActivityYield
 
 
 def run_main_agent_rounds(
@@ -23,6 +24,8 @@ def run_main_agent_rounds(
     final_text = ""
     exited_due_to_interrupt = False
     last_skill_result = ""
+    state_updated = False
+    error = ""
 
     def send_text(text: str, segment_state: dict) -> None:
         for char in text:
@@ -101,6 +104,7 @@ def run_main_agent_rounds(
                     pending_prefix = ""
 
         if exited_due_to_interrupt:
+            final_text = "".join(full_response).strip() if normal_mode else ""
             if normal_mode and segment_state["buffer"].strip():
                 segment = segment_state["buffer"].strip()
                 if not is_only_action_or_empty(segment):
@@ -109,6 +113,8 @@ def run_main_agent_rounds(
             break
 
         raw_response = "".join(full_response)
+        if holder.get("error"):
+            error = str(holder["error"])
         if not normal_mode and not directive_mode:
             # Short response was a prefix of the marker, but never completed it.
             normal_mode = True
@@ -120,6 +126,8 @@ def run_main_agent_rounds(
                 if command is None:
                     raise SkillProtocolError("未识别到技能调用块")
                 skill_result = skill_runner.execute(command, source=source)
+                if command["action"] == "update_status" and str(skill_result).startswith("动态状态已更新"):
+                    state_updated = True
                 messages.append({"role": "assistant", "content": directive_text})
                 messages.append({
                     "role": "system",
@@ -135,6 +143,12 @@ def run_main_agent_rounds(
                 messages.append({"role": "system", "content": f"<skill_result>{skill_result}</skill_result>"})
                 last_skill_result = skill_result
                 continue
+            except ActivityYield:
+                # An activity checkpoint ends this batch without speaking a
+                # synthetic tool receipt or starting another model request.
+                final_text = ""
+                last_skill_result = ""
+                break
 
         if segment_state["buffer"].strip():
             segment = segment_state["buffer"].strip()
@@ -150,4 +164,6 @@ def run_main_agent_rounds(
     return {
         "full_raw_response": final_text,
         "exited_due_to_interrupt": exited_due_to_interrupt,
+        "state_updated": state_updated,
+        "error": error,
     }

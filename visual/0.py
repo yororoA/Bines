@@ -26,14 +26,10 @@ from models.face_models.face_recognise import face_input
 from models.face_models.face_recognise import face_find
 from models.face_models.face_recognise import load_embeddings, save_embeddings
 from config import (
-    DASHSCOPE_API_KEY,
-    DASHSCOPE_API_TIMEOUT,
-    DASHSCOPE_API_URL,
-    DASHSCOPE_VISION_MODEL,
     ZMQ_PORTS,
 )
 from common.zmq_bus import create_publisher
-from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
+from vlm_client import call_vision as _call_vision
 # from models.object_models.object_recognise_onnx import ObjectDetector
 # from models.gesture_models.gesture import HandInteractionSystem
 
@@ -141,8 +137,8 @@ def camera_model():
     server_ready = threading.Event()
     server_start_error = []
 
-    # --- DashScope VLM 调用 ---
-    def call_dashscope_vlm(image_b64, focus_question=None):
+    # --- DeepSeek 视觉调用，复用原场景识别流程 ---
+    def call_vision(image_b64, focus_question=None):
         # 根据是否有 focus_question 生成提示词
         # 新规则：
         # - 如果上游调用方提供了 focus_question，则直接视为完整提示词，不再在此处固定模板；
@@ -151,20 +147,16 @@ def camera_model():
             prompt_text = str(focus_question).strip()
         else:
             prompt_text = "简要描述画面中的内容（50字以内），可适当关注人物的情绪和动作。"
-        result = _call_dashscope_vlm(
+        result = _call_vision(
             image_b64,
             prompt_text,
-            api_url=DASHSCOPE_API_URL,
-            api_key=DASHSCOPE_API_KEY,
-            model=DASHSCOPE_VISION_MODEL,
-            timeout=DASHSCOPE_API_TIMEOUT,
             proxies={"http": None, "https": None},
             missing_key_message="",
             empty_message="",
             error_message_prefix="",
         )
         if result.startswith("[VLM 请求失败"):
-            print(f"DashScope error: {result}")
+            print(f"DeepSeek vision error: {result}")
             return ""
         return result or ""
 
@@ -215,7 +207,7 @@ def camera_model():
             # 注意: 在同步调用模式下，VLM 应该在返回前就把结果拿回来，
             # 而不是像之前那样异步开个线程去跑，否则 REQ 立即返回了但没有 caption。
             # 这里我们改为同步调用。
-            desc = call_dashscope_vlm(b64, focus_question)
+            desc = call_vision(b64, focus_question)
             return desc if desc else ""
 
         try:

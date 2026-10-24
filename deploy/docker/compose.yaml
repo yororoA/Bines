@@ -1,0 +1,232 @@
+name: bines
+
+x-logging: &bines-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-timezone: &bines-timezone
+  TZ: ${BINES_MEMORY_TIMEZONE:-Asia/Shanghai}
+  BINES_MEMORY_TIMEZONE: ${BINES_MEMORY_TIMEZONE:-Asia/Shanghai}
+
+services:
+  gateway-init:
+    image: bines-launcher:local
+    user: "0:0"
+    command: ["sh", "-c", "chown -R ${BINES_UID:-1000}:${BINES_GID:-1000} /app/gateway_data || true; chmod -R 0777 /app/gateway_data"]
+    restart: "no"
+    volumes:
+      - bines-gateway:/app/gateway_data
+
+  napcat:
+    image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
+    logging: *bines-logging
+    restart: unless-stopped
+    env_file:
+      - path: ../napcat/.env
+        required: false
+    environment:
+      TZ: ${BINES_MEMORY_TIMEZONE:-Asia/Shanghai}
+      MODE: ws
+      ACCOUNT: ${NAPCAT_ACCOUNT:-}
+      NAPCAT_UID: ${NAPCAT_UID:-1000}
+      NAPCAT_GID: ${NAPCAT_GID:-1000}
+    ports:
+      - "127.0.0.1:6099:6099"
+      - "127.0.0.1:6101:3001"
+    volumes:
+      - ../napcat/data/qq:/app/.config/QQ
+      - ../napcat/data/config:/app/napcat/config
+      - ../napcat/data/plugins:/app/napcat/plugins
+      - ../napcat/data/media:/bines-media
+    networks:
+      - bines
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6099'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  chatbot:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.launcher
+      args:
+        BASE_IMAGE: ${BINES_PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim}
+        BINES_UID: "${BINES_UID:-1000}"
+        BINES_GID: "${BINES_GID:-1000}"
+        BINES_SOURCE_HASH: "${BINES_CHATBOT_HASH:-}"
+    image: bines-launcher:local
+    logging: *bines-logging
+    restart: unless-stopped
+    user: "${BINES_UID:-1000}:${BINES_GID:-1000}"
+    command: ["python", "chatBot/main.py"]
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      <<: *bines-timezone
+      PYTHONFAULTHANDLER: "1"
+      BINES_PROFILE: ${BINES_PROFILE:-chatbot}
+      BINES_MEMORY_BACKEND: ${BINES_MEMORY_BACKEND:-remote}
+      BINES_MEMORY_DIR: /app/thingking/memory_data
+      BINES_GATEWAY_DIR: /app/gateway_data
+      BINES_QQ_GATEWAY_HOST: 0.0.0.0
+      BINES_QQ_GATEWAY_URL: http://chatbot:6102
+      BINES_NAPCAT_WS_URL: ws://napcat:3001
+      BINES_NAPCAT_WEBUI_URL: http://napcat:6099
+      BINES_ZMQ_HOST: memory-server
+    ports:
+      - "127.0.0.1:${BINES_QQ_GATEWAY_PORT:-6102}:6102"
+    volumes:
+      - ../../thingking/memory_data:/app/thingking/memory_data
+      - ../../thingking/models:/app/thingking/models
+      - ../../deploy/napcat/data:/app/deploy/napcat/data
+      - bines-gateway:/app/gateway_data
+    depends_on:
+      napcat:
+        condition: service_started
+      memory-server:
+        condition: service_healthy
+      gateway-init:
+        condition: service_completed_successfully
+    networks:
+      - bines
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 6102), 2).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  qq-thinking:
+    image: bines-launcher:local
+    logging: *bines-logging
+    restart: unless-stopped
+    user: "${BINES_UID:-1000}:${BINES_GID:-1000}"
+    command: ["python", "thingking/qq_thinking.py"]
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      <<: *bines-timezone
+      BINES_PROFILE: ${BINES_PROFILE:-chatbot}
+      BINES_MEMORY_DIR: /app/thingking/memory_data
+      BINES_GATEWAY_DIR: /app/gateway_data
+      BINES_QQ_GATEWAY_URL: http://chatbot:6102
+      BINES_WEBSITE_BRIDGE_TOKEN: ${BINES_WEBSITE_BRIDGE_TOKEN:-}
+      BINES_WEBSITE_BRIDGE_SPOOL: /app/thingking/memory_data/website_bridge
+    volumes:
+      - ../../thingking/memory_data:/app/thingking/memory_data
+      - ../../thingking/models:/app/thingking/models
+      - bines-gateway:/app/gateway_data
+    depends_on:
+      chatbot:
+        condition: service_healthy
+    networks:
+      - bines
+
+  memory-worker:
+    image: bines-launcher:local
+    logging: *bines-logging
+    restart: unless-stopped
+    user: "${BINES_UID:-1000}:${BINES_GID:-1000}"
+    command: ["python", "thingking/consolidation_worker.py"]
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      <<: *bines-timezone
+      BINES_PROFILE: ${BINES_PROFILE:-chatbot}
+      BINES_MEMORY_DIR: /app/thingking/memory_data
+      BINES_QQ_GATEWAY_URL: http://chatbot:6102
+    volumes:
+      - ../../thingking/memory_data:/app/thingking/memory_data
+      - ../../thingking/models:/app/thingking/models
+    depends_on:
+      chatbot:
+        condition: service_healthy
+    networks:
+      - bines
+
+  memory-server:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.thinking
+      args:
+        BASE_IMAGE: ${BINES_PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim}
+        BINES_UID: "${BINES_UID:-1000}"
+        BINES_GID: "${BINES_GID:-1000}"
+        BINES_SOURCE_HASH: "${BINES_MEMORY_SERVER_HASH:-}"
+    image: bines-thinking:local
+    logging: *bines-logging
+    restart: unless-stopped
+    user: "${BINES_UID:-1000}:${BINES_GID:-1000}"
+    command: ["python", "thingking/rag_server.py"]
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      <<: *bines-timezone
+      BINES_DOCKER_MODE: "1"
+      BINES_MEMORY_DIR: /app/thingking/memory_data
+      BINES_ZMQ_HOST: 0.0.0.0
+      HF_HOME: /app/thingking/models/hf-cache
+    ports:
+      - "127.0.0.1:5560:5560"
+    volumes:
+      - ../../thingking/memory_data:/app/thingking/memory_data
+      - ../../thingking/models:/app/thingking/models
+    networks:
+      - bines
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 5560), 2).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  rag-web:
+    profiles: ["full"]
+    image: bines-thinking:local
+    logging: *bines-logging
+    restart: unless-stopped
+    user: "${BINES_UID:-1000}:${BINES_GID:-1000}"
+    command: ["python", "thingking/rag_web_server.py"]
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      <<: *bines-timezone
+      BINES_MEMORY_DIR: /app/thingking/memory_data
+      BINES_ZMQ_HOST: memory-server
+      BINES_HTTP_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:${BINES_RAG_WEB_PORT:-5001}:5001"
+    volumes:
+      - ../../thingking/memory_data:/app/thingking/memory_data
+      - ../../thingking/models:/app/thingking/models
+    depends_on:
+      memory-server:
+        condition: service_healthy
+    networks:
+      - bines
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+networks:
+  bines:
+    driver: bridge
+
+volumes:
+  bines-gateway:
+    name: bines-gateway

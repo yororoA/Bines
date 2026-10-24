@@ -1,8 +1,15 @@
 import threading
 import time
+import atexit
 from urllib.parse import quote
+from uuid import uuid4
+
+from ark_mcp_client import ArkMcpError, call_ark, mcp_config
 
 _status_ws_thread = None
+_status_lock = threading.Lock()
+_status_stop = threading.Event()
+_instance_id = str(uuid4())
 
 
 def _bines_status_ws_url(base_url: str, secret_token: str) -> str | None:
@@ -59,14 +66,51 @@ def _status_ws_worker(base_url: str, secret_token: str):
         time.sleep(5)
 
 
+def _status_mcp_worker():
+    had_error = False
+    while not _status_stop.is_set():
+        try:
+            call_ark("ark_heartbeat", {"instance_id": _instance_id, "online": True})
+            if had_error:
+                print("[Thinking] Ark MCP 在线状态已恢复", flush=True)
+            had_error = False
+        except ArkMcpError as error:
+            if not had_error:
+                print(f"[Thinking] Ark MCP 状态续租失败 ({error.code})，不会回落旧 WebSocket", flush=True)
+            had_error = True
+        _status_stop.wait(30)
+    # Release this instance only. If unreachable, the 90s lease expires.
+    try:
+        call_ark("ark_heartbeat", {"instance_id": _instance_id, "online": False})
+    except ArkMcpError:
+        pass
+
+
+def stop_status_stream():
+    _status_stop.set()
+    if _status_ws_thread and _status_ws_thread.is_alive():
+        _status_ws_thread.join(timeout=1)
+
+
+atexit.register(stop_status_stream)
+
+
 def ensure_status_stream_started(base_url: str, secret_token: str):
-    """启动 Bines 在线状态 WebSocket 连接（若尚未启动）。"""
+    """沿用运行时入口：已配置 MCP 则续租，否则显式启用旧 WebSocket。"""
     global _status_ws_thread
-    if _status_ws_thread is not None and _status_ws_thread.is_alive():
-        return
-    _status_ws_thread = threading.Thread(
-        target=_status_ws_worker,
-        args=(base_url, secret_token),
-        daemon=True,
-    )
-    _status_ws_thread.start()
+    with _status_lock:
+        if _status_ws_thread is not None and _status_ws_thread.is_alive():
+            return
+        try:
+            use_mcp = mcp_config() is not None
+        except ArkMcpError as error:
+            print(f"[Thinking] {error}", flush=True)
+            return
+        _status_stop.clear()
+        print(f"[Thinking] Ark 状态模式：{'MCP 租约' if use_mcp else 'legacy WebSocket'}", flush=True)
+        _status_ws_thread = threading.Thread(
+            target=_status_mcp_worker if use_mcp else _status_ws_worker,
+            args=() if use_mcp else (base_url, secret_token),
+            name="ark-presence", daemon=True,
+        )
+        _status_ws_thread.start()

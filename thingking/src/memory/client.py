@@ -49,8 +49,10 @@ class MemoryClient:
             return False
 
     # ---------- conversation ----------
-    def record_turn(self, envelope: Dict[str, Any], user_text: str = "", assistant_text: str = "") -> Dict[str, Any]:
-        return self.call("record_turn", envelope=envelope, user_text=user_text, assistant_text=assistant_text)
+    def record_turn(self, envelope: Dict[str, Any], user_text: str = "", assistant_text: str = "",
+                    state_update: bool = True) -> Dict[str, Any]:
+        return self.call("record_turn", envelope=envelope, user_text=user_text,
+                         assistant_text=assistant_text, state_update=state_update)
 
     def record_message(self, envelope: Dict[str, Any], role: str, content: str) -> Dict[str, Any]:
         return self.call("record_message", envelope=envelope, role=role, content=content)
@@ -61,20 +63,35 @@ class MemoryClient:
     def get_state(self, scope: str = "owner") -> Dict[str, Any]:
         return self.call("get_state", scope=scope)
 
-    def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None) -> Dict[str, Any]:
-        return self.call("put_state", scope=scope, data=data, expected_version=expected_version)
+    def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
+                  source_ref: Optional[str] = None) -> Dict[str, Any]:
+        return self.call("put_state", scope=scope, data=data, expected_version=expected_version,
+                         **({"source_ref": source_ref} if source_ref else {}))
 
     def activity_snapshot(self, limit: int = 10) -> Dict[str, Any]:
         return self.call("activity_snapshot", limit=limit, timeout_ms=5000)
 
+    def life_snapshot(self, scope: str = "owner") -> Dict[str, Any]:
+        return self.call("life_snapshot", scope=scope)
+
+    def regulate_life(self, scope: str, mode: str, duration_minutes: int,
+                      reason: str, source_ref: str) -> Dict[str, Any]:
+        return self.call("regulate_life", scope=scope, mode=mode,
+                         duration_minutes=duration_minutes, reason=reason,
+                         source_ref=source_ref)
+
     # ---------- consolidation ----------
-    def claim_job(self) -> Optional[Dict[str, Any]]:
-        return self.call("claim_job")
+    def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
+        return self.call("claim_job", **({"kinds": list(kinds)} if kinds else {}))
+
+    def complete_state_update(self, job_id: int, changes: Dict[str, Any],
+                              expected_version: Optional[int] = None) -> Dict[str, Any]:
+        return self.call("complete_state_update", job_id=job_id, changes=changes, expected_version=expected_version)
 
     def complete_summary(self, job_id: int, summary: str, tags: Sequence[str], facts: Sequence[Dict[str, Any]],
-                         importance: float) -> Dict[str, Any]:
+                         importance: float, retrieval: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.call("complete_summary", job_id=job_id, summary=summary, tags=list(tags), facts=list(facts),
-                         importance=importance)
+                         importance=importance, **({"retrieval": retrieval} if retrieval else {}))
 
     def complete_diary(self, job_id: int, text: str) -> Dict[str, Any]:
         return self.call("complete_diary", job_id=job_id, text=text)
@@ -89,8 +106,16 @@ class MemoryClient:
     def list_memories(self, **filters: Any) -> Dict[str, Any]:
         return self.call("list_memories", **filters)
 
-    def search(self, query: str, scopes: Sequence[str], kinds: Optional[Sequence[str]] = None, k: int = 10) -> List[Dict[str, Any]]:
-        return self.call("search", query=query, scopes=list(scopes), kinds=list(kinds) if kinds else None, k=k)
+    def search(self, query: str, scopes: Sequence[str], kinds: Optional[Sequence[str]] = None, k: int = 10,
+               as_of: Optional[float] = None, include_history: bool = False) -> List[Dict[str, Any]]:
+        return self.call("search", query=query, scopes=list(scopes), kinds=list(kinds) if kinds else None,
+                         k=k, as_of=as_of, include_history=include_history)
+
+    def state_history(self, scope="owner", as_of=None, limit=20):
+        return self.call("state_history", scope=scope, as_of=as_of, limit=limit)
+
+    def facts(self, scope="owner", subject=None, predicate=None, as_of=None, limit=20):
+        return self.call("facts", scope=scope, subject=subject, predicate=predicate, as_of=as_of, limit=limit)
 
     def get_memory(self, memory_id: str) -> Optional[Dict[str, Any]]:
         return self.call("get_memory", memory_id=memory_id)

@@ -5,12 +5,9 @@ import os
 import json
 import threading
 from pathlib import Path
-from vlm_client import call_dashscope_vlm as _call_dashscope_vlm
+from vlm_client import call_vision
 from config import (
-    DASHSCOPE_API_URL,
-    DASHSCOPE_API_KEY,
-    DASHSCOPE_VISION_MODEL,
-    DASHSCOPE_API_TIMEOUT,
+    DEEPSEEK_API_KEY,
     require_env,
 )
 
@@ -209,8 +206,8 @@ def get_screen_info(simple_recognition=True, only_mouse_area=False, focus_descri
         screenshot.save(buff, format="JPEG", quality=jpeg_quality, optimize=True)
         img_b64 = base64.b64encode(buff.getvalue()).decode('utf-8')
         
-        # 5. 调用 DashScope VLM（统一走 vlm_client 封装）
-        api_key = require_env("DASHSCOPE_API_KEY", DASHSCOPE_API_KEY)
+        # 5. 统一 DeepSeek 视觉入口，保留原截图与坐标网格逻辑。
+        api_key = require_env("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY)
         
         # 提示词：明确网格数字就是真实坐标
         scale_info = ""
@@ -234,15 +231,12 @@ def get_screen_info(simple_recognition=True, only_mouse_area=False, focus_descri
             scale_info = ""
         
         enhanced_prompt = f"{prompt_text}\n\n{scale_info}"
-        description = _call_dashscope_vlm(
+        description = call_vision(
             img_b64,
             enhanced_prompt,
-            api_url=DASHSCOPE_API_URL,
             api_key=api_key,
-            model=DASHSCOPE_VISION_MODEL,
-            timeout=DASHSCOPE_API_TIMEOUT,
             proxies={"http": None, "https": None},
-            missing_key_message="Error: Missing DASHSCOPE_API_KEY",
+            missing_key_message="Error: 请在 .env 中配置 DEEPSEEK_API_KEY",
             empty_message="VLM response parsing error.",
         )
 

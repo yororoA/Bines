@@ -1,8 +1,4 @@
-"""
-记忆状态更新工具
-更新管理员（owner）作用域的动态状态：地点、好感度、物品、任务、角色状态、记忆亮点等。
-状态保存在 Memory Server 的 SQLite 中，通过版本号做乐观并发控制。
-"""
+"""Update scoped dynamic state through the Memory Server, with optimistic concurrency."""
 import copy
 
 from .dependencies import deps
@@ -11,96 +7,115 @@ OWNER_SCOPE = "owner"
 _MAX_CONFLICT_RETRIES = 3
 
 
-def _apply_changes(state, *, current_location, relationship_delta, add_item, remove_item, active_quest,
-                   current_time, npc_name, npc_attire, npc_visual_status, npc_activity, add_memory_highlight,
-                   remove_memory_highlight, important_thing):
-    s = copy.deepcopy(state)
-    if current_time is not None:
-        s["current_time"] = current_time
-    if current_location is not None:
-        s["current_location"] = current_location
-    if active_quest is not None:
-        s["active_quest"] = active_quest
-    if important_thing is not None:
-        s["important_thing"] = important_thing
-    # 关系/好感度只通过 relationship_delta 更新；等级与分布由 apply_relationship_delta 计算
+def search_memory(query: str, k: int = 8):
+    """主动检索当前会话可见的历史记忆；关键词可用人名、物品、歌曲或事件。"""
+    from tools.context import CURRENT_CONTEXT
+    identity = CURRENT_CONTEXT.get().identity
+    if identity.local:
+        client = deps.memory_client
+    else:
+        from chatBot.memory_hub import GatewayMemoryClient
+        client = GatewayMemoryClient()
+    if client is None:
+        raise RuntimeError("记忆服务未就绪")
+    k = max(1, min(int(k), 20))
+    hits = client.search(query, [identity.scope], k=k)
+    return [{
+        "content": hit["content"], "kind": hit["kind"], "day_key": hit.get("day_key"),
+        "evidence": [
+            {"source_type": ev.get("source_type"), "source_ref": ev.get("source_ref"),
+             "role": ev.get("role"), "content": ev.get("content"), "ts": ev.get("ts"),
+             "action": ev.get("action"), "status": ev.get("status"), "urls": ev.get("urls", [])}
+            for ev in (hit.get("evidence") or [])[:3]
+        ],
+    } for hit in hits]
+
+
+def _apply_changes(state, *, current_location=None, relationship_delta=None, add_item=None, remove_item=None,
+                   active_quest=None, current_time=None, npc_name=None, npc_attire=None, npc_visual_status=None,
+                   npc_activity=None, add_memory_highlight=None, remove_memory_highlight=None, important_thing=None):
+    state = copy.deepcopy(state)
+    for key, value in (("current_time", current_time), ("current_location", current_location),
+                       ("active_quest", active_quest), ("important_thing", important_thing)):
+        if value is not None:
+            state[key] = value
     if relationship_delta is not None:
         from relationship_state import apply_relationship_delta
-
-        new_score, new_level, weights = apply_relationship_delta(
-            current_score=int(s.get("relationship_score", 0) or 0),
-            delta=int(relationship_delta),
+        score, level, weights = apply_relationship_delta(
+            current_score=int(state.get("relationship_score", 0) or 0), delta=relationship_delta,
         )
-        s["relationship_score"] = new_score
-        s["relationship_level"] = new_level
-        s["relationship_distribution"] = weights
-
-    inventory = list(s.get("inventory") or [])
+        state.update(relationship_score=score, relationship_level=level, relationship_distribution=weights)
+    inventory = list(state.get("inventory") or [])
     if add_item and add_item not in inventory:
         inventory.append(add_item)
     if remove_item and remove_item in inventory:
         inventory.remove(remove_item)
-    s["inventory"] = inventory
-
-    npc = dict(s.get("npc_state") or {})
+    state["inventory"] = inventory
+    npc = dict(state.get("npc_state") or {})
     for key, value in (("name", npc_name), ("attire", npc_attire),
                        ("visual_module_status", npc_visual_status), ("current_activity", npc_activity)):
         if value is not None:
             npc[key] = value
-    s["npc_state"] = npc
-
-    highlights = list(s.get("memory_highlights") or [])
+    state["npc_state"] = npc
+    highlights = list(state.get("memory_highlights") or [])
     if add_memory_highlight and add_memory_highlight not in highlights:
         highlights.append(add_memory_highlight)
     if remove_memory_highlight and remove_memory_highlight in highlights:
         highlights.remove(remove_memory_highlight)
-    s["memory_highlights"] = highlights
-    return s
+    state["memory_highlights"] = highlights
+    return state
 
 
-def update_status(current_location=None,
-                  relationship_level=None,
-                  relationship_delta: int | None = None,
-                  add_item: str | None = None,
-                  remove_item: str | None = None,
-                  active_quest: str | None = None,
-                  current_time: str | None = None,
-                  npc_name: str | None = None,
-                  npc_attire: str | None = None,
-                  npc_visual_status: str | None = None,
-                  npc_activity: str | None = None,
-                  add_memory_highlight: str | None = None,
-                  remove_memory_highlight: str | None = None,
-                  important_thing: str | None = None):
-    """
-    更新动态状态记忆。由本地 SkillRunner 按文本协议分发调用。
-    relationship_level 仅为兼容旧调用而保留，会被忽略；关系变化请使用 relationship_delta。
-    """
-    client = deps.memory_client
+def update_status(current_location=None, relationship_level=None, relationship_delta: int | None = None,
+                  add_item: str | None = None, remove_item: str | None = None, active_quest: str | None = None,
+                  current_time: str | None = None, npc_name: str | None = None, npc_attire: str | None = None,
+                  npc_visual_status: str | None = None, npc_activity: str | None = None,
+                  add_memory_highlight: str | None = None, remove_memory_highlight: str | None = None,
+                  important_thing: str | None = None, expected_version: int | None = None,
+                  expected_state: dict | None = None):
+    """relationship_level is retained for old callers; use relationship_delta for changes."""
+    from tools.context import CURRENT_CONTEXT
+    identity = CURRENT_CONTEXT.get().identity
+    if identity.local:
+        client = deps.memory_client
+        scope = OWNER_SCOPE
+    else:
+        from chatBot.memory_hub import GatewayMemoryClient
+        client = GatewayMemoryClient()
+        scope = identity.state_scope
     if client is None:
         return "Dynamic memory is not available."
     try:
         delta = int(relationship_delta) if relationship_delta is not None else None
     except (TypeError, ValueError):
         return f"状态更新失败：relationship_delta 必须是整数（收到 {relationship_delta!r}）。"
-
     last_error = ""
+    context = CURRENT_CONTEXT.get()
+    if context.journal and context.identity.local:
+        source_ref = context.journal.prefix + ":user" if not context.autonomous else context.journal.prefix + ":turn"
+    else:
+        source_ref = None
     for _ in range(_MAX_CONFLICT_RETRIES):
-        current = client.get_state(OWNER_SCOPE)
+        current = client.get_state(scope)
+        if expected_version is not None and expected_version != current.get("version"):
+            return "状态更新失败：状态已被其他线程更新，请重新读取后再操作"
         updated = _apply_changes(
-            current.get("data") or {},
-            current_location=current_location, relationship_delta=delta, add_item=add_item,
-            remove_item=remove_item, active_quest=active_quest, current_time=current_time, npc_name=npc_name,
-            npc_attire=npc_attire, npc_visual_status=npc_visual_status, npc_activity=npc_activity,
+            current.get("data") or {}, current_location=current_location, relationship_delta=delta,
+            add_item=add_item, remove_item=remove_item, active_quest=active_quest, current_time=current_time,
+            npc_name=npc_name, npc_attire=npc_attire, npc_visual_status=npc_visual_status, npc_activity=npc_activity,
             add_memory_highlight=add_memory_highlight, remove_memory_highlight=remove_memory_highlight,
             important_thing=important_thing,
         )
         try:
-            result = client.put_state(OWNER_SCOPE, updated, expected_version=current.get("version"))
+            result = client.put_state(scope, updated, expected_version=current.get("version"),
+                                      **({"source_ref": source_ref} if source_ref else {}))
         except RuntimeError as exc:
             if "StateConflict" not in str(exc):
                 raise
             last_error = str(exc)
             continue
-        return f"动态状态已更新 (版本: {current.get('version')} -> {result['version']})"
+        warnings = [f"警告：{key} 与预期状态不符" for key, value in (expected_state or {}).items()
+                    if key in updated and updated[key] != value]
+        return (f"动态状态已更新 (版本: {current.get('version')} -> {result['version']})"
+                + ("\n" + "\n".join(warnings) if warnings else ""))
     return f"状态更新失败：状态被并发修改，重试 {_MAX_CONFLICT_RETRIES} 次仍冲突（{last_error}）。"

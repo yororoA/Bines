@@ -1,0 +1,31 @@
+name: bines-napcat
+services:
+  napcat:
+    image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    environment:
+      MODE: ws
+      ACCOUNT: ${NAPCAT_ACCOUNT:-}
+      NAPCAT_UID: ${NAPCAT_UID:-1000}
+      NAPCAT_GID: ${NAPCAT_GID:-1000}
+    ports:
+      - "127.0.0.1:${NAPCAT_WS_PORT:-6101}:3001"
+      - "127.0.0.1:${NAPCAT_WEBUI_PORT:-6099}:6099"
+    volumes:
+      - ./data/qq:/app/.config/QQ
+      - ./data/config:/app/napcat/config
+      - ./data/plugins:/app/napcat/plugins
+      - ./data/media:/bines-media
+    networks:
+      - napcat
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256m
+networks:
+  napcat:
+    driver: bridge

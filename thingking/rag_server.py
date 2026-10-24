@@ -20,6 +20,8 @@ from memory.server import serve  # noqa: E402
 
 
 def _notify_ready() -> None:
+    from common.service_ready import mark_ready
+    mark_ready("RAG Server")
     try:
         from common.module_ready import notify_module_ready
 

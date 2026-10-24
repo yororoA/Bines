@@ -7,6 +7,9 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
+from common.clock import timezone
+
+ZONE = timezone()
 
 CHANNEL_LOCAL = "local"
 CHANNEL_QQ_PRIVATE = "qq_private"
@@ -48,7 +51,7 @@ def content_hash(text: str) -> str:
 
 def day_key(ts: Optional[float] = None, day_start_hour: int = 4) -> str:
     """Calendar day for memory purposes; the day rolls over at ``day_start_hour`` (default 04:00)."""
-    dt = datetime.fromtimestamp(time.time() if ts is None else float(ts))
+    dt = datetime.fromtimestamp(time.time() if ts is None else float(ts), ZONE)
     if dt.hour < day_start_hour:
         dt -= timedelta(days=1)
     return dt.strftime("%Y-%m-%d")
@@ -58,12 +61,12 @@ def actor_for_qq(user_id: Any) -> str:
     return f"qq:{user_id}"
 
 
-def group_scope(group_id: Any) -> str:
-    return f"{CHANNEL_QQ_GROUP}:{group_id}"
+def group_scope(group_id: Any, account: str = "") -> str:
+    return f"qq:{account}:group:{group_id}" if account else f"{CHANNEL_QQ_GROUP}:{group_id}"
 
 
-def private_scope(user_id: Any) -> str:
-    return f"{CHANNEL_QQ_PRIVATE}:{user_id}"
+def private_scope(user_id: Any, account: str = "") -> str:
+    return f"qq:{account}:private:{user_id}" if account else f"{CHANNEL_QQ_PRIVATE}:{user_id}"
 
 
 @dataclass
@@ -81,6 +84,7 @@ class ConversationEnvelope:
     actor_name: str = ""
     external_user_id: str = ""
     external_group_id: str = ""
+    external_account_id: str = ""
     owner_identity: bool = False
     scope: str = ""
     visibility: str = VISIBILITY_PRIVATE

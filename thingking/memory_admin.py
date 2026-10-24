@@ -33,17 +33,27 @@ def _server_running() -> bool:
     from config import ZMQ_HOST, ZMQ_PORTS
     from memory.client import MemoryClient
 
-    return MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"]).ping(timeout_ms=1500)
+    if MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"]).ping(timeout_ms=1500):
+        return True
+    from chatBot.memory_hub import GatewayMemoryClient
+    return GatewayMemoryClient().ping(timeout_ms=1500)
 
 
-def _open_service():
-    from memory.embedding import load_embedder
+def _open_service(lexical=False):
     from memory.service import MemoryService
-    from memory.vector_index import VectorIndex
 
     settings = load_settings()
+    from chatBot.store import prepare_gateway_database
+    prepare_gateway_database(settings.data_dir)
     repo = MemoryRepository(settings.db_path)
-    service = MemoryService(repo, VectorIndex(settings.index_dir, load_embedder()), settings)
+    if lexical:
+        from memory.lexical_index import LexicalIndex
+        index = LexicalIndex(repo)
+    else:
+        from memory.embedding import load_embedder
+        from memory.vector_index import VectorIndex
+        index = VectorIndex(settings.index_dir, load_embedder())
+    service = MemoryService(repo, index, settings)
     service.sync_identities()
     return service
 
@@ -79,7 +89,7 @@ def cmd_migrate(args) -> int:
         return 1
     print(f"旧数据快照：{snapshot}")
 
-    service = _open_service()
+    service = _open_service(lexical=args.lexical)
     migrator = migration.LegacyMigrator(service.repo, settings.owner_qq_ids, settings.day_start_hour)
     report = migrator.run(snapshot)
     print("导入结果：", json.dumps(report.to_dict(), ensure_ascii=False, indent=1))
@@ -102,6 +112,9 @@ def cmd_migrate(args) -> int:
 
 
 def cmd_verify(args) -> int:
+    if _server_running():
+        print("Memory Server 或 QQ 网关正在运行：请先停止记忆服务及其客户端再执行离线校验。")
+        return 2
     service = _open_service()
     verification = migration.verify_migration(service.repo, {})
     recall = _recall_check(service, sample_size=50)
@@ -118,6 +131,15 @@ def cmd_rebuild(args) -> int:
 
 
 def cmd_stats(args) -> int:
+    if _server_running():
+        from chatBot.memory_hub import GatewayMemoryClient
+        from memory.client import MemoryClient
+        from config import ZMQ_HOST, ZMQ_PORTS
+        remote = MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
+        if not remote.ping(timeout_ms=1500):
+            remote = GatewayMemoryClient()
+        print(json.dumps(remote.stats(), ensure_ascii=False, indent=1))
+        return 0
     settings = load_settings()
     repo = MemoryRepository(settings.db_path)
     print(json.dumps(repo.stats(), ensure_ascii=False, indent=1))
@@ -146,6 +168,7 @@ def main() -> int:
     migrate = sub.add_parser("migrate")
     migrate.add_argument("--source", help="旧文件目录，默认 thingking/src")
     migrate.add_argument("--keep-originals", action="store_true", help="校验通过后不删除原位置的旧文件")
+    migrate.add_argument("--lexical", action="store_true", help="使用词面索引导入，不加载嵌入模型")
     migrate.set_defaults(func=cmd_migrate)
     sub.add_parser("verify").set_defaults(func=cmd_verify)
     sub.add_parser("rebuild-index").set_defaults(func=cmd_rebuild)

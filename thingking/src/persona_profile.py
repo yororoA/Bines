@@ -1,6 +1,7 @@
 """Load ``thingking/persona/persona.yaml`` (the only persona source) and render it for prompts and docs."""
 from __future__ import annotations
 
+import math
 import threading
 from pathlib import Path
 from typing import Any, Dict, List
@@ -80,6 +81,80 @@ def output_rules(persona: Dict[str, Any] | None = None) -> str:
     return "--- 回复格式（必须遵守） ---\n" + _numbered(p["output_format"])
 
 
+def qq_output_rules(persona: Dict[str, Any] | None = None) -> str:
+    p = persona or load_persona()
+    rules = p.get("qq_output_format") or p["output_format"]
+    return "--- QQ 回复格式（必须遵守） ---\n" + _numbered(rules)
+
+
+def relationship_level(state: Dict[str, Any]) -> str:
+    """Honor the current turn's sample; use score membership outside a turn."""
+    sampled_level = state.get("relationship_turn_level")
+    if sampled_level:
+        return str(sampled_level)
+    score = state.get("relationship_score")
+    if score is not None and not isinstance(score, bool):
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if math.isfinite(score):
+                from relationship_state import compute_relationship_weights
+
+                weights = compute_relationship_weights(score)
+                return max(weights, key=weights.get)
+    return str(state.get("relationship_level") or "")
+
+
+def relationship_guard(state: Dict[str, Any], persona: Dict[str, Any] | None = None) -> str:
+    """Render behavior for the relationship visible in the current conversation."""
+    p = persona or load_persona()
+    voice = p.get("relationship_voice") or {}
+    level = relationship_level(state)
+    policy = (voice.get("levels") or {}).get(level)
+    if not policy:
+        return ""
+    parts = [
+        f"--- 本轮关系口吻：{level} ---",
+        _bullets(voice.get("directives") or []),
+        policy["tone"],
+    ]
+    for row in policy.get("examples") or []:
+        parts.append(f"- 用户：{row['user']}\n  碧波：{row['assistant']}")
+    return "\n".join(parts)
+
+
+def _guard(persona: Dict[str, Any] | None, rules: str, relationship: str = "") -> str:
+    p = persona or load_persona()
+    guard = p["voice_guard"]
+    examples = "\n".join(
+        f"- 用户：{row['user']}\n  碧波：{row['assistant']}"
+        for row in guard["examples"]
+    )
+    return "\n".join(part for part in [
+        "--- 本轮角色口吻（高优先级） ---",
+        _bullets(guard["directives"]),
+        "以下示例只约束语气，不要照抄内容：",
+        examples,
+        relationship,
+        rules,
+        "直接以碧波的口吻回答，不要输出开场白、推理过程或 Markdown。",
+    ] if part)
+
+
+def style_guard(persona: Dict[str, Any] | None = None, *, state: Dict[str, Any] | None = None) -> str:
+    """High-priority voice reminder placed immediately before the current turn."""
+    p = persona or load_persona()
+    return _guard(p, output_rules(p), relationship_guard(state or {}, p))
+
+
+def qq_style_guard(persona: Dict[str, Any] | None = None, *, state: Dict[str, Any] | None = None) -> str:
+    """QQ-specific style: shorter, fewer punctuation marks and segmented long replies."""
+    p = persona or load_persona()
+    return _guard(p, qq_output_rules(p), relationship_guard(state or {}, p))
+
+
 def brief(persona: Dict[str, Any] | None = None) -> str:
     """Short personality summary for side tasks (e.g. proactive-chat judgement)."""
     p = persona or load_persona()
@@ -112,8 +187,19 @@ def render_markdown(persona: Dict[str, Any] | None = None) -> str:
         "```text",
         character_prompt(p),
         "",
-        output_rules(p),
+        style_guard(p),
+        "",
+        qq_style_guard(p),
         "```",
+        "",
+        "## 对话关系口吻（按当前会话的好感度）",
+        "",
+        _bullets((p.get("relationship_voice") or {}).get("directives") or []),
+        "",
+        *[
+            f"- **{level}**：{policy['tone']}"
+            for level, policy in (p.get("relationship_voice") or {}).get("levels", {}).items()
+        ],
         "",
         "## 主动发言心情（按关系等级）",
         "",

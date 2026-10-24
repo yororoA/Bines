@@ -15,6 +15,8 @@
 
 ## 环境
 
+推荐通过根目录 `python install.py --only singing` 安装分离/混音环境；NVIDIA 环境可加 `--device cuda`。安装器会补齐未设置的 `SINGING_PYTHON`，默认使用 `singing/singing_venv`，无需手动激活。so-vits-svc 整合包和个人音色模型仍需单独准备。下方手动安装命令保留供已有独立工作目录参考。
+
 `.env` 中配置：
 
 ```

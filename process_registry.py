@@ -1,16 +1,26 @@
 import os
+import sys
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 from config import GPT_SOVITS_DIR, HTTP_PORTS, ROOT_DIR, TTS_HTTP_BASE_URL, ZMQ_PORTS
+from runtime_environments import SERVICE_ENVIRONMENTS, service_python
 
 THINKING_STARTUP_DEPENDENCIES = frozenset({
     "Display",
     "Speaking",
     "Visual",
-    "RAG Server",
     "Hearing",
+    "RAG Server",
 })
+DOCKER_MANAGED = frozenset({
+    "ChatBot", "QQ Thinking", "Memory Worker", "RAG Server", "RAG Web",
+})
+
+
+def docker_mode() -> bool:
+    """When set, the compose chain owns QQ and memory services."""
+    return os.environ.get("BINES_DOCKER_MODE") == "1"
 
 
 def _gpt_sovits_process() -> Optional[Dict[str, object]]:
@@ -38,11 +48,16 @@ def _gpt_sovits_process() -> Optional[Dict[str, object]]:
     }
 
 
-def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]]:
+def get_processes(display_script: str = "gui_display.py", profile: str | None = None) -> List[Dict[str, object]]:
     """返回模块进程配置列表。通过 display_script 区分 Web/控制台显示模块入口。"""
     root = str(ROOT_DIR)
+    profile = profile or os.environ.get("BINES_PROFILE", "full")
+    if profile not in {"full", "chatbot"}:
+        raise ValueError("BINES_PROFILE 必须为 full 或 chatbot")
     tts_service = _gpt_sovits_process()
-    return [*([tts_service] if tts_service else []),
+    if GPT_SOVITS_DIR and not tts_service and profile == "full":
+        raise ValueError("GPT_SOVITS_DIR 缺少 runtime/python.exe 或 api_v2.py")
+    rows = [*([tts_service] if tts_service else []),
         {
             "name": "ZMQ Bus",
             "script": os.path.join(root, "common", "zmq_bus_server.py"),
@@ -55,7 +70,8 @@ def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]
             "script": os.path.join(root, "server", "classification_server.py"),
             "interpreter": os.path.join(root, "server", "server_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "server"),
-            "ports": [ZMQ_PORTS["MODULE_READY_REP"]],
+            # Managed startup uses readiness markers instead of the legacy RPC.
+            "ports": [],
         },
         {
             "name": "Display",
@@ -107,12 +123,71 @@ def get_processes(display_script: str = "gui_display.py") -> List[Dict[str, str]
             "script": os.path.join(root, "thingking", "src", "handle_zmq.py"),
             "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "thingking", "src"),
-            "ports": [ZMQ_PORTS["START_THINKING_REP"]],
+            "ports": [],
         },
         {
             "name": "ChatBot",
             "script": os.path.join(root, "chatBot", "main.py"),
             "interpreter": os.path.join(root, "server", "server_venv", "Scripts", "python.exe"),
             "cwd": os.path.join(root, "chatBot"),
+            "ports": [int(os.environ.get("BINES_QQ_GATEWAY_PORT", "6102"))],
+        },
+        {
+            "name": "QQ Thinking",
+            "script": os.path.join(root, "thingking", "qq_thinking.py"),
+            "interpreter": sys.executable,
+            "cwd": root,
+        },
+        {
+            "name": "Memory Worker",
+            "script": os.path.join(root, "thingking", "consolidation_worker.py"),
+            "interpreter": sys.executable,
+            "cwd": root,
+            "ports": [],
+        },
+        {
+            "name": "Realtime Screen",
+            "script": os.path.join(root, "realtime_screen_analysis_standalone.py"),
+            "interpreter": os.path.join(root, "thingking", "thinking_venv", "Scripts", "python.exe"),
+            "cwd": root,
         },
     ]
+    if profile == "chatbot":
+        rows = [row for row in rows if row["name"] in {"ChatBot", "QQ Thinking", "Memory Worker"}]
+    if docker_mode():
+        rows = [row for row in rows if row["name"] not in DOCKER_MANAGED]
+    dependencies = {
+        "Classification": ["ZMQ Bus"],
+        "Display": ["ZMQ Bus"],
+        "Speaking": ["ZMQ Bus"] + (["GPT-SoVITS"] if tts_service else []),
+        "Visual": ["ZMQ Bus"],
+        "Hearing": ["ZMQ Bus"],
+        "Thinking": ["Classification", "Display", "Speaking", "Visual", "Hearing", "RAG Server"],
+        "ChatBot": ["RAG Server"] if profile == "full" else [],
+        "RAG Web": ["RAG Server"],
+        "Bored Detector": ["Thinking"],
+        "QQ Thinking": ["ChatBot"],
+        "Memory Worker": ["ChatBot"],
+        "Realtime Screen": ["Thinking"],
+    }
+    for row in rows:
+        name = row["name"]
+        row["depends_on"] = dependencies.get(name, [])
+        if docker_mode():
+            row["depends_on"] = [item for item in row["depends_on"] if item not in DOCKER_MANAGED]
+        row["autostart"] = name != "RAG Web"
+        if name == "Realtime Screen":
+            from realtime_screen_config import load_realtime_screen_config
+            row["autostart"] = bool(load_realtime_screen_config(
+                ROOT_DIR / "server" / "realtime_screen_config.json"
+            ).get("enabled", False))
+        row["optional"] = name in {"RAG Web", "Bored Detector", "Realtime Screen", "Memory Worker"}
+        row["readiness"] = "http" if name in {"RAG Web", "GPT-SoVITS"} else "marker"
+        row["ready_timeout"] = 600 if name in {"Visual", "Hearing", "RAG Server"} else 120
+        if name == "RAG Web":
+            row["ready_url"] = f"http://127.0.0.1:{HTTP_PORTS['RAG_MEMORY']}/"
+        if name == "GPT-SoVITS":
+            row["ready_url"] = TTS_HTTP_BASE_URL.rstrip("/") + "/openapi.json"
+        if name in SERVICE_ENVIRONMENTS:
+            row["interpreter"] = service_python(name, ROOT_DIR)
+    return rows

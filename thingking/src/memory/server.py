@@ -14,13 +14,21 @@ RPC_METHODS = (
     "ping",
     "record_turn",
     "record_message",
+    "record_experience",
+    "complete_experience_summary",
+    "import_gateway_snapshot",
     "build_context",
     "get_state",
+    "state_history",
+    "facts",
     "put_state",
     "activity_snapshot",
+    "life_snapshot",
+    "regulate_life",
     "claim_job",
     "complete_summary",
     "complete_diary",
+    "complete_state_update",
     "fail_job",
     "reconcile_index",
     "rebuild_index",
@@ -57,6 +65,8 @@ def build_service() -> MemoryService:
     from .vector_index import VectorIndex
 
     settings = load_settings()
+    from chatBot.store import prepare_gateway_database
+    prepare_gateway_database(settings.data_dir)
     repo = MemoryRepository(settings.db_path)
     index = VectorIndex(settings.index_dir, load_embedder())
     service = MemoryService(repo, index, settings)

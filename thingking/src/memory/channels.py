@@ -42,17 +42,19 @@ def local_envelope(content: str = "", owner_name: str = "", timestamp: Optional[
 def qq_envelope(qq_context: Dict[str, Any], content: str = "", timestamp: Optional[float] = None) -> ConversationEnvelope:
     user_id = str(qq_context.get("user_id") or "").strip()
     group_id = str(qq_context.get("group_id") or "").strip()
+    account = str(qq_context.get("self_id") or qq_context.get("account") or "").strip()
     if group_id in ("", "0", "None"):
         group_id = ""
     is_group = bool(group_id)
     return ConversationEnvelope(
         source="qq",
         channel_type=CHANNEL_QQ_GROUP if is_group else CHANNEL_QQ_PRIVATE,
-        conversation_id=group_scope(group_id) if is_group else private_scope(user_id),
+        conversation_id=group_scope(group_id, account) if is_group else private_scope(user_id, account),
         actor_id=actor_for_qq(user_id),
         actor_name=str(qq_context.get("sender_name") or qq_context.get("sender") or ""),
         external_user_id=user_id,
         external_group_id=group_id,
+        external_account_id=account,
         is_admin=bool(qq_context.get("is_admin")),
         timestamp=time.time() if timestamp is None else float(timestamp),
         content=content,

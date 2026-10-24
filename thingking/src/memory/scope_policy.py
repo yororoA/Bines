@@ -48,28 +48,29 @@ def resolve(envelope: ConversationEnvelope, lookup_identity: IdentityLookup) -> 
         return resolved
 
     user_id = str(resolved.external_user_id or "").strip()
+    account = str(resolved.external_account_id or "").strip()
     linked = lookup_identity("qq", user_id) if user_id else None
     resolved.owner_identity = linked == OWNER_ACTOR
 
     if channel == CHANNEL_QQ_PRIVATE:
         if not user_id:
             raise ScopeError("qq_private envelope requires external_user_id")
-        resolved.conversation_id = private_scope(user_id)
+        resolved.conversation_id = private_scope(user_id, account)
         resolved.visibility = VISIBILITY_PRIVATE
         if resolved.owner_identity:
             resolved.actor_id = OWNER_ACTOR
             resolved.scope = OWNER_SCOPE
         else:
             resolved.actor_id = actor_for_qq(user_id)
-            resolved.scope = private_scope(user_id)
+            resolved.scope = private_scope(user_id, account)
         return resolved
 
     if channel == CHANNEL_QQ_GROUP:
         group_id = str(resolved.external_group_id or "").strip()
         if not group_id:
             raise ScopeError("qq_group envelope requires external_group_id")
-        resolved.conversation_id = group_scope(group_id)
-        resolved.scope = group_scope(group_id)
+        resolved.conversation_id = group_scope(group_id, account)
+        resolved.scope = group_scope(group_id, account)
         resolved.visibility = VISIBILITY_GROUP
         resolved.actor_id = actor_for_qq(user_id) if user_id else "qq:unknown"
         return resolved

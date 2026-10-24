@@ -129,9 +129,13 @@ class MigrationTest(unittest.TestCase):
         group_hits = self.fx.service.search("群友在聊游戏", [OWNER_SCOPE], k=5)
         self.assertNotIn("群友在聊游戏", "".join(h["content"] for h in group_hits))
 
-    def test_legacy_episodes_do_not_trigger_diaries(self):
+    def test_legacy_episodes_can_fill_missing_historical_diaries(self):
         self.fx.clock.advance(400 * 86400)
-        self.assertEqual(self.fx.service.enqueue_due_diaries(), 0)
+        self.assertEqual(self.fx.service.enqueue_due_diaries(), 1)
+        claimed = self.fx.service.claim_job(kinds=["diary"])
+        self.assertEqual(claimed["job"]["kind"], "diary")
+        self.assertNotEqual(claimed["materials"]["day_key"], self.fx.service._day(self.fx.clock()))
+        self.assertEqual(claimed["materials"]["state"], {})
 
 
 if __name__ == "__main__":

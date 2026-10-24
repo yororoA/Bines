@@ -1,20 +1,59 @@
-__pycache__
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
 .idea
 envs
 .venv/
+venv/
+*_venv/
+.tools/cache/
+.tools/docker/
+.tools/buildx/
+.tools/install.lock
+.tools/python/
+.tools/installer/
+.tools/downloads/
+.tools/memory_export/
+.tools/memory-repair-*/
+.tools/agent-browser/
+singing/singing_venv/
 voiceprints
 /model
 ffmpeg-N-122425-g21a3e44fbe-win64-gpl-shared
 server_venv
 static
 *.zip
-config.py
+# Credentials live in .env; config.py contains only environment-backed defaults.
+config.local.py
 hotwords.txt
 list_devices.py
 hearing/t.py
 realtime_screen_analysis.log
 realtime_screen_analysis.txt
 realtime_screen_config.json
+server/realtime_screen_context.json
+server/realtime_screen_flush.signal
+server/realtime_screen_pid.txt
+presence_state.json
+presence_state.json.tmp
+thingking/src/bored_rl_weights.json
+
+# Runtime logs
+logs/
+*.log
+*.log.*
+
 speaking/gptsovitsmodel
 speaking/history_voice
 speaking/temp_by
@@ -50,8 +89,10 @@ visual/models/object_models/t.py
 DEPENDENCIES.md
 
 node_modules
-.env.example
+.env
 *.env
+.env.*
+!.env.example
 test/
 
 .workbuddy/
@@ -65,3 +106,9 @@ thingking/models/
 
 # singing pipeline cache (default SINGING_WORK_DIR)
 singing/work/
+
+# NapCat persistent login / tokens / shared media
+deploy/napcat/data/
+deploy/napcat/.env
+deploy/napcat/qrcode.png
+mcp.servers.json
