@@ -312,6 +312,11 @@ class WebsiteBridgeProcess:
             "--disable-crash-reporter",
             "--no-first-run",
             "--no-default-browser-check",
+            # Playwright uses its pipe; attach-only perception needs TCP too.
+            "--remote-debugging-port=0",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
             f"--crash-dumps-dir={AGENT_BROWSER_CRASH_DIR}",
         ]
         configured_args = os.environ.get("AGENT_BROWSER_ARGS", "").replace("\n", ",").split(",")

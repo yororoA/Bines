@@ -24,15 +24,15 @@ class ExistingReaderTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def page(self, target, *, visible=True, focused=True, url="https://www.bilibili.com/"):
+    def page(self, target, *, visible=True, focused=True, url="https://www.bilibili.com/", document_id=1000):
         return {"id": target, "type": "page", "url": url,
                 "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/" + target,
-                "visible": visible, "focused": focused}
+                "visible": visible, "focused": focused, "document_id": document_id}
 
     @staticmethod
     def call(page, method, params=None, **_kwargs):
         if method == "Runtime.evaluate":
-            value = {"visible": page["visible"], "focused": page["focused"]} if "document.visibilityState" in params["expression"] else "observed"
+            value = {"url": page["url"], "document_id": page["document_id"]} if "performance.timeOrigin" in params["expression"] else "observed"
             return {"result": {"value": value}}
         if method == "Page.captureScreenshot":
             return {"data": base64.b64encode(b"image").decode()}
@@ -47,21 +47,22 @@ class ExistingReaderTests(unittest.TestCase):
                     browser.read_existing(self.config, ["eval", "location.href"])
         runner.assert_not_called()
 
-    def test_only_reads_existing_visible_target_and_screenshot(self):
+    def test_bound_hidden_target_is_read_even_when_another_tab_is_foreground(self):
         pages = [self.page("background", visible=False, focused=False),
                  self.page("visible")]
+        self.reader.bound_targets["bilibili"] = "background"
         with patch.object(self.reader, "_pages", return_value=pages), patch.object(
             self.reader, "_call", side_effect=self.call,
         ) as calls:
             self.assertEqual(self.reader.run(self.config, ["eval", "document.title"]), "observed")
             self.reader.run(self.config, ["screenshot", str(self.root / "shot.png")])
         self.assertEqual((self.root / "shot.png").read_bytes(), b"image")
-        self.assertEqual(self.reader.targets["bilibili"], "visible")
+        self.assertEqual(self.reader.targets["bilibili"], "background")
         self.assertEqual({call.args[1] for call in calls.call_args_list},
                          {"Runtime.evaluate", "Page.captureScreenshot"})
         for call in calls.call_args_list:
             if call.args[1] == "Page.captureScreenshot":
-                self.assertEqual(call.args[0]["id"], "visible")
+                self.assertEqual(call.args[0]["id"], "background")
                 self.assertFalse(call.args[2]["fromSurface"])
 
     def test_video_pixels_use_evaluate_without_compositor_capture(self):
@@ -111,15 +112,78 @@ class ExistingReaderTests(unittest.TestCase):
         self.assertEqual(timeouts, [1.8, 0.2])
         connection.close.assert_called_once()
 
-    def test_no_visible_or_ambiguous_pages_do_not_activate_or_open_tabs(self):
-        for pages in ([self.page("a", visible=False, focused=False)],
+    def test_unique_hidden_page_is_observable_without_focusing_it(self):
+        with patch.object(self.reader, "_pages", return_value=[self.page("a", visible=False, focused=False)]), patch.object(
+            self.reader, "_call", side_effect=self.call,
+        ) as calls:
+            self.assertEqual(self.reader.run(self.config, ["eval", "document.title"]), "observed")
+            self.assertEqual(self.reader.run(self.config, ["tab", "list"]), "observed_target=a")
+        self.assertEqual(calls.call_count, 1)
+        self.assertEqual(calls.call_args.args[1], "Runtime.evaluate")
+
+    def test_ambiguous_unbound_pages_do_not_activate_or_open_tabs(self):
+        for pages in ([self.page("a"), self.page("b", visible=False, focused=False)],
                       [self.page("a", focused=False), self.page("b", focused=False)]):
             with patch.object(self.reader, "_pages", return_value=pages), patch.object(
                 self.reader, "_call", side_effect=self.call,
             ) as calls:
                 with self.assertRaises(ExistingBrowserUnavailable):
                     self.reader.run(self.config, ["eval", "location.href"])
-                self.assertTrue(all(call.args[1] == "Runtime.evaluate" for call in calls.call_args_list))
+                calls.assert_not_called()
+
+    def test_binding_disambiguates_identical_urls_by_document_identity(self):
+        pages = [self.page("a", document_id=1000), self.page("b", document_id=2000, visible=False)]
+        with patch.object(self.reader, "_call", side_effect=self.call):
+            self.reader.bind(self.config, {"url": pages[1]["url"], "document_id": 2000}, pages)
+        self.assertEqual(self.reader.bound_targets["bilibili"], "b")
+
+    def test_failed_binding_closed_target_and_foreign_navigation_never_fall_back(self):
+        for bound, pages in (
+            (None, [self.page("other")]),
+            ("closed", [self.page("other")]),
+            ("a", [self.page("a", url="https://example.com"), self.page("other")]),
+            ("a", [self.page("other")]),
+        ):
+            self.reader.bound_targets["bilibili"] = bound
+            with patch.object(self.reader, "_pages", return_value=pages), patch.object(self.reader, "_call") as calls:
+                with self.assertRaises(ExistingBrowserUnavailable):
+                    self.reader.run(self.config, ["eval", "document.title"])
+                calls.assert_not_called()
+
+    def test_explicit_tab_selection_and_background_read_share_one_document(self):
+        pages = [self.page("a", document_id=1000), self.page("b", document_id=2000, visible=False)]
+        identity = {"url": pages[1]["url"], "document_id": 2000}
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, stdout="Selected tab 1"),
+            subprocess.CompletedProcess([], 0, stdout=(
+                "--- AGENT_BROWSER_PAGE_CONTENT nonce=test origin=https://www.bilibili.com/ ---\n"
+                + json.dumps(identity) + "\n--- END_AGENT_BROWSER_PAGE_CONTENT nonce=test ---"
+            )),
+        ])
+        browser = AgentBrowser(["test"], profile_root=self.root, runner=runner)
+        with patch.object(browser.page_reader, "_pages", return_value=pages), patch.object(
+            browser.page_reader, "_call", side_effect=self.call,
+        ) as calls:
+            self.assertEqual(browser.run(self.config, ["tab", "t1"]), "Selected tab 1")
+            self.assertEqual(browser.read_existing(self.config, ["eval", "document.title"]), "observed")
+        self.assertEqual(calls.call_args.args[0]["id"], "b")
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual(runner.call_args.args[0][-2], "eval")
+
+    def test_successful_write_receipt_survives_binding_failure_without_stale_reads(self):
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, stdout="Clicked"),
+            subprocess.CompletedProcess([], 0, stdout="not a document identity"),
+        ])
+        browser = AgentBrowser(["test"], profile_root=self.root, runner=runner)
+        browser.page_reader.bound_targets["bilibili"] = "old"
+        with patch.object(browser.page_reader, "_pages", return_value=[self.page("old")]), patch.object(
+            browser.page_reader, "_call",
+        ) as calls:
+            self.assertEqual(browser.run(self.config, ["click", "@e1"]), "Clicked")
+            with self.assertRaises(ExistingBrowserUnavailable):
+                browser.read_existing(self.config, ["eval", "document.title"])
+        calls.assert_not_called()
 
     def test_foreign_domain_and_remote_debugger_are_not_read(self):
         with patch.object(self.reader, "_pages", return_value=[self.page("a", url="https://example.com")]), patch.object(
@@ -173,6 +237,36 @@ class ExistingReaderTests(unittest.TestCase):
 
 
 class BrowserLaunchFailureTests(unittest.TestCase):
+    def test_bridge_launch_enables_attach_only_reads_and_background_playback(self):
+        import os
+        import website_runtime as runtime
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ):
+            root = Path(temp)
+            bridge = runtime.WebsiteBridgeProcess()
+            opener = Mock()
+            opener.open.return_value = BytesIO(b'{"status":"ok"}')
+            process = Mock()
+            process.poll.return_value = None
+            with patch.object(runtime, "ROOT", root), patch.object(
+                runtime, "AGENT_BROWSER_SOCKET_DIR", root / "runtime",
+            ), patch.object(runtime, "AGENT_BROWSER_RUNTIME_HOME", root / "home"), patch.object(
+                runtime, "AGENT_BROWSER_CRASH_DIR", root / "crashes",
+            ), patch.object(runtime, "ensure_agent_browser", return_value=["test"]), patch.object(
+                runtime, "ensure_browser_node", return_value="/test/node",
+            ), patch.object(runtime, "ensure_chrome_for_testing", return_value="/test/chrome"), patch.object(
+                runtime, "close_stale_bines_sessions",
+            ), patch.object(runtime.subprocess, "Popen", return_value=process) as launch, patch.object(
+                runtime, "build_opener", return_value=opener,
+            ):
+                try:
+                    self.assertTrue(bridge._start())
+                    args = launch.call_args.kwargs["env"]["AGENT_BROWSER_ARGS"].split(",")
+                    for required in ("--remote-debugging-port=0", "--disable-background-timer-throttling",
+                                     "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding"):
+                        self.assertIn(required, args)
+                finally:
+                    bridge.close()
+
     def test_status_reports_degraded_browser_and_read_only_tools_remain_available(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

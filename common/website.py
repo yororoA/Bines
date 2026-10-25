@@ -629,8 +629,35 @@ class AgentBrowser:
             argv.extend(["--executable-path", self.executable_path])
         return [*argv, *map(str, args)]
 
+    def _sync_observation_target(self, platform, env):
+        from common.website_cdp import ExistingBrowserUnavailable
+        self.page_reader.bound_targets[platform.key] = None
+        self.page_reader.targets.pop(platform.key, None)
+        try:
+            pages = self.page_reader._pages(platform.key)
+            result = self.runner(
+                self._argv(platform, ["eval", "({url:location.href,document_id:performance.timeOrigin})"]),
+                capture_output=True, text=True, timeout=5, env=env,
+            )
+            if result.returncode:
+                raise ExistingBrowserUnavailable("控制会话页面身份读取失败", stage="target_binding")
+            output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout or "").strip()
+            if output.startswith("--- AGENT_BROWSER_PAGE_CONTENT "):
+                output = "\n".join(output.splitlines()[1:-1])
+            identity = json.loads(output)
+            if not isinstance(identity, dict) or not isinstance(identity.get("document_id"), (int, float)):
+                raise ValueError("页面身份格式无效")
+            self.page_reader.bind(platform, identity, pages)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError,
+                ExistingBrowserUnavailable) as exc:
+            # The action already succeeded. Preserve its receipt even when
+            # perception is unavailable, but never keep observing the old tab.
+            logging.getLogger("bines.website.runtime").warning(
+                "browser platform=%s stage=target_binding failed=%s; observation suspended",
+                platform.key, type(exc).__name__,
+            )
+
     def run(self, platform: Platform, args, timeout=60):
-        argv = self._argv(platform, args)
         env = dict(os.environ)
         env.pop("AGENT_BROWSER_ENGINE", None)
         env["AGENT_BROWSER_NATIVE"] = "0"
@@ -642,20 +669,26 @@ class AgentBrowser:
             with self.lock:
                 if platform.key in self.runtime_failures:
                     raise BrowserCommandError("浏览器启动失败后已暂停自动重试，请修复运行环境后重启浏览器桥")
+                argv = self._argv(platform, args)
                 result = self.runner(
                     argv, capture_output=True, text=True, timeout=timeout,
                     env=env,
                 )
+                if result.returncode:
+                    output = ((result.stdout or "") + ("\n" + result.stderr if result.stderr else "")).strip()
+                    if re.search(r"Chrome exited|DevToolsActivePort|browser.*launch|EAGAIN|daemon.*(?:failed|timeout)", output, re.I):
+                        self.failure(platform, str(args[0]), "launch_or_connection_failed")
+                    raise BrowserCommandError(output[-1500:] or f"浏览器命令退出码 {result.returncode}")
+                if list(args) != ["close"]:
+                    self._sync_observation_target(platform, env)
+                else:
+                    self.page_reader.bound_targets[platform.key] = None
+                    self.page_reader.targets.pop(platform.key, None)
         except subprocess.TimeoutExpired as exc:
             self.failure(platform, str(args[0]), "command_timeout")
             raise BrowserCommandError("浏览器命令超时，写入结果可能未知", timeout=True) from exc
         except OSError as exc:
             raise BrowserCommandError(f"无法启动浏览器运行时：{exc}") from exc
-        if result.returncode:
-            output = ((result.stdout or "") + ("\n" + result.stderr if result.stderr else "")).strip()
-            if re.search(r"Chrome exited|DevToolsActivePort|browser.*launch|EAGAIN|daemon.*(?:failed|timeout)", output, re.I):
-                self.failure(platform, str(args[0]), "launch_or_connection_failed")
-            raise BrowserCommandError(output[-1500:] or f"浏览器命令退出码 {result.returncode}")
         output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout or "").strip()[:50_000]
         if list(args) == ["tab", "list"]:
             output = re.sub(r"(?m)^(\s*(?:→\s*)?)\[(\d+)\]", r"\1[t\2]", output)

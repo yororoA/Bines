@@ -210,8 +210,8 @@ class WebsiteObserver:
                     self.tick(platform)
                 except Exception as exc:
                     # No signed media URLs, page text, or credentials in logs.
-                    log.warning("automatic observation suspended platform=%s failed=%s; no browser restart",
-                                platform, type(exc).__name__)
+                    log.warning("automatic observation suspended platform=%s stage=%s failed=%s; no browser restart",
+                                platform, getattr(exc, "stage", "observation"), type(exc).__name__)
                     with self.lock:
                         self.active.pop(platform, None)
                         self._publish(platform, "", None)

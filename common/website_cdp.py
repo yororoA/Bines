@@ -28,6 +28,9 @@ class ExistingPageReader:
         self.http = build_opener(ProxyHandler({}))
         self.ports = {}
         self.targets = {}
+        # None means an explicit selection could not be synchronized. Do not
+        # silently read another tab while the control session targets this one.
+        self.bound_targets = {}
 
     def _json(self, url):
         with self.http.open(url, timeout=2) as response:
@@ -114,32 +117,60 @@ class ExistingPageReader:
             if connection is not None:
                 connection.close()
 
+    def bind(self, config, identity, pages):
+        """Bind the control session's document without activating any window."""
+        from common.website import validate_url
+        self.bound_targets[config.key] = None
+        self.targets.pop(config.key, None)
+        validate_url(config, identity["url"])
+        matches = []
+        deadline = time.monotonic() + 3
+        for page in pages:
+            if page["url"] != identity["url"]:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ExistingBrowserUnavailable("浏览器页面绑定超时", stage="target_binding")
+            state = self._call(page, "Runtime.evaluate", {
+                "expression": "({url:location.href,document_id:performance.timeOrigin})",
+                "returnByValue": True,
+            }, timeout=min(2, remaining))["result"].get("value", {})
+            if state == identity:
+                matches.append(page)
+        if len(matches) != 1:
+            raise ExistingBrowserUnavailable("无法确认 Bines 当前操作的页面；观察已暂停", stage="target_binding")
+        self.bound_targets[config.key] = matches[0]["id"]
+
     def _target(self, config):
         from common.website import validate_url
         pages = self._pages(config.key)
-        visible = []
-        deadline = time.monotonic() + 5
-        for page in pages:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ExistingBrowserUnavailable("浏览器页面选择超时", stage="target_selection")
+        if config.key in self.bound_targets:
+            selected = next((page for page in pages
+                             if page["id"] == self.bound_targets[config.key]), None)
+            if selected is None:
+                self.targets.pop(config.key, None)
+                raise ExistingBrowserUnavailable("Bines 操作的标签页已关闭或尚未绑定；观察已暂停",
+                                                 stage="target_selection")
             try:
-                validate_url(config, page["url"])
-                state = self._call(page, "Runtime.evaluate", {
-                    "expression": "({visible:document.visibilityState==='visible',focused:document.hasFocus()})",
-                    "returnByValue": True,
-                }, timeout=min(2, remaining))["result"].get("value", {})
-                if state.get("visible"):
-                    visible.append((page, state.get("focused", False)))
-            except (ValueError, ExistingBrowserUnavailable):
-                continue
-        focused = [page for page, focus in visible if focus]
-        if len(focused) == 1:
-            selected = focused[0]
-        elif len(visible) == 1:
-            selected = visible[0][0]
+                validate_url(config, selected["url"])
+            except ValueError as exc:
+                self.targets.pop(config.key, None)
+                raise ExistingBrowserUnavailable("Bines 操作的页面已离开允许域名；观察已暂停",
+                                                 stage="target_selection") from exc
         else:
-            raise ExistingBrowserUnavailable("没有唯一可见的 Bines 页面；后台不会切换标签或创建页面")
+            allowed = []
+            for page in pages:
+                try:
+                    validate_url(config, page["url"])
+                    allowed.append(page)
+                except ValueError:
+                    continue
+            if len(allowed) != 1:
+                raise ExistingBrowserUnavailable("没有唯一已绑定的 Bines 页面；请先选择操作标签",
+                                                 stage="target_selection")
+            selected = allowed[0]
+            self.bound_targets[config.key] = selected["id"]
+        # A hidden/minimized document is still the same observable target.
         self.targets[config.key] = selected["id"]
         return selected
 
@@ -191,5 +222,5 @@ class ExistingPageReader:
             Path(args[1]).write_bytes(base64.b64decode(result["data"]))
             return "captured"
         if args == ["tab", "list"]:
-            return "visible_target=" + target["id"]
+            return "observed_target=" + target["id"]
         raise ValueError("后台浏览器只允许读取状态或截图")
