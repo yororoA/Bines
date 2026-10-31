@@ -146,28 +146,11 @@ class CorrectionStore:
 
     def _invalidate_dependents(self, node, quote, operation_id):
         """Traverse real dependencies, skipping independent unrelated material."""
-        rows = self.repo.list_memories(scopes=[node["scope"]], limit=100000)
-        invalid, messages = set(), set(node["message_ids"])
-        source_ids = {node["memory_id"]} if node["memory_id"] else set()
-        while True:
-            linked = set()
-            for memory in rows:
-                meta = memory["meta"]
-                dependencies = set(meta.get("source_memory_ids") or []) | set(meta.get("episode_ids") or [])
-                if meta.get("episode_id") and not meta.get("fact_source_message_id"):
-                    dependencies.add(meta["episode_id"])
-                raw_sources = set(meta.get("source_message_ids") or [])
-                if meta.get("fact_source_message_id"):
-                    raw_sources.add(meta["fact_source_message_id"])
-                raw_dependent = bool(messages.intersection(raw_sources))
-                # A paraphrase can omit every character of the corrected quote.
-                # Source dependencies, rather than a text match, determine invalidation.
-                if dependencies.intersection(source_ids | invalid) or raw_dependent:
-                    if memory["id"] not in source_ids and not meta.get("audit_only"):
-                        linked.add(memory["id"])
-            if linked <= invalid:
-                break
-            invalid.update(linked)
+        sources = [("message", mid) for mid in node["message_ids"]]
+        if node["memory_id"]:
+            sources.append(("memory", node["memory_id"]))
+        invalid = {mid for mid in self.service.dependencies.descendants(node["scope"], sources)
+                   if not self.repo.get_memory(mid)["meta"].get("audit_only")}
         for mid in sorted(invalid):
             memory = self.repo.get_memory(mid)
             self.repo.update_memory(mid, meta={**memory["meta"], "repair_pending": operation_id})
@@ -186,10 +169,10 @@ class CorrectionStore:
             return None
         if memory["meta"]["repair_pending"] != job["payload"]["operation_id"]:
             return None
+        from .dependencies import direct_dependencies
+        dependencies = direct_dependencies(self.repo, memory)
         meta, sources, versions = memory["meta"], [], {}
-        ids = set(meta.get("source_memory_ids") or []) | set(meta.get("episode_ids") or [])
-        if meta.get("episode_id") and not meta.get("fact_source_message_id"):
-            ids.add(meta["episode_id"])
+        ids = {sid for kind, sid in dependencies if kind == "memory"}
         for mid in sorted(ids):
             source = self.repo.get_memory(mid)
             if not source or source["scope"] != job["scope"] or source["deleted"]:
@@ -198,9 +181,7 @@ class CorrectionStore:
                 return False
             sources.append({"id": mid, "content": source["content"][:12000]})
             versions["memory:" + mid] = digest([source["content"], source["meta"]])
-        message_ids = set(meta.get("source_message_ids") or [])
-        if meta.get("fact_source_message_id"):
-            message_ids.add(meta["fact_source_message_id"])
+        message_ids = {int(sid) for kind, sid in dependencies if kind == "message"}
         for mid in sorted(message_ids):
             source = self.repo.get_message(mid)
             if source and source["scope"] == job["scope"] and self.graph._message_valid(mid, job["scope"]):

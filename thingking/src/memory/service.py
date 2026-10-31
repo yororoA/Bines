@@ -106,6 +106,10 @@ class MemoryService:
         self.clock = clock
         self._last_diary_check = 0.0
         self._last_index_check = float("-inf")
+        from .dependencies import SourceDependencies
+        from .diary_queue import DiaryQueue
+        self.dependencies = self.repo.dependencies = SourceDependencies(repo)
+        self.diary_queue = DiaryQueue(repo)
         # 时态历史与检索键都是派生层：服务显式挂载，独立仓库使用时不强制迁移。
         self.repo.temporal = TemporalStore(repo)
         from .state_effects import StateEffects
@@ -115,6 +119,7 @@ class MemoryService:
             source_ref TEXT PRIMARY KEY, memory_id TEXT NOT NULL, scope TEXT NOT NULL,
             record TEXT NOT NULL, revision INTEGER NOT NULL, recorded_at REAL NOT NULL
         )""")
+        self.dependencies.ensure_tracking()
         self.life = LifeLedger(repo, clock)
         from .provenance import ProvenanceStore
         from .competition import CompetitionStore
@@ -432,27 +437,17 @@ class MemoryService:
         return {"conversation_id": env.conversation_id, "scope": env.scope, "message_ids": [message_id]}
 
     def _retract_message_memories(self, scope: str, message: Dict[str, Any]) -> None:
-        memories = self.repo.list_memories(scopes=[scope], limit=100000)
-        invalid = {
-            m["id"] for m in memories
-            if message["id"] in (m["meta"].get("source_message_ids") or [])
-            or message.get("source_ref") in (m["meta"].get("source_message_refs") or [])
-        }
+        invalid = self.dependencies.descendants(scope, [("message", message["id"])])
         if message["episode_id"]:
             invalid.add(message["episode_id"])
         days = {message["day_key"]}
         while True:
-            linked = {
-                m["id"] for m in memories
-                if m["meta"].get("episode_id") in invalid
-                or invalid.intersection(m["meta"].get("episode_ids") or [])
-                or invalid.intersection(m["meta"].get("source_memory_ids") or [])
-            }
-            linked.update(
-                m["id"] for m in memories if m["kind"] == KIND_DIARY and m["day_key"] in days
-            )
+            linked = self.dependencies.descendants(scope, [("memory", mid) for mid in invalid])
+            for day in days:
+                linked.update(r[0] for r in self.repo.conn.execute(
+                    "SELECT id FROM memories WHERE scope=? AND kind='diary' AND day_key=? AND deleted=0", (scope, day)))
             expanded = invalid | linked
-            days.update(m["day_key"] for m in memories if m["id"] in expanded)
+            days.update(m["day_key"] for mid in expanded if (m := self.repo.get_memory(mid)) and m["day_key"])
             if expanded == invalid:
                 break
             invalid = expanded
@@ -460,6 +455,7 @@ class MemoryService:
             self.delete_memory(memory_id)
             self.repo.conn.execute("UPDATE messages SET episode_id=NULL WHERE episode_id=?", (memory_id,))
         for day in days:
+            self.diary_queue.mark(scope, day)
             self.repo.conn.execute(
                 "UPDATE jobs SET status='done',lease_until=NULL,dedupe_key=NULL,updated_at=? "
                 "WHERE kind=? AND scope=? AND status IN ('pending','running') "
@@ -756,15 +752,16 @@ class MemoryService:
     def _diary_episodes(self, scope: str, day: str) -> List[Dict[str, Any]]:
         if self._past_day_bounds(day) is None or self.repo.has_pending_messages_for_day(scope, day):
             return []
-        episodes = self.repo.episodes_for_day(scope, day)
-        if any(e["meta"].get("repair_pending") or e["meta"].get("experience_summary_pending") for e in episodes):
-            return []
-        return [
-            e for e in episodes
+        episodes = [
+            e for e in self.repo.episodes_for_day(scope, day)
             if e["content"].strip() and not is_system_event(e["content"])
             and not e["meta"].get("audit_only") and e["meta"].get("status") != "started"
+            and not e["meta"].get("identity_rebuild_pending")
             and e["origin"] not in ("recalled", "withdrawn", "retracted", "deleted", "system", "archived")
         ]
+        if any(e["meta"].get("repair_pending") or e["meta"].get("experience_summary_pending") for e in episodes):
+            return []
+        return episodes
 
     @staticmethod
     def _episode_signature(episodes: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -790,23 +787,46 @@ class MemoryService:
     def enqueue_due_diaries(self) -> int:
         today = self._day(self.clock())
         created = 0
-        for day in self.repo.episode_days_before(OWNER_SCOPE, today):
-            episodes = self._diary_episodes(OWNER_SCOPE, day)
-            if not episodes:
-                continue
-            signature = self._episode_signature(episodes)
-            if self._diary_is_current(OWNER_SCOPE, day, signature) or self.repo.has_open_diary_job(OWNER_SCOPE, day):
-                continue
-            if self.repo.enqueue_job(
-                JOB_DIARY, OWNER_SCOPE, {"day_key": day, **signature},
-                dedupe_key=f"{JOB_DIARY}:{OWNER_SCOPE}:{day}:{signature['episodes_hash']}",
-            ):
-                created += 1
+        with self.repo.transaction():
+            self.diary_queue.backfill(getattr(self.settings, "diary_backfill_batch", 256))
+            for dirty in self.diary_queue.due(today, getattr(self.settings, "diary_maintenance_batch", 32)):
+                scope, day = dirty["scope"], dirty["day_key"]
+                if self._past_day_bounds(day) is None:
+                    self.diary_queue.ack(dirty)
+                    continue
+                episodes = self._diary_episodes(scope, day)
+                if not episodes:
+                    if self.repo.has_pending_messages_for_day(scope, day) or self.repo.episodes_for_day(scope, day):
+                        self.diary_queue.defer(dirty)
+                    else:
+                        # Only generated diaries lose their source when the last
+                        # episode is removed; preserve unsourced/manual entries.
+                        for row in self.repo.conn.execute("SELECT id,meta FROM memories WHERE scope=? AND kind='diary' "
+                                                          "AND day_key=? AND deleted=0", (scope, day)).fetchall():
+                            meta = json.loads(row["meta"])
+                            if meta.get("episode_ids") or meta.get("episode_id"):
+                                self.delete_memory(row["id"])
+                        self.diary_queue.ack(dirty)
+                    continue
+                signature = self._episode_signature(episodes)
+                if self._diary_is_current(scope, day, signature):
+                    self.diary_queue.ack(dirty)
+                    continue
+                if self.repo.has_open_diary_job(scope, day):
+                    self.diary_queue.defer(dirty)
+                    continue
+                if self.repo.enqueue_job(
+                    JOB_DIARY, scope, {"day_key": day, **signature},
+                    dedupe_key=f"{JOB_DIARY}:{scope}:{day}:{signature['episodes_hash']}",
+                ):
+                    created += 1
+                self.diary_queue.defer(dirty)
         return created
 
     def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
         now = self.clock()
         self.maintenance.tick()
+        self.dependencies.sync(limit=256)
         self.provenance.reconcile(limit=100)
         if now - self._last_diary_check >= DIARY_CHECK_INTERVAL:
             self._last_diary_check = now
@@ -1265,6 +1285,7 @@ class MemoryService:
             if (not episodes or not self.retention.valid(job_id, episodes)
                     or any(job["payload"].get(key) != value for key, value in signature.items())):
                 self.repo.finish_job(job["id"], release_dedupe=True)
+                self.diary_queue.mark(job["scope"], day)
                 self.enqueue_due_summaries()
                 self.enqueue_due_diaries()
                 return {"status": "ignored", "diary_id": None}
@@ -1430,6 +1451,10 @@ class MemoryService:
         stats["jobs_by_kind"] = [dict(r) for r in self.repo.conn.execute(
             "SELECT kind,status,COUNT(*) n FROM jobs GROUP BY kind,status")]
         stats["maintenance"] = self.maintenance.stats()
+        stats["diary_maintenance"] = {
+            "dirty_days": self.repo.conn.execute("SELECT COUNT(*) FROM diary_dirty_days").fetchone()[0],
+            "backfill_cursor": self.repo.conn.execute("SELECT value FROM meta WHERE key='diary_backfill_cursor'").fetchone()[0],
+        }
         stats["model_costs"] = self.model_costs.stats()
         stats["association_decisions"] = self.repo.conn.execute(
             "SELECT COUNT(*) FROM association_decisions").fetchone()[0]

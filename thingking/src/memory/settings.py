@@ -61,6 +61,8 @@ class MemorySettings:
     raw_hot_budget: int = 512
     episode_hot_budget: int = 256
     cold_activation_factor: float = .1
+    diary_maintenance_batch: int = 32
+    diary_backfill_batch: int = 256
 
     @property
     def db_path(self) -> Path:
@@ -101,4 +103,6 @@ def load_settings() -> MemorySettings:
         association_backfill_batch=max(1, min(200, int(os.environ.get("BINES_MEMORY_BACKFILL_BATCH", "16")))),
         raw_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_RAW_HOT_BUDGET", "512"))),
         episode_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_EPISODE_HOT_BUDGET", "256"))),
+        diary_maintenance_batch=max(1, min(128, int(os.environ.get("BINES_MEMORY_DIARY_BATCH", "32")))),
+        diary_backfill_batch=max(1, min(2048, int(os.environ.get("BINES_MEMORY_DIARY_BACKFILL_BATCH", "256")))),
     )

@@ -3,6 +3,7 @@ import json
 import uuid
 
 from .associations import digest
+from .dependencies import direct_dependencies
 
 
 def migrate(service, envelope, old_scope):
@@ -14,6 +15,7 @@ def migrate(service, envelope, old_scope):
     messages = [dict(r) for r in conn.execute("SELECT * FROM messages WHERE conversation_id=?", (conversation,))]
     message_ids = {m["id"] for m in messages}
     memories = {r[0]: repo.get_memory(r[0]) for r in conn.execute("SELECT id FROM memories WHERE scope=?", (old_scope,)).fetchall()}
+    sources_by_memory = {mid: direct_dependencies(repo, row) for mid, row in memories.items()}
     ownership = {}
 
     def owners(mid, seen=()):
@@ -27,23 +29,18 @@ def migrate(service, envelope, old_scope):
             result.add(meta["identity_conversation_id"])
         if memory["conversation_id"]:
             result.add(memory["conversation_id"])
-        ids = set(meta.get("source_message_ids") or [])
-        if meta.get("fact_source_message_id"):
-            ids.add(meta["fact_source_message_id"])
-        for ref in meta.get("source_message_refs") or []:
-            row = conn.execute("SELECT id FROM messages WHERE source_ref=?", (ref,)).fetchone()
-            if row:
-                ids.add(row[0])
-            else:
-                result.add(None)
-        for message_id in ids:
-            message = repo.get_message(message_id)
-            result.add(message["conversation_id"] if message else None)
-        linked = set(meta.get("source_memory_ids") or []) | set(meta.get("episode_ids") or [])
-        if meta.get("episode_id"):
-            linked.add(meta["episode_id"])
-        for source in linked:
-            result.update(owners(source, (*seen, mid)))
+        for kind, source in sources_by_memory[mid]:
+            if kind == "message":
+                message = repo.get_message(int(source))
+                result.add(message["conversation_id"] if message and message["scope"] == old_scope else None)
+            elif kind == "memory":
+                result.update(owners(source, (*seen, mid)))
+            elif kind == "message_ref":
+                if not conn.execute("SELECT 1 FROM messages WHERE source_ref=? AND scope=?", (source, old_scope)).fetchone():
+                    result.add(None)
+            elif kind == "experience":
+                if not conn.execute("SELECT 1 FROM experiences WHERE source_ref=? AND scope=?", (source, old_scope)).fetchone():
+                    result.add(None)
         ownership[mid] = result or ({conversation} if old_scope != "owner" else {None})
         return ownership[mid]
 
@@ -98,8 +95,10 @@ def migrate(service, envelope, old_scope):
         repo.update_memory(mid, meta={**memory["meta"], "repair_pending": marker,
                                      "identity_rebuild_pending": conversation})
         conn.execute("UPDATE messages SET episode_id=NULL WHERE episode_id=?", (mid,))
-        for source in memory["meta"].get("source_message_ids") or []:
-            conn.execute("UPDATE messages SET episode_id=NULL WHERE id=?", (source,))
+        for kind, source in sources_by_memory[mid]:
+            if kind == "message":
+                conn.execute("UPDATE messages SET episode_id=NULL WHERE id=? AND (scope=? OR (scope=? AND conversation_id=?))",
+                             (source, old_scope, new_scope, conversation))
         node = graph.for_memory(mid)
         if node:
             graph.invalidate(node["id"])
