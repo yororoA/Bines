@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Dict, Iterable, List, Tuple
 
 from config import DEEPSEEK_MODEL
@@ -14,6 +15,25 @@ from skill_runner import SkillProtocolError, SkillRunner
 
 logger = logging.getLogger("bines.thinking.model")
 _MAX_TEXT_RETRY_TOKENS = 262144
+_DEFAULT_RETRY_TOKENS = 16384
+
+
+def _retry_budget(max_tokens, retry_tokens=None):
+    """Bound expansion of truncated requests; never accept partial model output."""
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
+        raise ValueError("max_tokens 必须是正整数")
+    configured = os.getenv("BINES_MODEL_RETRY_MAX_TOKENS", str(_DEFAULT_RETRY_TOKENS))
+    try:
+        ceiling = int(configured)
+    except (TypeError, ValueError):
+        raise ValueError("BINES_MODEL_RETRY_MAX_TOKENS 必须是 1–262144 的整数") from None
+    if not 1 <= ceiling <= _MAX_TEXT_RETRY_TOKENS:
+        raise ValueError("BINES_MODEL_RETRY_MAX_TOKENS 必须是 1–262144 的整数")
+    if retry_tokens is not None:
+        if isinstance(retry_tokens, bool) or not isinstance(retry_tokens, int) or retry_tokens <= 0:
+            raise ValueError("retry_tokens 必须是正整数")
+        return min(ceiling, retry_tokens)
+    return min(ceiling, max(8192, max_tokens * 2))
 
 
 def _confirm_memory_request(messages):
@@ -44,7 +64,7 @@ class ThinkingModelHelper:
         if max_retries is not None:
             from common.deepseek_client import DeepSeekClient
             client = DeepSeekClient(self.client.with_options(max_retries=max_retries))
-        retry_budget = _MAX_TEXT_RETRY_TOKENS if retry_tokens is None else retry_tokens
+        retry_budget = _retry_budget(max_tokens, retry_tokens)
         for attempt in range(2):
             response = measured_request(client.chat.completions.create,
                 model=self.model,
@@ -150,6 +170,7 @@ class ThinkingModelHelper:
                       if message.get("role") == "system"
                       and message.get("content", "").startswith("--- 本轮角色口吻")), "")
         history = []
+        retry_budget = _retry_budget(max_tokens, max(8192, max_tokens * 4))
         for _ in range(max_iterations):
             request_messages = [*conversation, *([{"role": "system", "content": voice}] if voice else [])]
             request_messages = with_current_time(with_website_observations(request_messages))
@@ -167,9 +188,9 @@ class ThinkingModelHelper:
                     break
                 # No tool from a truncated response has run yet. Retry only this
                 # request, preserving all receipts/results from earlier rounds.
-                if attempt or budget >= _MAX_TEXT_RETRY_TOKENS:
+                if attempt or budget >= retry_budget:
                     raise ModelCompletionError("QQ 工具响应被截断，未执行本次返回的工具")
-                budget = min(_MAX_TEXT_RETRY_TOKENS, max(8192, budget * 4))
+                budget = retry_budget
             message = response.choices[0].message
             calls = message.tool_calls or []
             if not calls:

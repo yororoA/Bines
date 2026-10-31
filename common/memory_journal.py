@@ -48,22 +48,39 @@ def result_data(result):
 
 
 def outcome_status(result):
+    """Prefer explicit tool receipts; retain legacy text adapters without false successes."""
     data = result_data(result)
     if isinstance(data, dict):
         status = str(data.get("status", "")).lower()
-        if status in {"blocked_human", "paused", "skipped"} or data.get("human_action_required"):
+        if status in {"blocked_human", "paused", "skipped", "cancelled", "canceled"} or data.get("human_action_required"):
             return "skipped"
+        if status == "interrupted":
+            return "interrupted"
         if status in {"uncertain", "started"}:
             return "uncertain"
-        if status in {"error", "failed", "failure"} or data.get("retcode", 0) not in (0, "0", None):
+        if (status in {"error", "failed", "failure"}
+                or data.get("retcode", 0) not in (0, "0", None)
+                or data.get("success") is False or data.get("ok") is False):
             return "failed"
-    text = str(result or "")
+        if status in {"ok", "success", "succeeded", "completed", "done"}:
+            return "succeeded"
+        if data.get("error"):
+            return "failed"
+    if data is False:
+        return "failed"
+    text = str(result or "").strip()
     if text.startswith(("自主行动未执行", "自主行动已取消")):
         return "skipped"
-    if text.startswith(("技能执行失败", "技能协议错误", "Error:", "错误", "无法", "未找到",
+    if text.startswith(("技能执行失败", "技能协议错误", "Error:", "Error executing", "错误", "无法", "未找到",
+                        "失败:", "失败：", "执行出错", "执行失败", "操作失败",
                         "状态更新失败", "Dynamic memory is not available", "[图片无法", "[消息含图片")):
         return "failed"
     return "succeeded" if text else "empty"
+
+
+def tool_failure(message, *, code="execution_error"):
+    """Small shared receipt contract for migrated tools; old string tools still work."""
+    return {"status": "failed", "code": code, "message": str(message)}
 
 
 class MemoryOutbox:

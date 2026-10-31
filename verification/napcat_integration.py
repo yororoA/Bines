@@ -479,7 +479,7 @@ class Integration(unittest.TestCase):
         self.assertEqual([message["tool_call_id"] for message in continuation[-4:-1]],
                          ["native-0", "native-1", "native-2"])
         for message in continuation[-4:-1]:
-            self.assertIn("'status': 'ok'", message["content"])
+            self.assertEqual(json.loads(message["content"])["status"], "ok")
         self.assertNotIn("另一群的通知", str(self.store.context(self.store.identity(original))))
         self.assertIn("另一群的通知", str(self.store.context(Identity("99", "1", "20", owner=True))))
         QQThinking(self.store, self.client).process(rows, Mock())

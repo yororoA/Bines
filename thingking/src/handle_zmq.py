@@ -45,7 +45,7 @@ from message_flow_utils import (
 )
 from thinking_stream_runner import run_main_agent_rounds
 from qq_reply_flow import handle_qq_reply_if_needed
-from interrupt_flow import submit_pending_interrupt
+from interrupt_flow import DialogueQueue
 
 
 logger = logging.getLogger("bines.thinking.handle_zmq")
@@ -809,20 +809,8 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
         send_control_signal("end")
         with IS_PROCESSING_DIALOGUE_LOCK:
             IS_PROCESSING_DIALOGUE = False
-        # 【打断】若有暂存的新用户输入，提交为新任务（先释放 processing 状态，再提交，避免 process_pending 误判仍为处理中）
-        with INTERRUPT_LOCK:
-            pending = PENDING_INTERRUPT_INPUT
-            INTERRUPT_REQUESTED = False
-            PENDING_INTERRUPT_INPUT = None
-        submitted_input = submit_pending_interrupt(
-            pending=pending,
-            executor=_EXECUTOR_FOR_INTERRUPT,
-            processing_lock=PROCESSING_LOCK,
-            processing_state=PROCESSING_STATE,
-            process_message=process_message,
-        )
-        if submitted_input:
-            print(f"[Thinking] 已提交打断后的新输入: {submitted_input[:30]}...", flush=True)
+        # Accepted user messages already live in DialogueQueue. Its next-turn
+        # transition resets cancellation atomically with queue admission.
 
 
 def screen_monitor_thread():
@@ -924,6 +912,33 @@ def start_zmq_listener():
     global GAME_MODE_ENABLED, GAME_MODE_INTERVAL
     logger.info("[Thinking] Listening and publishing through the local ZMQ bus")
 
+    executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ThinkingWorker")
+    _EXECUTOR_FOR_INTERRUPT = executor
+    processing_lock = PROCESSING_LOCK
+    processing_state = PROCESSING_STATE
+
+    def start_turn():
+        global INTERRUPT_REQUESTED
+        with INTERRUPT_LOCK:
+            INTERRUPT_REQUESTED = False
+
+    def interrupt_turn():
+        global INTERRUPT_REQUESTED
+        with INTERRUPT_LOCK:
+            INTERRUPT_REQUESTED = True
+        _cancel_current_b_task()
+
+    dialogue_queue = DialogueQueue(executor, on_start=start_turn, on_interrupt=interrupt_turn)
+
+    def process_dialogue(user_input, img_descr, source=None, extra_data=None):
+        with processing_lock:
+            processing_state["is_processing"] = True
+        try:
+            process_message(user_input, img_descr, source=source, extra_data=extra_data)
+        finally:
+            with processing_lock:
+                processing_state["is_processing"] = False
+
     # 启动屏幕监控线程
     if SCREEN_MONITOR_ENABLED:
         monitor_thread = threading.Thread(target=screen_monitor_thread, daemon=True)
@@ -939,8 +954,7 @@ def start_zmq_listener():
             # 发送用户上线的系统提示
             online_prompt = "[System Event: User Online] (The user has just come online. You should greet them naturally based on your persona and the current time. You can check the time, mention how long it's been since you last saw them, or simply greet them warmly.)"
             logger.info("[Thinking] 发送用户上线系统提示...")
-            process_message(online_prompt, "")
-            logger.info("[Thinking] 用户上线系统提示已发送")
+            dialogue_queue.submit(process_dialogue, online_prompt, "", background=True)
         except Exception as e:
             logger.exception(f"[Thinking] 发送用户上线提示时出错: {e}")
     
@@ -948,14 +962,6 @@ def start_zmq_listener():
     online_notification_thread = threading.Thread(target=send_user_online_notification, daemon=True)
     online_notification_thread.start()
     logger.info("[Thinking] 用户上线通知线程已启动，将在3秒后发送")
-
-    # 【修复】创建线程池用于异步处理消息，避免阻塞主循环
-    executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ThinkingWorker")
-    global _EXECUTOR_FOR_INTERRUPT
-    _EXECUTOR_FOR_INTERRUPT = executor  # 供打断后提交新任务
-    # 【修复】使用模块级锁与状态，与 process_message 打断后提交共用
-    processing_lock = PROCESSING_LOCK
-    processing_state = PROCESSING_STATE
 
     # Control SUB: Receive play status from Display via the shared bus.
     control_sub_socket = create_subscriber(context, "control", label="Thinking control")
@@ -1149,15 +1155,7 @@ def start_zmq_listener():
                                             IS_PROCESSING_DIALOGUE = False
                                         with processing_lock:
                                             processing_state["is_processing"] = False
-                                        with INTERRUPT_LOCK:
-                                            pending = PENDING_INTERRUPT_INPUT
-                                            INTERRUPT_REQUESTED = False
-                                            PENDING_INTERRUPT_INPUT = None
-                                        submit_pending_interrupt(
-                                            pending=pending, executor=executor, processing_lock=processing_lock,
-                                            processing_state=processing_state, process_message=process_message,
-                                        )
-                            executor.submit(process_bored_async)
+                            dialogue_queue.submit(process_bored_async)
                 except json.JSONDecodeError:
                     pass
                 except Exception as e:
@@ -1225,42 +1223,9 @@ def start_zmq_listener():
                                               executor, processing_lock, processing_state)
                             continue
                         
-                        # 【打断机制】若上一轮仍在处理，则打断并暂存本次输入，由 process_message 收尾后再处理
-                        with IS_PROCESSING_DIALOGUE_LOCK:
-                            is_processing = IS_PROCESSING_DIALOGUE
-                        if is_processing:
-                            with INTERRUPT_LOCK:
-                                INTERRUPT_REQUESTED = True
-                                # 【修复】如果已有 pending 且来源相同，追加而非覆盖
-                                if PENDING_INTERRUPT_INPUT is not None:
-                                    prev = PENDING_INTERRUPT_INPUT
-                                    prev_text = prev[0] if len(prev) >= 1 else ""
-                                    PENDING_INTERRUPT_INPUT = (prev_text + "\n" + user_input, img_descr or "", source, qq_context)
-                                else:
-                                    PENDING_INTERRUPT_INPUT = (user_input, img_descr or "", source, qq_context)
-                            with _B_TASK_LOCK:
-                                if _CURRENT_B_TASK_ID:
-                                    _CANCELLED_B_TASK_IDS.add(_CURRENT_B_TASK_ID)
-                            print(f"[Thinking] 打断上一轮处理，新输入将在本轮收尾后处理: {user_input[:30]}...", flush=True)
-                            continue
-                        
-                        # 【修复】闭包变量捕获问题：显式传递参数
-                        def process_async(u=user_input, i=img_descr, s=source, e=qq_context):
-                            # [调试日志] 打印每个任务的语音开关状态
-                            audio_flag = (s not in ["QQ", "qq"])
-                            print(f"[Thinking DEBUG] process_async: source={s}, enable_audio={audio_flag}", flush=True)
-                            with processing_lock:
-                                if processing_state["is_processing"]:
-                                    print(f"[Thinking] 上一个消息正在处理中，跳过: {u[:20]}...", flush=True)
-                                    return
-                                processing_state["is_processing"] = True
-                            try:
-                                process_message(u, i, source=s, extra_data=e)
-                            finally:
-                                with processing_lock:
-                                    processing_state["is_processing"] = False
-                        
-                        executor.submit(process_async)
+                        dialogue_queue.submit(
+                            process_dialogue, user_input, img_descr, source, qq_context, interrupt=True,
+                        )
                 except json.JSONDecodeError:
                     pass
             
@@ -1268,8 +1233,7 @@ def start_zmq_listener():
                 # Timeout / Idle：无用户输入时，若启用实时屏幕分析且分析文件有更新，将分析内容单独发给大模型
                 now = time.time()
                 if should_run_idle_check(now, last_realtime_screen_check_time, REALTIME_SCREEN_IDLE_CHECK_INTERVAL):
-                    with processing_lock:
-                        is_processing = processing_state["is_processing"]
+                    is_processing = dialogue_queue.busy
 
                     # [修改说明] 实时屏幕分析主动推送逻辑：
                     # 1. 只要内容变化就推送
@@ -1296,18 +1260,7 @@ def start_zmq_listener():
                         if update.get("should_trigger"):
                             synthetic_prompt = str(update.get("synthetic_prompt") or "")
 
-                            def process_screen_only_async():
-                                with processing_lock:
-                                    if processing_state["is_processing"]:
-                                        return
-                                    processing_state["is_processing"] = True
-                                try:
-                                    process_message(synthetic_prompt, "")
-                                finally:
-                                    with processing_lock:
-                                        processing_state["is_processing"] = False
-
-                            executor.submit(process_screen_only_async)
+                            dialogue_queue.submit(process_dialogue, synthetic_prompt, "", background=True)
                             print(f"[Thinking] 已推送实时屏幕分析（内容变化，游戏模式: ON）", flush=True)
 
                     except Exception as e:

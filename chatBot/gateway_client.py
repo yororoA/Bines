@@ -40,11 +40,14 @@ class GatewayClient:
         # Receipts must contain the same compact text the gateway dispatches.
         params = compact_qq_send_params(action, params or {})
         context = CURRENT_CONTEXT.get()
+
+        def check_turn():
+            reason = context.check() if context.check else ""
+            if reason:
+                raise RuntimeError(f"QQ 操作已取消：{reason}")
+
+        check_turn()
         if context.autonomous:
-            if context.check:
-                reason = context.check()
-                if reason:
-                    raise RuntimeError(f"自主行动已取消：{reason}")
             if not context.contact_allowed and not is_read(action):
                 raise PermissionError("当前自主轮次只允许不打扰他人的读取")
             if context.planning_only:
@@ -62,7 +65,11 @@ class GatewayClient:
                 operation_id = context.turn_id+":tool:"+operation_id
             if context.turn_id:
                 receipt = {"action": action, "params": params or {}, "operation_id": operation_id}
-                context.receipts.append(receipt)
+        # Ordinary replies also carry a queue lease. Check after parameter and
+        # receipt preparation, before any gateway request or write is dispatched.
+        check_turn()
+        if receipt is not None:
+            context.receipts.append(receipt)
         result = self.request("/action", {
             "action": action, "params": params or {}, "timeout": timeout, "operation_id": operation_id,
         }, timeout)

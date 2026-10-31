@@ -62,7 +62,7 @@ class ModelCompletionTest(unittest.TestCase):
         text = model.complete_text(messages, max_tokens=8192, response_format={"type": "json_object"})
         self.assertEqual(json.loads(text), {"summary": "一起听歌"})
         requests = model.client.chat.completions.create.call_args_list
-        self.assertEqual([call.kwargs["max_tokens"] for call in requests], [8192, 262144])
+        self.assertEqual([call.kwargs["max_tokens"] for call in requests], [8192, 16384])
         for call in requests:
             self.assertEqual(call.kwargs["messages"], messages)
             self.assertEqual(call.kwargs["response_format"], {"type": "json_object"})

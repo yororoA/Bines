@@ -5,8 +5,10 @@ import html
 import inspect
 import json
 import ast
+import importlib.util
 from pathlib import Path
 import re
+import sys
 from typing import Any, Dict, Iterable, List, Mapping
 
 
@@ -177,6 +179,7 @@ class SkillRunner:
 
     def actions_for_source(self, source: str | None = None, allowed_skills: Iterable[str] | None = None) -> set[str]:
         enabled = self._enabled_actions()
+        enabled -= self.unavailable_actions().keys()
         if source in ("QQ", "qq"):
             from tools.context import CURRENT_CONTEXT
             context = CURRENT_CONTEXT.get()
@@ -196,6 +199,23 @@ class SkillRunner:
             }
             enabled &= allowed_actions
         return enabled
+
+    def unavailable_actions(self) -> Dict[str, str]:
+        """Check platform prerequisites without importing UI drivers or touching devices."""
+        music = {name for name, function in self.registry.items()
+                 if getattr(function, "module", "") == "music_tool"
+                 or getattr(function, "__module__", "") == "tools.music_tool"}
+        if not music:
+            return {}
+        if sys.platform != "win32":
+            reason = "网易云桌面控制需要 Windows UI Automation"
+        else:
+            try:
+                available = importlib.util.find_spec("uiautomation") is not None
+            except (ImportError, ValueError):
+                available = False
+            reason = "" if available else "未安装网易云桌面控制依赖 uiautomation"
+        return {name: reason for name in music} if reason else {}
 
     @staticmethod
     def _parameter_schema(annotation) -> Dict[str, Any]:
@@ -390,26 +410,55 @@ class SkillRunner:
         return journal.execute(command, execute) if journal else execute()
 
     def _execute(self, command, *, source=None, allowed_skills=None):
+        from common.memory_journal import tool_failure
+        from tools.context import CURRENT_CONTEXT
+
+        def check_turn():
+            check = CURRENT_CONTEXT.get().check
+            reason = check() if check else ""
+            if reason:
+                raise RuntimeError(f"工具执行已取消：{reason}")
+
+        def failed(message, code="execution_error"):
+            return json.dumps(tool_failure("技能执行失败：" + message, code=code), ensure_ascii=False)
+
         skill_name = command.get("skill")
         action = command.get("action")
         args = command.get("args")
         if skill_name not in self.skills:
-            return f"技能执行失败：未知技能 {skill_name!r}。"
+            return failed(f"未知技能 {skill_name!r}。", "unknown_skill")
         if self.action_to_skill.get(action) != skill_name:
-            return f"技能执行失败：动作 {action!r} 不属于技能 {skill_name!r}。"
+            return failed(f"动作 {action!r} 不属于技能 {skill_name!r}。", "invalid_action")
+        unavailable = self.unavailable_actions().get(action)
+        if unavailable:
+            return failed(unavailable, "capability_unavailable")
         if action not in self.actions_for_source(source, allowed_skills):
-            return f"技能执行失败：动作 {action!r} 未启用或当前消息来源无权调用。"
+            return failed(f"动作 {action!r} 未启用或当前消息来源无权调用。", "action_not_allowed")
         if not isinstance(args, dict):
-            return "技能执行失败：args 必须是对象。"
+            return failed("args 必须是对象。", "invalid_arguments")
         function = self.registry.get(action)
         if function is None:
-            return f"技能执行失败：Python 动作 {action!r} 不存在。"
+            return failed(f"Python 动作 {action!r} 不存在。", "unknown_action")
+        # execute() has already persisted the journal entry. A lease check here
+        # must propagate, rather than becoming a tool error the model can ignore.
+        check_turn()
         try:
             target = function.resolve() if hasattr(function, "resolve") else function
             inspect.signature(target).bind(**args)
-            result = function(**args)
-            return str(result)
         except TypeError as exc:
-            return f"技能执行失败：参数不匹配：{exc}"
+            check_turn()
+            return failed(f"参数不匹配：{exc}", "invalid_arguments")
         except Exception as exc:
-            return f"技能执行失败：{type(exc).__name__}: {exc}"
+            check_turn()
+            return failed(f"{type(exc).__name__}: {exc}")
+        # Lazy imports can be slow; revalidate immediately before the real action.
+        check_turn()
+        try:
+            result = target(**args)
+            return json.dumps(result, ensure_ascii=False, default=str) if isinstance(result, (dict, list)) else str(result)
+        except TypeError as exc:
+            check_turn()
+            return failed(f"参数不匹配：{exc}", "invalid_arguments")
+        except Exception as exc:
+            check_turn()
+            return failed(f"{type(exc).__name__}: {exc}")

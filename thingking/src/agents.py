@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Dict, List, Optional
 
 from config import DEEPSEEK_MODEL
 from common.deepseek_client import get_deepseek_client
 from common.clock import with_current_time
+from common.website_perception import with_website_observations
 from thinking_model_helper import ThinkingModelHelper
 from skill_runner import SkillRunner
 
@@ -61,7 +63,7 @@ class MainAgent:
     def _post_chat_completion(self, payload: Dict[str, Any], stream: bool = False):
         request = dict(payload)
         request.pop("stream", None)
-        request["messages"] = with_current_time(request.get("messages") or [])
+        request["messages"] = with_current_time(with_website_observations(request.get("messages") or []))
         return self.client.chat.completions.create(**request, stream=stream)
 
     def _ensure_system_prompt(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -69,6 +71,23 @@ class MainAgent:
 
     def run_one_turn_streaming_text_only(self, messages: List[Dict], interrupt_check=None):
         holder: Dict[str, Any] = {}
+        cancelled = threading.Event()
+        response_lock = threading.Lock()
+        current_response = [None]
+
+        def close_response():
+            with response_lock:
+                response, current_response[0] = current_response[0], None
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+        def cancel():
+            cancelled.set()
+            holder["interrupted"] = True
+            close_response()
+
+        holder["cancel"] = cancel
         payload = {
             "messages": self._ensure_system_prompt(messages),
             "model": self.model,
@@ -79,33 +98,54 @@ class MainAgent:
             "temperature": 0.7,
             "top_p": 1,
         }
-        try:
-            response = self._post_chat_completion(payload, stream=True)
-        except Exception as exc:
-            holder["error"] = str(exc)
-            return iter(()), holder
-
         full_content = []
 
         def generate():
             try:
+                # Open the request in the producer thread as well: waiting for the
+                # first HTTP response must not block the desktop interrupt loop.
+                if cancelled.is_set() or (interrupt_check and interrupt_check()):
+                    holder["interrupted"] = True
+                    return
+                response = self._post_chat_completion(payload, stream=True)
+                with response_lock:
+                    current_response[0] = response
+                if cancelled.is_set():
+                    holder["interrupted"] = True
+                    return
                 for chunk in response:
-                    if interrupt_check and interrupt_check():
+                    if cancelled.is_set() or (interrupt_check and interrupt_check()):
                         holder["interrupted"] = True
                         return
                     choices = getattr(chunk, "choices", None) or []
                     if not choices:
                         continue
+                    finish_reason = getattr(choices[0], "finish_reason", None)
+                    if finish_reason:
+                        holder["finish_reason"] = finish_reason
+                    if finish_reason == "length":
+                        holder["error"] = "模型流式输出达到长度上限，回答未完成"
+                        return
+                    if finish_reason and finish_reason != "stop":
+                        holder["error"] = f"模型流式输出未正常结束：{finish_reason}"
+                        return
                     content = getattr(choices[0].delta, "content", None)
                     if content:
                         full_content.append(content)
                         yield content
+                if not cancelled.is_set() and not holder.get("interrupted") and not holder.get("finish_reason"):
+                    holder["error"] = "模型流连接结束但缺少完成标记，回答未完成"
             except Exception as exc:
-                holder["error"] = str(exc)
+                if cancelled.is_set() or holder.get("interrupted"):
+                    holder["interrupted"] = True
+                else:
+                    holder["error"] = str(exc)
             finally:
-                close = getattr(response, "close", None)
-                if callable(close):
-                    close()
+                try:
+                    close_response()
+                except Exception as exc:
+                    if not cancelled.is_set():
+                        holder.setdefault("error", f"关闭模型流失败：{type(exc).__name__}")
                 content = "".join(full_content)
                 holder["message"] = {"role": "assistant", "content": content or None}
 
