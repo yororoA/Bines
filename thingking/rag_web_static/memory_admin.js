@@ -20,7 +20,7 @@ function notify(message) {
 function renderOverview(stats) {
   $("service-status").textContent = stats.retention_enabled ? "记忆网络运行中" : "已连接 · 留存未启用";
   const metrics = [
-    [stats.index_count || 0, "长期记忆 / 向量索引"],
+    [stats.index_count || 0, stats.index_unit === "retrieval_keys" ? "可检索片段 / 向量索引" : "长期记忆 / 向量索引"],
     [stats.association_nodes || 0, "原始回合与记忆节点"],
     [stats.association_edges || 0, "有来源依据的关联"],
     [stats.association_ready || 0, "已完成建联判断"],

@@ -89,9 +89,10 @@ def build_service() -> MemoryService:
     repo = MemoryRepository(settings.db_path)
     index = VectorIndex(settings.index_dir, load_embedder())
     service = MemoryService(repo, index, settings)
+    from .vector_maintenance import VectorMaintenance
+    repo.vector_maintenance = VectorMaintenance(service)
     service.sync_identities()
-    result = service.reconcile_index()
-    logger.info("memory index reconciled: %s", result)
+    logger.info("memory vector maintenance queued: %s", repo.vector_maintenance.status())
     return service
 
 
@@ -115,7 +116,10 @@ def serve(port: int, on_ready: Callable[[], None] | None = None, *, host: str | 
         if on_ready:
             on_ready()
         while stop_event is None or not stop_event.is_set():
-            if not socket.poll(500):
+            maintenance = getattr(service.repo, "vector_maintenance", None)
+            if maintenance is not None:
+                maintenance.tick()
+            if not socket.poll(50 if maintenance is not None else 500):
                 continue
             raw = socket.recv()
             multipart = socket.getsockopt(zmq.RCVMORE)
@@ -138,4 +142,7 @@ def serve(port: int, on_ready: Callable[[], None] | None = None, *, host: str | 
         print("[Memory Server] stopping", flush=True)
     finally:
         socket.close(linger=0)
+        maintenance = getattr(service.repo, "vector_maintenance", None)
+        if maintenance is not None:
+            maintenance.close()
         service.repo.close()

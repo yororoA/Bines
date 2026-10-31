@@ -275,10 +275,35 @@ $("ed-delete").onclick = () => deleteEditor().catch(alertError);
 $("ed-cancel").onclick = () => $("editor").close();
 $("btn-export").onclick = () => { window.location = "/api/export"; };
 $("btn-rebuild").onclick = async () => {
-  if (!confirm("将清空向量索引并从 SQLite 全量重建，期间检索可能变慢。继续？")) return;
-  $("overview-msg").textContent = "重建中…";
-  try { $("overview-msg").textContent = "完成：" + JSON.stringify(await api("/api/rebuild_index", { method: "POST" })); loadStats(); }
-  catch (e) { $("overview-msg").textContent = ""; alertError(e); }
+  if (!confirm("将重新建立检索索引，原始记忆保留。后台重建期间仍可全文检索。继续？")) return;
+  $("btn-rebuild").disabled = true;
+  $("overview-msg").textContent = "正在提交重建…";
+  const progress = async () => {
+    try {
+      const stats = await loadStats();
+      const status = stats.vector_status || {};
+      if (status.building || status.queued) {
+        $("overview-msg").textContent = status.failures
+          ? "重建暂遇问题，后台将重试；全文检索仍可用。"
+          : `后台重建中，已建立 ${stats.index_count || 0} 个片段索引，待处理 ${stats.unindexed || 0} 个。`;
+        setTimeout(progress, 2000);
+      } else {
+        $("overview-msg").textContent = "重建完成。";
+        $("btn-rebuild").disabled = false;
+      }
+    } catch (e) { $("btn-rebuild").disabled = false; alertError(e); }
+  };
+  try {
+    const result = await api("/api/rebuild_index", { method: "POST" });
+    if (result.queued) {
+      $("overview-msg").textContent = "已加入后台重建队列，全文检索仍可用。";
+      setTimeout(progress, 500);
+    } else {
+      $("overview-msg").textContent = "重建完成。";
+      $("btn-rebuild").disabled = false;
+      await loadStats();
+    }
+  } catch (e) { $("btn-rebuild").disabled = false; $("overview-msg").textContent = ""; alertError(e); }
 };
 
 loadStats().then(loadMemories).catch(alertError);
