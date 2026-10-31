@@ -67,13 +67,13 @@ python -m chatBot.migrate_memory
 
 `python napcat.py status|logs|down|update` 管理容器；`down` 保留数据。媒体宿主目录 `deploy/napcat/data/media` 在容器中为 `/bines-media`。完整能力使用 `napcat_discover` + `napcat_call`，支持所有运行中 NapCat action；`napcat_events` 查看请求原始 flag，`napcat_operation` 查询发送回执。结果不确定的写操作不自动重发。
 
-全部 API 暴露检查：本机与主人私聊的技能提示词包含 NapCatDocs 4.18.38 的 **178 个 API 索引**；`napcat_discover()` 返回完整目录，指定 `action` 返回参数和响应 schema。项目附带完整官方文档，即使缺少 WebUI token 也可以查询。`napcat_catalog()` 返回文档数量、当前身份允许数量、连接状态和运行时目录差异；`runtime_supported=null` 表示未确认，不能当作 QQ 已支持。配置 WebUI token 后自动合并运行时新增接口。普通 QQ 会话继续限制为当前会话的 14 个 API。
+全部 API 暴露检查：本机与显式绑定主人（含群聊）的技能提示词包含 NapCatDocs 4.18.38 的 **178 个 API 索引**；`napcat_discover()` 返回完整目录，指定 `action` 返回参数和响应 schema。项目附带完整官方文档，即使缺少 WebUI token 也可以查询。`napcat_catalog()` 返回文档数量、当前身份允许数量、连接状态和运行时目录差异；`runtime_supported=null` 表示未确认，不能当作 QQ 已支持。配置 WebUI token 后自动合并运行时新增接口。普通 QQ 会话继续限制为当前会话的 14 个 API。主人在群聊可操作完整 QQ 账号能力，但记忆只读取本群，网站与外部 MCP 仍只允许本机和主人私聊。
 
 NapCat MCP 列出 **178 个独立 API 工具及 4 个通用工具**，每个独立工具的 `params` 为该 API 的参数 schema；以点号开头的 API 自动映射为合法 MCP 工具名，原始 action 保存在工具 `_meta.napcat_action`。官方目录可使用 `python -m chatBot.update_catalog 版本号` 更新，生成来源与内容哈希 manifest。更新后重启进程使模型索引和目录缓存生效。
 
 常用消息使用 `napcat_send`：支持私聊、群聊、`reply_to` 引用回复，以及 `text`、`image`、`face`、`mface` 消息段。图文要放在同一个消息段数组中一次发送，成功返回一个 message_id；自定义图片表情使用 `image.data.sub_type=1`。收藏表情可用 `napcat_send_custom_face(index=0, text="正文")` 携带文本；只发送媒体后仍可补充最终文字，已经发送的相同正文不会重复发送。多选消息使用 `napcat_forward(message_ids=[...])` 按列表顺序合并转发，成功后不会再自动补发重复文字。
 
-普通用户可发送当前会话的图片、base64 图片或 `deploy/napcat/data/media/public/` 公开素材（容器路径 `/bines-media/public/`）；只能引用和转发当前会话中未撤回的消息。本机与主人私聊可按请求跨会话发送。上述参数已对照 [NapCatDocs 4.18.38](https://github.com/NapNeko/NapCatDocs/blob/main/src/api/4.18.38/openapi.json) 和 NapCat 消息处理源码核验；接口可调用不代表每个 QQ 账号、客户端或所有 API 已完成实机验证。
+普通用户可发送当前会话的图片、base64 图片或 `deploy/napcat/data/media/public/` 公开素材（容器路径 `/bines-media/public/`）；只能引用和转发当前会话中未撤回的消息。本机与显式绑定主人可按请求跨会话发送。上述参数已对照 [NapCatDocs 4.18.38](https://github.com/NapNeko/NapCatDocs/blob/main/src/api/4.18.38/openapi.json) 和 NapCat 消息处理源码核验；接口可调用不代表每个 QQ 账号、客户端或所有 API 已完成实机验证。
 
 NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网关。其他 MCP 将 `mcp.servers.example.json` 复制为 `mcp.servers.json`，启用相应配置，再用 `mcp_discover/mcp_call` 发现和调用。只有本机与主人私聊可调用外部 MCP。Ark 现有适配继续保留。
 
@@ -85,6 +85,10 @@ NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网
 2. 管理页 `http://127.0.0.1:5000` 展示依赖就绪状态与失败原因，无需记忆服务启动顺序。
 3. 需要管理记忆时，在服务列表中单独启动 **RAG Web**，访问 `http://127.0.0.1:5001`。
 4. 完整模式的本机 GPT-SoVITS 可通过 `.env` 的 `GPT_SOVITS_DIR` 自动启动；它缺失时不会被伪装成已配置服务。使用远程 TTS 时配置 `BINES_TTS_URL`。
+
+管理页直接从本机打开后自动取得 24 小时会话；跨站页面和未鉴权 API 请求会被拒绝。远程管理需显式配置 `BINES_ADMIN_ALLOWED_HOSTS` 并携带 `Authorization: Bearer <BINES_ADMIN_TOKEN>`。未设置凭据时会在记忆数据目录生成 `admin.token` 与 `memory-rpc.token`，无需手工复制到前端。Memory RPC 默认只监听本机；跨机器连接必须给服务与客户端配置相同的 `BINES_MEMORY_RPC_TOKEN`，修改凭据后一起重启相关进程。
+
+Docker 健康检查会验证记忆 RPC、NapCat 连接、QQ worker 心跳、后台记忆线程和管理 API。`python -m common.healthcheck <组件>` 可单独诊断，组件名为 `gateway`、`memory`、`qq-thinking`、`memory-worker`、`admin`；worker 探针应在对应容器内执行。
 
 停止时在管理页点击“停止所有服务”，再关闭管理器。日志和服务状态都在管理页查看。
 
