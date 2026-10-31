@@ -17,7 +17,7 @@ from memory.repository import MemoryRepository
 from memory.service import MemoryService
 from memory.settings import MemorySettings
 from verification.memory_retrieval_eval import (
-    catalog_from, load_dataset, normalize_candidates, query_metrics, sqlite_backup, summarize,
+    catalog_from, load_dataset, normalize_candidates, query_metrics, sqlite_backup, summarize, prompt_quality,
 )
 
 
@@ -67,6 +67,7 @@ def run(database, dataset, valid_subset=False):
                         ranks.append(ranked)
                     rows.append({**q, "latency_ms": latency, "scope_leaks": leaks,
                                  "unresolved_evidence_count": unknown, "unstable": any(r != ranks[0] for r in ranks),
+                                 "prompt_quality": prompt_quality(service, q, 1_792_800_000),
                                  "metrics": query_metrics(ranked, q["relevant_sources"], len(candidates))})
                 reports["graph" if enabled else "hybrid"] = summarize(rows)
             finally:

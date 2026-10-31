@@ -36,6 +36,9 @@ CATEGORIES = {
     "temporal", "unanswerable", "scope_isolation",
 }
 EXTRA_SOURCE_FILES = ("common/env.py", "config.py", "config.example.py", "runtime_environments.py")
+PROMPT_SOURCE_FILES = ("thingking/src/prompt_builder.py", "thingking/src/persona_profile.py",
+                       "thingking/src/relationship_state.py", "thingking/persona/persona.yaml",
+                       "common/clock.py")
 KS = (1, 5, 10)
 sys.dont_write_bytecode = True
 
@@ -77,6 +80,7 @@ def private_path(path):
 def current_sources():
     paths = list((ROOT / "thingking/src/memory").rglob("*.py"))
     paths.extend(ROOT / name for name in EXTRA_SOURCE_FILES)
+    paths.extend(ROOT / name for name in PROMPT_SOURCE_FILES)
     return {str(p.relative_to(ROOT)): p.read_text(encoding="utf-8") for p in sorted(paths)}
 
 
@@ -97,7 +101,8 @@ def materialize_sources(files, target):
         path = Path(name)
         require(not path.is_absolute() and ".." not in path.parts, "unsafe source snapshot path")
         require(
-            name in EXTRA_SOURCE_FILES or (name.startswith("thingking/src/memory/") and name.endswith(".py")),
+            name in (*EXTRA_SOURCE_FILES, *PROMPT_SOURCE_FILES)
+            or (name.startswith("thingking/src/memory/") and name.endswith(".py")),
             "unexpected source snapshot entry",
         )
         destination = target / path
@@ -336,6 +341,10 @@ def summarize(rows):
         "unstable_queries": sum(row["unstable"] for row in rows),
         "latency_ms": {"p50": percentile(latencies, 0.5), "p95": percentile(latencies, 0.95)},
         "answer_correctness": {"status": "not_evaluated", "reason": "No LLM or answer judge was called."},
+        "prompt_quality": {key: average(row.get("prompt_quality", {}).get(key) for row in rows)
+                           for key in ("answer_span_coverage", "retrieved_designated_source_retention",
+                                       "designated_source_quote_presentation", "presented_item_rate",
+                                       "temporal_label_coverage", "expired_current_profile_count")},
     }
 
 
@@ -375,6 +384,59 @@ def retrieve(service, q, api, clock):
     return result
 
 
+def prompt_quality(service, q, clock):
+    """Measure final presentation, separately from retrieval and answer accuracy.
+
+    Exact required-term/answer-span presence does not prove a correct answer.
+    No model or judge is called, and presentation probing creates no usage events.
+    """
+    from unittest.mock import patch
+    import prompt_builder
+    from memory.retrieval import time_intent
+    context = service.build_context(envelope_for(q, clock), query=q["question"])
+    presented = []
+    class Probe:
+        def present_memory(self, item, spans):
+            presented.append((item, list(spans)))
+    with patch.object(prompt_builder, "_runtime_journal", return_value=Probe()), \
+            patch.object(prompt_builder, "clock_message", return_value=prompt_builder.clock_message(clock)):
+        messages = prompt_builder.build_conversation_messages(context)
+    text = "\n".join(m["content"] for m in messages)
+    labels = q.get("required_terms") or ([q["expected_answer"]] if q.get("expected_answer") else [])
+    labels = [labels] if isinstance(labels, str) else labels
+    items = [*(context.get("profile") or []), *(context.get("recalled") or [])]
+    if context.get("bridge"):
+        items.append(context["bridge"])
+    sources, quotes, times = [], [], []
+    shown = {item["id"] for item, _ in presented if item.get("id")}
+    for item in items:
+        source = (item.get("meta") or {}).get("fact_source_message_id")
+        evidence = item.get("evidence") or []
+        if source and evidence:
+            sources.append(any(e.get("source_type") == "message" and str(e.get("source_id")) == str(source)
+                               for e in evidence))
+            originals = [e.get("content", "") for e in evidence
+                         if e.get("source_type") == "message" and str(e.get("source_id")) == str(source)]
+            quotes.append(any(span and any(span in original for original in originals)
+                              for shown_item, spans in presented if shown_item.get("id") == item.get("id")
+                              for span in spans))
+        citation = item.get("citation_id")
+        if item.get("temporal") and citation and citation in text:
+            times.append(prompt_builder._temporal_label(item).strip() in text)
+    historical = time_intent(q["question"])[1]
+    return {
+        "answer_span_coverage": average(label in text for label in labels),
+        "retrieved_designated_source_retention": average(sources),
+        "designated_source_quote_presentation": average(quotes),
+        "presented_item_rate": average(item.get("id") in shown for item in items),
+        "temporal_label_coverage": average(times),
+        "expired_current_profile_count": (sum(not item["temporal"]["is_current"] for item in context.get("profile") or []
+                                               if item.get("temporal")) if not historical else None),
+        "context_budget": context.get("context_budget"),
+        "answer_correctness": "not_evaluated",
+    }
+
+
 class IndexProbe:
     """Make swallowed vector failures visible; do not change scores or candidates."""
 
@@ -383,7 +445,17 @@ class IndexProbe:
         self.failures = 0
 
     def __getattr__(self, name):
-        return getattr(self.index, name)
+        target = getattr(self.index, name)
+        if name != "query_keys":
+            return target
+        # Preserve hasattr() capability detection for lexical/legacy indexes.
+        def query_keys(*args, **kwargs):
+            try:
+                return target(*args, **kwargs)
+            except Exception:
+                self.failures += 1
+                raise
+        return query_keys
 
     def query(self, *args, **kwargs):
         try:
@@ -455,7 +527,9 @@ def evaluate(args, source_files, qrows, catalog, data_dir, code_dir, clock):
     materialize_sources(source_files, code_dir)
     sys.path[:0] = [str(code_dir / "thingking/src"), str(code_dir)]
     for name in list(sys.modules):
-        if name == "memory" or name.startswith("memory.") or name in {"common.env", "config", "runtime_environments"}:
+        if name == "memory" or name.startswith("memory.") or name in {
+            "common", "common.env", "common.clock", "config", "runtime_environments",
+            "prompt_builder", "persona_profile", "relationship_state"}:
             del sys.modules[name]
     with offline_guard(code_dir.parent):
         repository = importlib.import_module("memory.repository")
@@ -496,6 +570,8 @@ def evaluate(args, source_files, qrows, catalog, data_dir, code_dir, clock):
                             candidates = returned
                             first = ranked, leaks, unresolved
                 ranked, leaks, unresolved = first
+                presentation = (prompt_quality(service, q, clock) if all(name in source_files for name in PROMPT_SOURCE_FILES)
+                                else {"status": "not_evaluated", "reason": "frozen baseline lacks prompt sources"})
                 rows.append({
                     **q, "ranked_evidence": ranked, "candidates": candidates,
                     "scope_leaks": leaks, "unresolved_evidence_count": unresolved,
@@ -505,6 +581,7 @@ def evaluate(args, source_files, qrows, catalog, data_dir, code_dir, clock):
                     "unstable": len(set(rankings)) > 1,
                     "metrics": query_metrics(ranked, q["relevant_sources"], len(candidates)),
                     "answer_correctness": "not_evaluated",
+                    "prompt_quality": presentation,
                 })
             settings_dict = asdict(settings)
             settings_dict["data_dir"] = "<temporary>"

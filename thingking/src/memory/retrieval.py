@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import math
 import re
 from datetime import datetime
@@ -32,7 +33,7 @@ def time_intent(query):
             when = datetime(int(match[1]), int(match[2]), int(match[3] or 1), tzinfo=ZONE).timestamp()
         except ValueError:
             pass
-    history = any(word in query for word in ("以前", "曾经", "之前", "历史", "当时", "变化", "为什么"))
+    history = any(word in query for word in ("以前", "曾经", "之前", "历史", "当时", "变化"))
     return when, history or when is not None
 
 
@@ -44,12 +45,24 @@ class HybridRetriever:
         self.last_trace = {}
 
     def sync(self, vectors=False, rebuild=False, full=False):
+        maintenance = getattr(self.repo, "vector_maintenance", None)
+        if vectors and maintenance is not None:
+            # Periodic vector reconciliation only schedules work. The worker's
+            # bounded tick maintains keys; search(vectors=False) still flushes
+            # lexical changes before querying. Explicit online rebuilds enter
+            # through MemoryService.rebuild_index -> maintenance.rebuild.
+            maintenance.request()
+            return {**dict.fromkeys(("added", "updated", "deleted", "unchanged", "total", "fts_repaired", "vectors"), 0),
+                    "vector_status": maintenance.status()}
         if rebuild:
             self.keys.clear_index_marks()
         result = self.keys.sync(rebuild=rebuild, repair_fts=rebuild)
         result["vectors"] = 0
         if vectors and hasattr(self.index, "upsert_keys"):
             try:
+                prepare = getattr(self.index, "prepare", None)
+                if prepare is not None and prepare(self.repo):
+                    self._vector_reconciled = False
                 batch_size = max(1, min(512, getattr(self.settings, "index_batch_size", 64)))
                 if not self._vector_reconciled or rebuild:
                     # One startup repair handles indexes made before deletion
@@ -78,6 +91,9 @@ class HybridRetriever:
                     result["vectors"] += len(ids)
                     if not full:
                         break
+                publish = getattr(self.index, "publish_if_ready", None)
+                if publish is not None:
+                    publish(self.repo)
             except Exception:
                 log.exception("检索键向量更新失败，保留待重建标记，全文检索继续可用")
         return result
@@ -98,38 +114,66 @@ class HybridRetriever:
         allowed_kinds = list(kinds) if kinds else [*MEMORY_KINDS, "message"]
         terms = query_terms(query)
         topic = " ".join(sorted(terms)) or query
-        lexical = self.keys.bm25_query(topic, scopes, allowed_kinds, count)
-        rankings = {"bm25": [key for key, _ in lexical]}
-        vector_distances = {}
-        if hasattr(self.index, "query_keys"):
-            try:
-                vector = self.index.query_keys(query, scopes, allowed_kinds, count)
-                vector_distances = dict(vector)
-                rankings["vector"] = [key for key, _ in vector]
-            except Exception:
-                log.exception("向量检索失败，使用全文候选")
-        elif getattr(self.index, "persistent", True):
-            # 兼容旧索引或注入的测试索引；生产新索引优先使用独立片段向量。
-            try:
-                vector = self.index.query(query, scopes, [x for x in allowed_kinds if x != "message"], n=count)
-                rankings["vector"] = [f"m:{memory_id}:0" for memory_id, _ in vector]
-                vector_distances = {f"m:{memory_id}:0": distance for memory_id, distance in vector}
-            except Exception:
-                log.exception("旧向量索引不可用")
-        scores, channels = rrf(rankings, self.settings.retrieval_rrf_constant)
-        keys = self.keys.get_keys(list(scores), scopes)
         date, historical = time_intent(query)
         historical = include_history or historical
-        visible = set(self.repo.temporal.visible_memory_ids(
-            [row["memory_id"] for row in keys.values() if row["memory_id"]],
-            as_of=as_of, include_history=historical,
-        ))
         excluded = set(excluded)
+
+        def eligible(keys):
+            visible = set(self.repo.temporal.visible_memory_ids(
+                [row["memory_id"] for row in keys.values() if row["memory_id"]],
+                as_of=as_of, include_history=historical))
+            return {kid: row for kid, row in keys.items()
+                    if (row["memory_id"] or f"message:{row['message_id']}") not in excluded
+                    and (not row["memory_id"] or row["memory_id"] in visible)}
+
+        # Scan ranked lexical batches until enough eligible independent sources
+        # survive. Expired facts and a long source's chunks cannot spend the quota.
+        lexical = self.keys.bm25_query(topic, scopes, allowed_kinds, count,
+                                       accept=eligible, per_source=1)
+        rankings = {"bm25": [key for key, _ in lexical]}
+        vector_distances = {}
+        vector_requested = 0
+        if hasattr(self.index, "query_keys") or getattr(self.index, "persistent", True):
+            try:
+                requested, ceiling = count, min(2048, max(256, count * 16))
+                while True:
+                    if hasattr(self.index, "query_keys"):
+                        vector = self.index.query_keys(query, scopes, allowed_kinds, requested)
+                    else:
+                        vector = [(f"m:{mid}:0", distance) for mid, distance in
+                                  self.index.query(query, scopes, [x for x in allowed_kinds if x != "message"], n=requested)]
+                    vector_requested = requested
+                    live = eligible(self.keys.get_keys([key for key, _ in vector], scopes))
+                    hashes = getattr(vector, "source_hashes", None)
+                    if hashes is not None:
+                        live = {key: row for key, row in live.items() if hashes.get(key) == row["source_hash"]}
+                    search_hashes = getattr(vector, "search_hashes", None)
+                    if search_hashes is not None:
+                        live = {key: row for key, row in live.items()
+                                if search_hashes.get(key) == hashlib.sha256(row["search_text"].encode()).hexdigest()}
+                    selected, sources = [], set()
+                    for key, distance in vector:
+                        row = live.get(key)
+                        if not row:
+                            continue
+                        source = (row["source_type"], row["memory_id"] or row["message_id"])
+                        if source in sources:
+                            continue
+                        sources.add(source)
+                        selected.append((key, distance))
+                        if len(selected) == count:
+                            break
+                    if len(selected) >= count or len(vector) < requested or requested >= ceiling:
+                        vector_distances = dict(selected)
+                        rankings["vector"] = [key for key, _ in selected]
+                        break
+                    requested = min(ceiling, requested * 2)
+            except Exception:
+                log.exception("向量检索失败，使用全文候选")
+        scores, channels = rrf(rankings, self.settings.retrieval_rrf_constant)
+        keys = eligible(self.keys.get_keys(list(scores), scopes))
         candidates = []
         for key_id, row in keys.items():
-            source_id = row["memory_id"] or f"message:{row['message_id']}"
-            if source_id in excluded or (row["memory_id"] and row["memory_id"] not in visible):
-                continue
             content = row["search_text"].lower()
             coverage = sum(term in content for term in terms) / max(1, len(terms))
             # 向量通道独立命中允许同义改写；全文通道至少需要一个主题命中。
@@ -144,7 +188,8 @@ class HybridRetriever:
             candidates.append(row)
         candidates.sort(key=lambda row: (-row["score"], row["id"]))
         self.last_trace = {"candidates": len(candidates), "channels": {name: len(ids) for name, ids in rankings.items()},
-                           "reranker": "local", "as_of": as_of, "historical": historical}
+                           "reranker": "local", "as_of": as_of, "historical": historical,
+                           "vector_requested": vector_requested}
         if self.settings.reranker_model and candidates:
             candidates = self._rerank(query, candidates[:count])
         graph = getattr(self.repo, "associations", None)
@@ -167,13 +212,14 @@ class HybridRetriever:
                 "memory_id": row["memory_id"], "message_id": row["message_id"],
                 "key_id": row["id"], "scope": row["scope"], "kind": row["kind"],
                 "content": memory["content"] if memory else row["content"], "evidence": evidence,
+                "matched_spans": [row["content"]],
                 "score": row["score"], "rrf_score": row["rrf_score"],
                 "retrieval_channels": row["retrieval_channels"], "origin": row["meta"].get("origin"),
             })
             if len(output) == (count if graph_enabled else k):
                 break
         if not graph_enabled:
-            return output[:k]
+            return self._describe(output[:k], as_of)
         return self._graph_fusion(query, output, scopes, allowed_kinds, k, excluded, as_of, historical)
 
     def _graph_fusion(self, query, direct, scopes, kinds, k, excluded, as_of, historical):
@@ -231,7 +277,16 @@ class HybridRetriever:
         self.last_trace["graph_hops"] = self.settings.graph_max_hops if expansion_enabled else 0
         self.last_trace["graph_expansion"] = expansion_enabled
         competition = getattr(self.repo, "competition", None)
+        output = self._describe(output, as_of)
         return competition.mint(query, output) if competition else output
+
+    def _describe(self, rows, as_of):
+        describe = getattr(self.repo.temporal, "describe_memory_ids", None)
+        times = describe([row["memory_id"] for row in rows if row.get("memory_id")], as_of=as_of) if describe else {}
+        for row in rows:
+            if row.get("memory_id") in times:
+                row["temporal"] = times[row["memory_id"]]
+        return rows
 
     def _rerank(self, query, candidates):
         try:
