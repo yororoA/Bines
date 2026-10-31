@@ -122,14 +122,32 @@ class MemoryAdminTest(unittest.TestCase):
                 return call
         with patch.object(web, "client", Client()):
             http = web.app.test_client()
+            with http.get("/") as response:
+                self.assertEqual(response.status_code, 200)
             self.assertEqual(http.get("/api/detail?node_id=missing").status_code, 404)
             self.assertEqual(http.get("/api/nodes?offset=bad").status_code, 400)
             self.assertEqual(http.get("/api/nodes").status_code, 200)
             self.assertEqual(http.get("/api/graph").status_code, 200)
             self.assertEqual(http.get("/api/graph").headers["Cache-Control"], "no-store")
-            self.assertEqual(http.get("/constellation").status_code, 200)
-            self.assertEqual(http.get("/constellation_worker.js").status_code, 200)
+            with http.get("/constellation") as response:
+                self.assertEqual(response.status_code, 200)
+            with http.get("/constellation_worker.js") as response:
+                self.assertEqual(response.status_code, 200)
             self.assertEqual(http.get("/missing").status_code, 404)
+
+    def test_http_health_requires_auth_and_reports_backend_failure(self):
+        with patch("memory.client.MemoryClient.ping", return_value=True):
+            web = importlib.import_module("thingking.rag_web_server")
+        with patch.object(web.client, "ping", return_value=True) as ping:
+            http = web.app.test_client()
+            self.assertEqual(http.get("/api/health").status_code, 401)
+            ping.assert_not_called()
+            with http.get("/") as response:
+                self.assertEqual(response.status_code, 200)
+            self.assertTrue(http.get("/api/health").get_json()["success"])
+            ping.assert_called_once_with(timeout_ms=2000)
+            ping.return_value = False
+            self.assertEqual(http.get("/api/health").status_code, 503)
 
     def test_http_correction_history_and_conflict(self):
         with patch("memory.client.MemoryClient.ping", return_value=True):
@@ -146,6 +164,8 @@ class MemoryAdminTest(unittest.TestCase):
                 return self.service.memory_detail(**params)
         with patch.object(web, "client", Client()):
             http = web.app.test_client()
+            with http.get("/") as response:
+                self.assertEqual(response.status_code, 200)
             self.assertEqual(http.post("/api/corrections", json=request).status_code, 200)
             detail = http.get("/api/detail?node_id=" + node["id"]).get_json()["result"]
             self.assertIn("上海", detail["content"])

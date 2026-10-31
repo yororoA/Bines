@@ -13,13 +13,15 @@ class MemoryUnavailable(RuntimeError):
 
 
 class MemoryClient:
-    def __init__(self, host: str, port: int, context=None, timeout_ms: int = 30000):
+    def __init__(self, host: str, port: int, context=None, timeout_ms: int = 30000,
+                 token: Optional[str] = None):
         import zmq
 
         self._zmq = zmq
         self._context = context or zmq.Context.instance()
         self._endpoint = f"tcp://{host}:{port}"
         self.timeout_ms = timeout_ms
+        self._token = token
 
     def call(self, method: str, timeout_ms: Optional[int] = None, **params: Any) -> Any:
         zmq = self._zmq
@@ -28,8 +30,11 @@ class MemoryClient:
         socket.setsockopt(zmq.RCVTIMEO, timeout_ms or self.timeout_ms)
         socket.setsockopt(zmq.SNDTIMEO, 5000)
         try:
+            from common.local_auth import memory_token
+            credential = self._token if self._token is not None else memory_token()
             socket.connect(self._endpoint)
-            socket.send(json.dumps({"method": method, "params": params}, ensure_ascii=False).encode("utf-8"))
+            socket.send(json.dumps({"method": method, "params": params, "token": credential},
+                                   ensure_ascii=False).encode("utf-8"))
             reply = json.loads(socket.recv().decode("utf-8"))
         except zmq.error.Again as exc:
             raise MemoryUnavailable(f"Memory Server timed out on {method} ({self._endpoint})") from exc

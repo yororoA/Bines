@@ -10,7 +10,6 @@ import queue
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request, Response, stream_with_context
-from flask_cors import CORS
 import json
 import zmq
 
@@ -21,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from config import HTTP_HOST, HTTP_PORTS, PRESENCE_STATE_PATH
 from common.zmq_bus import create_publisher
+from common.admin_auth import install_admin_guard
 from process_registry import get_processes
 from process_runtime import ProcessTree, build_python_runtime_env, find_port_listeners, resolve_process_command
 from service_supervisor import ServiceSupervisor
@@ -33,7 +33,7 @@ from realtime_screen_config import (
 
 app = Flask(__name__, template_folder=os.path.join(ROOT_DIR, "server", "templates"),
             static_folder=os.path.join(ROOT_DIR, "server", "static"))
-CORS(app)
+install_admin_guard(app, "manager")
 
 
 # 缓存游戏模式状态（因为我们无法从Thinking进程查询状态，所以只能在管理器本地缓存一份）
@@ -695,7 +695,7 @@ def _realtime_screen_ensure_from_config():
     return ok, msg
 
 
-@app.route('/api/realtime_screen_ensure_from_config', methods=['GET'])
+@app.route('/api/realtime_screen_ensure_from_config', methods=['POST'])
 def api_realtime_screen_ensure_from_config():
     """根据保存的配置决定是否启动实时屏幕分析。在其他模块启动完成后由 Thinking 调用。"""
     try:

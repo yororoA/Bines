@@ -7,6 +7,7 @@ import traceback
 from typing import Any, Callable, Dict
 
 from .service import MemoryService
+from common.local_auth import token_matches
 
 logger = logging.getLogger("bines.memory.server")
 
@@ -54,13 +55,22 @@ RPC_METHODS = (
 )
 
 
-def dispatch(service: MemoryService, request: Dict[str, Any]) -> Dict[str, Any]:
+def dispatch(service: MemoryService, request: Dict[str, Any], *, token: str | None = None) -> Dict[str, Any]:
+    """Dispatch trusted in-process calls; network callers must supply the server token."""
+    if not isinstance(request, dict):
+        return {"ok": False, "error": "invalid_request"}
+    if token is not None:
+        supplied = request.get("token")
+        if not token_matches(supplied, token):
+            return {"ok": False, "error": "authentication required"}
     method = request.get("method")
-    params = request.get("params") or {}
+    params = request.get("params", {})
+    if not isinstance(params, dict) or not isinstance(method, str):
+        return {"ok": False, "error": "invalid_request"}
     if method not in RPC_METHODS:
         return {"ok": False, "error": f"unknown method: {method}"}
-    handler: Callable[..., Any] = getattr(service, method)
     try:
+        handler: Callable[..., Any] = getattr(service, method)
         return {"ok": True, "result": handler(**params)}
     except Exception as exc:
         logger.error("RPC %s failed: %s\n%s", method, exc, traceback.format_exc())
@@ -85,26 +95,45 @@ def build_service() -> MemoryService:
     return service
 
 
-def serve(port: int, on_ready: Callable[[], None] | None = None) -> None:
+def serve(port: int, on_ready: Callable[[], None] | None = None, *, host: str | None = None,
+          token: str | None = None, stop_event=None) -> None:
     import zmq
+    from config import MEMORY_BIND_HOST
+    from common.local_auth import memory_token
 
+    host = host if host is not None else MEMORY_BIND_HOST
+    token = token if token is not None else memory_token()
+    if not token:
+        raise ValueError("Memory Server requires a non-empty credential")
     service = build_service()
     context = zmq.Context.instance()
     socket = context.socket(zmq.REP)
-    socket.bind(f"tcp://*:{port}")
-    print(f"[Memory Server] listening on tcp://*:{port} ({service.settings.db_path})", flush=True)
-    if on_ready:
-        on_ready()
+    socket.setsockopt(zmq.MAXMSGSIZE, 16 * 1024 * 1024)
     try:
-        while True:
+        socket.bind(f"tcp://{host}:{port}")
+        print(f"[Memory Server] listening on tcp://{host}:{port}", flush=True)
+        if on_ready:
+            on_ready()
+        while stop_event is None or not stop_event.is_set():
+            if not socket.poll(500):
+                continue
             raw = socket.recv()
+            multipart = socket.getsockopt(zmq.RCVMORE)
+            while socket.getsockopt(zmq.RCVMORE):
+                socket.recv()  # Drain before replying, without retaining extra frames.
+            if multipart:
+                socket.send_json({"ok": False, "error": "invalid_multipart_request"})
+                continue
+            if len(raw) > 16 * 1024 * 1024:
+                socket.send_json({"ok": False, "error": "request_too_large"})
+                continue
             try:
                 request = json.loads(raw.decode("utf-8"))
             except Exception:
                 socket.send_json({"ok": False, "error": "invalid_json"})
                 continue
-            response = dispatch(service, request)
-            socket.send(json.dumps(response, ensure_ascii=False, default=str).encode("utf-8"))
+            response = dispatch(service, request, token=token)
+            socket.send(json.dumps(response, ensure_ascii=True, default=str).encode("utf-8"))
     except KeyboardInterrupt:
         print("[Memory Server] stopping", flush=True)
     finally:

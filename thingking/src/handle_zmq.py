@@ -1297,8 +1297,11 @@ if __name__ == "__main__":
                 ensure_status_stream_started(MOMENTS_API_BASE_URL, TOGGLE_STATUS_TOKEN)
                 # 实时屏幕分析：在其他模块启动完成后根据保存的配置决定是否启动
                 try:
-                    manager_url = f"http://{HTTP_HOST}:{HTTP_PORTS['MODULE_MANAGER']}"
-                    r = requests.get(f"{manager_url}/api/realtime_screen_ensure_from_config", timeout=3)
+                    from common.local_auth import admin_token
+                    manager_host = "127.0.0.1" if HTTP_HOST in {"0.0.0.0", "::"} else HTTP_HOST
+                    manager_url = f"http://{manager_host}:{HTTP_PORTS['MODULE_MANAGER']}"
+                    r = requests.post(f"{manager_url}/api/realtime_screen_ensure_from_config", timeout=3,
+                                      headers={"Authorization": f"Bearer {admin_token()}"})
                     if r.ok:
                         j = r.json()
                         if j.get("started"):

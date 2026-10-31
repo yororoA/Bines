@@ -11,6 +11,7 @@ BROWSER_AUTOMATION_USER_DATA_DIR = str(ROOT_DIR / "static" / "Bines Data Automat
 
 # One local PUB/SUB bus plus the small set of actual request/reply services.
 ZMQ_HOST = os.environ.get("BINES_ZMQ_HOST", "127.0.0.1")
+MEMORY_BIND_HOST = os.environ.get("BINES_MEMORY_BIND_HOST", "127.0.0.1")
 ZMQ_PORTS = {
     "BUS_PUBLISH": int(os.environ.get("BINES_BUS_PUBLISH_PORT", "5550")),
     "BUS_SUBSCRIBE": int(os.environ.get("BINES_BUS_SUBSCRIBE_PORT", "5551")),

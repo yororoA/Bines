@@ -32,10 +32,10 @@ DOCKER_DESKTOP_MAC_URLS = {
 }
 PROFILES = {"chatbot": ("launcher",), "full": tuple(ENVIRONMENTS)}
 IMPORTS = {
-    "launcher": ("flask", "flask_cors", "zmq", "requests", "websocket", "openai", "yaml", "mcp"),
+    "launcher": ("flask", "zmq", "requests", "websocket", "openai", "yaml", "mcp"),
     "server": ("PyQt6.QtCore", "PyQt6.QtWidgets", "zmq", "requests", "PIL"),
     # PyAutoGUI opens a display at import time: check its distribution separately.
-    "thinking": ("flask", "flask_cors", "zmq", "websocket", "openai", "mcp", "PIL", "numpy",
+    "thinking": ("flask", "zmq", "websocket", "openai", "mcp", "PIL", "numpy",
                  "cv2", "mss", "imagehash", "pytesseract", "chromadb", "langchain_huggingface",
                  "sentence_transformers", "torch"),
     "visual": ("cv2", "numpy", "PIL", "zmq", "requests", "insightface", "onnxruntime"),

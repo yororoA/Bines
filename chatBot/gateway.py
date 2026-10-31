@@ -1,9 +1,9 @@
 """Authenticated loopback capability gateway. Only this process owns OneBot."""
-import hmac
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from chatBot.config import GATEWAY_HOST, GATEWAY_PORT, gateway_token
 from chatBot.messages import LOCAL_IDENTITY
+from common.local_auth import token_matches
 
 
 class GatewayServer(ThreadingHTTPServer):
@@ -20,13 +20,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if not hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {self.server.token}"):
+        if not token_matches(self.headers.get("Authorization", ""), f"Bearer {self.server.token}"):
             return self.respond(401, {"error": "authentication required"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 4*1024*1024:
                 raise ValueError("请求大小无效")
             data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("请求必须是 JSON 对象")
             identity = LOCAL_IDENTITY
             event = {}
             event_id = data.get("event_id")

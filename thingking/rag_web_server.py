@@ -4,7 +4,6 @@ import sys
 import time
 
 from flask import Flask, Response, jsonify, request, send_from_directory
-from flask_cors import CORS
 
 THINKING_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(THINKING_DIR)
@@ -15,10 +14,11 @@ for path in (PROJECT_ROOT, os.path.join(THINKING_DIR, "src")):
 from config import HTTP_HOST, HTTP_PORTS, ZMQ_HOST, ZMQ_PORTS  # noqa: E402
 from memory.client import MemoryClient, MemoryUnavailable  # noqa: E402
 from memory.models import MEMORY_KINDS  # noqa: E402
+from common.admin_auth import install_admin_guard  # noqa: E402
 
 app = Flask(__name__, static_folder="rag_web_static", static_url_path="")
 app.config["JSON_AS_ASCII"] = False
-CORS(app)
+install_admin_guard(app, "memory", entrypoints=("/", "/constellation"))
 client = MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
 if not client.ping(timeout_ms=2000):
     from chatBot.memory_hub import GatewayMemoryClient
@@ -62,6 +62,13 @@ def memory_graph():
 @app.route("/api/stats")
 def stats():
     return _ok(client.stats(), kinds=list(MEMORY_KINDS))
+
+
+@app.route("/api/health")
+def health():
+    if not client.ping(timeout_ms=2000):
+        return jsonify(success=False, error="memory unavailable"), 503
+    return _ok({"memory": True})
 
 
 @app.route("/api/memories")
