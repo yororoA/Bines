@@ -10,7 +10,8 @@ log = logging.getLogger(__name__)
 
 
 class NapCatClient:
-    def __init__(self, ws_url=ONEBOT_WS_URL, token=ONEBOT_ACCESS_TOKEN, factory=None):
+    def __init__(self, ws_url=ONEBOT_WS_URL, token=ONEBOT_ACCESS_TOKEN, factory=None,
+                 *, event_queue_limit=10000, persistence_retry_delay=0.5):
         self.ws_url, self.token = ws_url, token
         self._factory = factory
         self.ws = None
@@ -20,7 +21,16 @@ class NapCatClient:
         self._send_lock = threading.Lock()
         self._pending = {}
         self._listeners = []
-        self._events = queue.Queue()
+        self._event_queue_limit = max(1, int(event_queue_limit))
+        self._events = queue.Queue(maxsize=self._event_queue_limit)
+        self._overflow_event = None
+        self._current_event = None
+        self._current_listeners = ()
+        self._current_listener = 0
+        self._persistence_retry_delay = max(0.01, float(persistence_retry_delay))
+        self._persistence_retrying = False
+        self._metrics = {"received_events": 0, "persisted_events": 0, "persistence_failures": 0,
+                         "queue_overflows": 0, "unbuffered_events": 0}
         self._thread = None
         self._event_thread = None
 
@@ -32,10 +42,13 @@ class NapCatClient:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
+            if self._stop.is_set() and self._event_thread and self._event_thread.is_alive():
+                raise RuntimeError("NapCat 事件持久化线程仍在停止，请等待后重连")
             self._stop.clear()
-            self._events = queue.Queue()
-            self._event_thread = threading.Thread(target=self._dispatch, daemon=True, name="napcat-events")
-            self._event_thread.start()
+            # Keep buffered/current events across reconnects of this client object.
+            if not self._event_thread or not self._event_thread.is_alive():
+                self._event_thread = threading.Thread(target=self._dispatch, daemon=True, name="napcat-events")
+                self._event_thread.start()
             self._thread = threading.Thread(target=self._run, daemon=True, name="napcat-connection")
             self._thread.start()
         if not background:
@@ -44,6 +57,14 @@ class NapCatClient:
     def _run(self):
         delay = 1
         while not self._stop.is_set():
+            # Reconnecting cannot recover frames NapCat did not retain. Pause new
+            # intake while persistence is unhealthy, and report that boundary.
+            with self._lock:
+                backlogged = (self._persistence_retrying or self._overflow_event is not None
+                              or self._events.qsize() >= self._event_queue_limit)
+            if backlogged:
+                self._stop.wait(0.2)
+                continue
             self._opened = False
             if self._factory is None:
                 import websocket
@@ -71,7 +92,6 @@ class NapCatClient:
         if self.ws:
             self.ws.close()
         self._on_close(self.ws, None, None)
-        self._events.put(None)
         for thread in (self._thread, self._event_thread):
             if thread and thread is not threading.current_thread():
                 thread.join(timeout=5)
@@ -105,22 +125,72 @@ class NapCatClient:
             return
         if data.get("post_type") != "meta_event":
             with self._lock:
-                if self._events.qsize() >= 10000:
-                    # Reconnect rather than unbounded RAM growth if persistence is stalled.
-                    self.ws.close()
-                    return
-            self._events.put(data)
+                self._metrics["received_events"] += 1
+                if self._overflow_event is not None:
+                    self._metrics["queue_overflows"] += 1
+                    self._metrics["unbuffered_events"] += 1
+                else:
+                    try:
+                        self._events.put_nowait(data)
+                        return
+                    except queue.Full:
+                        self._metrics["queue_overflows"] += 1
+                        # Preserve the frame that filled the buffer without blocking
+                        # the WebSocket callback responsible for API receipts.
+                        self._overflow_event = data
+            log.error("NapCat 事件缓冲已满，暂停连接；未落库期间无法保证上游补发")
+            if self.ws:
+                self.ws.close()
 
     def _dispatch(self):
         while not self._stop.is_set():
-            event = self._events.get()
-            if event is None:
-                return
-            for listener in tuple(self._listeners):
+            if self._current_event is None:
                 try:
-                    listener(event)
+                    event = self._events.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                with self._lock:
+                    self._current_event = event
+                    self._current_listeners = tuple(self._listeners)
+                    self._current_listener = 0
+                    if self._overflow_event is not None:
+                        # Appended behind frames already queued, before reconnecting.
+                        try:
+                            self._events.put_nowait(self._overflow_event)
+                            self._overflow_event = None
+                        except queue.Full:
+                            pass
+            delay = self._persistence_retry_delay
+            while self._current_listener < len(self._current_listeners) and not self._stop.is_set():
+                listener = self._current_listeners[self._current_listener]
+                try:
+                    listener(self._current_event)
                 except Exception:
-                    log.exception("NapCat event persistence failed")
+                    with self._lock:
+                        self._persistence_retrying = True
+                        self._metrics["persistence_failures"] += 1
+                    log.exception("NapCat event persistence failed; retaining event for retry")
+                    self._stop.wait(delay)
+                    delay = min(30, delay * 2)
+                else:
+                    # Earlier successful listeners are not replayed.
+                    self._current_listener += 1
+                    delay = self._persistence_retry_delay
+            if self._current_listener == len(self._current_listeners):
+                with self._lock:
+                    self._metrics["persisted_events"] += 1
+                    self._persistence_retrying = False
+                    self._current_event = None
+                self._events.task_done()
+
+    def health(self):
+        """Process-local ingress counters; queued frames are not durable receipts."""
+        with self._lock:
+            return {**self._metrics, "connected": self.is_connected,
+                    "pending_events": self._events.qsize() + int(self._overflow_event is not None)
+                                      + int(self._current_event is not None),
+                    "persistence_retrying": self._persistence_retrying,
+                    "event_consumer_alive": bool(self._event_thread and self._event_thread.is_alive())}
 
     def _on_error(self, ws, error):
         log.warning("NapCat WebSocket error")

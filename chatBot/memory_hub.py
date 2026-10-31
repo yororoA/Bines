@@ -97,61 +97,11 @@ class MemoryHub:
             external_id=f"{account}:{group or 'p:'+user}:{message_id}",
             raw={"message": sent_message(params), "receipt": result})
 
-    def backfill_experiences(self):
-        """Recover saved autonomous outcomes and durable native operation receipts."""
-        from common.memory_journal import MemoryJournal, outcome_status
-        count = 0
-        with self.store.connection() as db:
-            events = [dict(row) for row in db.execute("SELECT * FROM events")]
-            turns = {row["id"]: dict(row) for row in db.execute("SELECT * FROM turns")}
-            operations = [dict(row) for row in db.execute("SELECT * FROM operations ORDER BY created")]
-        for event_row in events:
-            event = json.loads(event_row["raw"])
-            turn_id = event_row["batch"] or event_row["id"]
-            proactive = event.get("post_type") == "bines_proactive"
-            if proactive:
-                turn_id = event_row["id"]
-            journal = MemoryJournal(self.outbox, identity_envelope(self.store.identity(event)),
-                                    turn_id, autonomous=proactive, candidate=event.get("proactive"),
-                                    event_ids=[event_row["id"]])
-            turn = turns.get(turn_id)
-            payload = json.loads(turn["payload"] or "{}") if turn else {}
-            items = list(payload.get("outcomes") or [])
-            with self.store.connection() as db:
-                already_journaled = db.execute(
-                    "SELECT 1 FROM memory_outbox WHERE json_extract(params,'$.record.turn_id')=? "
-                    "AND source_ref NOT LIKE '%:legacy:%' LIMIT 1", (turn_id,),
-                ).fetchone()
-            if already_journaled:
-                items = []
-            items.extend({"action": op["action"], "args": json.loads(op["params"]),
-                          "result": json.loads(op["result"]) if op["result"] else "",
-                          "status": outcome_status(json.loads(op["result"])) if op["result"] else "uncertain",
-                          "started_at": op["created"], "legacy_operation": op["id"]}
-                         for op in operations if op["id"].startswith(turn_id + ":"))
-            if proactive and payload.get("reflection") and not already_journaled:
-                items.append({"action": "autonomous_turn", "result": payload["reflection"], "status": "completed"})
-            for index, item in enumerate(items):
-                operation = item.get("legacy_operation")
-                if operation:
-                    self.remember_receipt(self.store.identity(event), item["action"], item["args"], item["result"])
-                    with self.store.connection() as db:
-                        if db.execute("SELECT 1 FROM memory_outbox WHERE source_ref=?",
-                                      (journal.prefix + ":native:" + operation,)).fetchone():
-                            continue
-                key = journal.prefix + ":legacy:" + str(index)
-                if operation:
-                    key = journal.prefix + ":native:" + operation
-                with self.store.connection() as db:
-                    if db.execute("SELECT 1 FROM memory_outbox WHERE source_ref=?", (key,)).fetchone():
-                        continue
-                record = {**item, "category": "tool", "legacy": True,
-                          "status": item.get("status") or outcome_status(item.get("result")),
-                          "started_at": item.get("started_at") or event_row["received"],
-                          "finished_at": item.get("started_at") or event_row["received"]}
-                journal._record(key, record)
-                count += 1
-        return {"queued": count}
+    def backfill_experiences(self, limit=100):
+        """Recover one bounded batch; durable cursors and triggers resume later."""
+        from chatBot.recovery import backfill
+        with self.lock:
+            return backfill(self, limit)
 
     def _sync_outbox_record(self, method, **params):
         if method == "record_experience":
@@ -329,6 +279,7 @@ class MemoryHub:
             import logging
             while not self.stop.wait(0.5):
                 try:
+                    self.backfill_experiences()
                     self.sync()
                 except Exception as exc:
                     logging.getLogger("bines.memory.gateway").warning("记忆同步待重试：%s", exc)

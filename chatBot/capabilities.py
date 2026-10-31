@@ -27,12 +27,9 @@ CUSTOM_FACE_URL_PREFIX = "https://p.qpic.cn/qq_expression/"
 
 
 def allowed_actions(identity, schemas):
-    if identity.local or identity.owner:
+    if identity.qq_admin:
         return set(schemas)
-    allowed = set(schemas) & SCOPED
-    if identity.owner and identity.group:
-        allowed |= set(schemas) & OWNER_GROUP_READS
-    return allowed
+    return set(schemas) & SCOPED
 
 
 def is_read(action):
@@ -273,7 +270,7 @@ class CapabilityService:
                 raise ValueError("商城表情必须提供 emoji_package_id、emoji_id 和 key")
 
     def authorize(self, identity, action, params):
-        if identity.local or identity.owner:
+        if identity.qq_admin:
             return
         if action not in SCOPED:
             raise PermissionError("该 NapCat 动作需要本机或显式绑定的主人授权")

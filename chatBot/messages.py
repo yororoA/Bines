@@ -202,6 +202,15 @@ class Identity:
         return self.local or (self.owner and not self.group)
 
     @property
+    def qq_admin(self):
+        """Account operations follow owner identity, including an owner's group turn.
+
+        This never grants access to owner-private memory, websites or external MCP.
+        Those capabilities must continue to use ``privileged``.
+        """
+        return self.local or self.owner
+
+    @property
     def scope(self):
         if self.local:
             return "owner"

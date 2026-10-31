@@ -28,6 +28,18 @@ def successful(result):
     return isinstance(result, dict) and result.get("status") == "ok" and int(result.get("retcode", 0)) == 0
 
 
+def retryable_failure(exc):
+    """Transient generation/transport failures only; receipt checks stay in SQLite."""
+    if isinstance(exc, (PermissionError, ValueError, TypeError, KeyError)):
+        return False
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in {408, 409, 429} or status >= 500
+    return isinstance(exc, (RuntimeError, OSError, TimeoutError, ConnectionError)) or type(exc).__name__ in {
+        "APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError",
+    }
+
+
 class QQThinking:
     def __init__(self, store=None, client=None, model_factory=None, memory_client=None):
         self.store = store or MemoryStore()
@@ -153,10 +165,20 @@ class QQThinking:
                    for item in actions]
         for index in range(start, len(actions)):
             item = actions[index]
+            from tools.context import CURRENT_CONTEXT
+            check = CURRENT_CONTEXT.get().check
+            reason = check() if check else ""
+            if reason:
+                raise RuntimeError(f"QQ 发送已取消：{reason}")
             self.store.save_turn(turn_id, "ready", {"actions": actions, "next": index,
                                                  "activity": activity, "handoff": handoff})
             operation_id = f"{turn_id}:reply:{index}"
             for attempt in range(2):
+                from tools.context import CURRENT_CONTEXT
+                check = CURRENT_CONTEXT.get().check
+                reason = check() if check else ""
+                if reason:
+                    raise RuntimeError(f"QQ 发送已取消：{reason}")
                 result = self.client.raw_api(item["action"], item["params"],
                                              operation_id=operation_id)
                 # A missing receipt proves the gateway never began the write, so the
@@ -173,11 +195,19 @@ class QQThinking:
         self.store.save_turn(turn_id, "done", {"activity": activity}, handoff=handoff)
 
     def process(self, rows, model):
+        def lease_check():
+            if self.stop.is_set():
+                return "shutdown"
+            try:
+                return self.store.check_lease(rows)
+            except Exception:
+                log.exception("QQ 动作租约无法确认，停止本轮动作")
+                return "qq_lease_unavailable"
         events = [{**json.loads(row["raw"]), "event_id": row["id"]} for row in rows]
         if any(event.get("post_type") == "bines_proactive" for event in events):
             for event in events:
                 if event.get("post_type") == "bines_proactive":
-                    self.process_proactive(event, model)
+                    self.process_proactive(event, model, lease_check=lease_check)
             # A legacy/mixed batch must still process the real input on its own.
             human_rows = [row for row, event in zip(rows, events)
                           if event.get("post_type") != "bines_proactive"]
@@ -205,7 +235,7 @@ class QQThinking:
                     journal.source_message_refs.append(source + ":" + str(message["id"]))
                     journal.turn_message_refs.append(source + ":" + str(message["id"]))
         context = ToolContext(
-            identity, rows[-1]["id"], turn_id, user_text=trusted_user_text, journal=journal,
+            identity, rows[-1]["id"], turn_id, user_text=trusted_user_text, journal=journal, check=lease_check,
         )
         owner_activity = identity.owner and not identity.group
         saved_activity = self.store.current_activity(identity.conversation) if owner_activity else {}
@@ -238,6 +268,7 @@ class QQThinking:
                     # 上一次进程在生成回复前中断，没有发出任何写操作，重新生成是安全的。
                     log.warning("中断的回复轮次 %s 尚未产生写操作，重新生成", turn_id)
                     self.store.drop_turn(turn_id)
+                    self.store.begin_turn(turn_id)
                 else:
                     # Re-running a model after a crash can repeat remote Skill/MCP writes.
                     from common.activity import ongoing_request, activity_checkpoint
@@ -327,8 +358,7 @@ class QQThinking:
             try:
                 from will_runtime import WillSkillRunner, ActivityYield
                 if owner_activity:
-                    guarded = WillSkillRunner(self.runner, candidate,
-                                              lambda: "shutdown" if self.stop.is_set() else "", ordinary=True)
+                    guarded = WillSkillRunner(self.runner, candidate, lease_check, ordinary=True)
                 text, _, _ = model.run_skill_protocol(
                     conversation, guarded or self.runner, source="QQ", temperature=REPLY_TEMPERATURE,
                     max_iterations=(guarded.config.quantum_actions + 1 if guarded else 24),
@@ -347,6 +377,9 @@ class QQThinking:
                 for receipt in context.receipts:
                     if receipt["action"] in SEND_ACTIONS:
                         self.remember_send(identity, receipt["params"], receipt.get("result") or {})
+            reason = lease_check()
+            if reason:
+                raise RuntimeError(f"QQ 轮次已取消：{reason}")
             sent_texts = []
             delivered = False
             uncertain = False
@@ -398,7 +431,7 @@ class QQThinking:
             self.send_actions(identity, turn_id, self.reply_actions(identity, [text]),
                               activity=checkpoint, handoff=handoff)
 
-    def process_proactive(self, event, model):
+    def process_proactive(self, event, model, *, lease_check=None):
         from chatBot.proactive import guard
         from will_runtime import run_intention, outcome_succeeded
         from common.activity import activity_checkpoint
@@ -426,6 +459,10 @@ class QQThinking:
         try:
             completed = False
             def check():
+                if lease_check:
+                    reason = lease_check()
+                    if reason:
+                        return reason
                 latest = self.memory.activity_snapshot()
                 if ((latest.get("life") or {}).get("phase") in {"sleeping", "resting"}
                         and not event["proactive"].get("planning_only")):
@@ -515,42 +552,80 @@ class QQThinking:
                                         key=context.journal.prefix + ":turn", activity=checkpoint)
             raise
 
+    def _heartbeat(self, worker, state="idle"):
+        try:
+            self.store.heartbeat(worker, state)
+        except Exception:
+            # Monitoring must not kill a consumer or turn a completed reply into
+            # a failed conversation. A missing beat is visible to health checks.
+            log.exception("QQ worker 心跳暂不可写")
+
     def worker(self):
         worker = str(uuid.uuid4())
-        if self.model_factory:
-            model = self.model_factory()
-        else:
-            from thinking_model_helper import ThinkingModelHelper
-            model = ThinkingModelHelper()
-        with self._model_lock:
-            self._model_ready.add(worker)
-            if len(self._model_ready) == WORKERS:
-                from common.service_ready import mark_ready
-                mark_ready("QQ Thinking", {"workers": WORKERS})
-        while not self.stop.is_set():
-            rows = self.store.claim(worker, DEBOUNCE, MAX_WAIT)
-            if not rows:
-                self.stop.wait(0.25)
-                continue
-            ids, finished = [row["id"] for row in rows], threading.Event()
-            def renew():
-                while not finished.wait(15):
-                    self.store.renew(ids, worker)
-            lease_thread = threading.Thread(target=renew, daemon=True)
-            lease_thread.start()
-            started = time.monotonic()
-            try:
-                self.process(rows, model)
-                self.store.finish(ids, worker)
-                elapsed = time.monotonic() - started
-                if elapsed >= 10:
-                    log.info("QQ turn 完成 · %.1fs", elapsed)
-            except Exception as exc:
-                log.warning("QQ turn failed · %s（%.1fs）", exc, time.monotonic() - started)
-                self.store.finish(ids, worker, str(exc))
-            finally:
-                finished.set()
-                lease_thread.join(timeout=1)
+        self._heartbeat(worker, "starting")
+        try:
+            if self.model_factory:
+                model = self.model_factory()
+            else:
+                from thinking_model_helper import ThinkingModelHelper
+                model = ThinkingModelHelper()
+            with self._model_lock:
+                self._model_ready.add(worker)
+                if len(self._model_ready) == WORKERS:
+                    from common.service_ready import mark_ready
+                    mark_ready("QQ Thinking", {"workers": WORKERS})
+            last_heartbeat = 0
+            while not self.stop.is_set():
+                try:
+                    if time.monotonic() - last_heartbeat >= 5:
+                        self._heartbeat(worker)
+                        last_heartbeat = time.monotonic()
+                    rows = self.store.claim(worker, DEBOUNCE, MAX_WAIT)
+                except Exception:
+                    log.exception("QQ 队列暂不可用，等待恢复")
+                    self.stop.wait(1)
+                    continue
+                if not rows:
+                    self.stop.wait(0.25)
+                    continue
+                self._heartbeat(worker, "processing")
+                ids, finished = [row["id"] for row in rows], threading.Event()
+                def renew():
+                    while not finished.wait(15):
+                        try:
+                            self.store.renew(ids, worker)
+                            self._heartbeat(worker, "processing")
+                        except Exception:
+                            log.exception("QQ 处理租约续期失败")
+                lease_thread = threading.Thread(target=renew, daemon=True)
+                lease_thread.start()
+                started = time.monotonic()
+                failure = None
+                try:
+                    self.process(rows, model)
+                    elapsed = time.monotonic() - started
+                    if elapsed >= 10:
+                        log.info("QQ turn 完成 · %.1fs", elapsed)
+                except Exception as exc:
+                    failure = exc
+                    log.warning("QQ turn failed · %s（%.1fs）", exc, time.monotonic() - started)
+                finally:
+                    try:
+                        self.store.finish(ids, worker,
+                                          f"{type(failure).__name__}: {failure}" if failure else None,
+                                          retryable=retryable_failure(failure) if failure else False)
+                    except Exception:
+                        # Keep the lease/turn receipts for recovery, and continue
+                        # serving other conversations after a temporary DB error.
+                        log.exception("QQ 轮次确认暂不可写，保留回执等待租约恢复")
+                    finished.set()
+                    lease_thread.join(timeout=1)
+                    self._heartbeat(worker)
+                    last_heartbeat = time.monotonic()
+        finally:
+            with self._model_lock:
+                self._model_ready.discard(worker)
+            self._heartbeat(worker, "stopped")
 
     def run(self):
         if not self.memory.ping():

@@ -171,6 +171,51 @@ class Integration(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.client.raw_api("send_private_msg", {"user_id": 2, "message": "retry"})
 
+    def test_health_details_only_exposed_to_local_caller(self):
+        self.store.heartbeat("private-worker-id", "processing")
+        local = self.client.request("/health", {})
+        self.assertTrue(local["connected"])
+        self.assertTrue(local["memory"])
+        self.assertEqual(local["queue"]["workers_live"], 1)
+        self.assertNotIn("transport", local)  # FakeAPI has no ingress health implementation.
+        self.api.health = lambda: {"unbuffered_events": 3}
+        self.assertEqual(self.client.request("/health", {})["transport"]["unbuffered_events"], 3)
+        for user, group in (("2", None), ("1", "10"), ("1", None)):
+            ev = event(user, group=group, msg_id=900)
+            event_id = self.insert(ev)
+            with tool_context(ToolContext(self.store.identity(ev), event_id, "health-check")):
+                self.assertEqual(self.client.request("/health", {}), {"connected": True})
+
+    def test_operation_state_is_bound_to_current_event_or_batch(self):
+        from urllib.error import HTTPError
+        from urllib.request import Request
+        current = event("2", msg_id=901)
+        current_id = self.insert(current)
+        claimed = self.store.claim("scope-check", 0, 0)
+        batch = claimed[0]["batch"]
+        self.store.finish([row["id"] for row in claimed], "scope-check")
+        keys = [current_id + ":reply", batch + ":tool:0", "another-turn:tool:0"]
+        for key in keys:
+            self.store.begin_operation(key, "send_private_msg", {"user_id": "2", "message": "fixture"})
+            self.store.complete_operation(key, {"status": "ok"})
+        with tool_context(ToolContext(self.store.identity(current), current_id, batch)):
+            for key in keys[:2]:
+                self.assertEqual(self.client.request("/operation_state", {"operation_id": key})["status"], "ok")
+        for forbidden in (keys[2], batch + "suffix:tool:0"):
+            request = Request(self.client.url + "/operation_state",
+                              data=json.dumps({"event_id": current_id, "operation_id": forbidden}).encode(),
+                              headers={"Authorization": "Bearer test-secret", "Content-Type": "application/json"})
+            with self.assertRaises(HTTPError) as caught:
+                self.client.opener.open(request, timeout=5)
+            self.assertEqual(caught.exception.code, 403)
+            caught.exception.close()
+        # NapCat account administrators retain their deliberately global receipt authority.
+        for group in (None, "10"):
+            owner = event("1", group=group, msg_id=902)
+            owner_id = self.insert(owner)
+            with tool_context(ToolContext(self.store.identity(owner), owner_id, "owner-turn")):
+                self.assertEqual(self.client.request("/operation_state", {"operation_id": keys[2]})["status"], "ok")
+
     def test_notice_request_recall_never_become_chat(self):
         ev = event("2", text="to recall")
         self.insert(ev)

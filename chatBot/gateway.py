@@ -31,17 +31,26 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("请求必须是 JSON 对象")
             identity = LOCAL_IDENTITY
             event = {}
+            event_row = None
             event_id = data.get("event_id")
             if event_id:
                 with self.server.service.store.connection() as db:
-                    row = db.execute("SELECT raw FROM events WHERE id=?", (event_id,)).fetchone()
+                    row = db.execute("SELECT id,batch,raw FROM events WHERE id=?", (event_id,)).fetchone()
                 if not row:
                     raise PermissionError("未知 QQ 事件")
                 event = {**json.loads(row["raw"]), "event_id": event_id}
+                event_row = dict(row)
                 identity = self.server.service.store.identity(event)
             service = self.server.service
             if self.path == "/health":
                 result = {"connected": service.client.is_connected}
+                if identity.local:
+                    result["memory"] = bool(self.server.memory_hub and self.server.memory_hub.call(
+                        LOCAL_IDENTITY, "ping", {}).get("ok"))
+                    if hasattr(service.store, "health"):
+                        result["queue"] = service.store.health()
+                    if hasattr(service.client, "health"):
+                        result["transport"] = service.client.health()
             elif self.path == "/memory":
                 if self.server.memory_hub is None:
                     raise RuntimeError("Memory hub unavailable")
@@ -52,7 +61,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 result = service.catalog.status(identity)
                 result["connected"] = service.client.is_connected
             elif self.path == "/schemas":
-                if not (identity.local or identity.owner):
+                if not identity.qq_admin:
                     raise PermissionError("完整 schema 只允许本机或已绑定主人")
                 result = service.catalog.schemas()
             elif self.path == "/action":
@@ -91,12 +100,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
             elif self.path == "/quoted_message":
                 result = service.quoted_message(identity, event_id, data.get("message_id"))
             elif self.path == "/operation":
-                if not (identity.local or identity.owner):
+                if not identity.qq_admin:
                     raise PermissionError("回执查询只允许本机或已绑定主人")
                 result = service.store.operation(data["operation_id"])
             elif self.path == "/operation_state":
-                # Internal endpoint for local Thinking processes: it only reads the
-                # receipt table so a lost HTTP request can be retried without guessing.
+                # A scoped reply can inspect its own persisted turn's receipts.
+                # Knowing an operation ID must not expose another conversation.
+                if not identity.qq_admin:
+                    operation_id = data.get("operation_id")
+                    prefixes = [str(event_row[key]) + ":" for key in ("id", "batch") if event_row.get(key)]
+                    if not isinstance(operation_id, str) or not operation_id.startswith(tuple(prefixes)):
+                        raise PermissionError("只能查询当前轮次的操作回执")
                 result = service.store.operation(data["operation_id"])
             elif self.path == "/events":
                 with service.store.connection() as db:
