@@ -18,7 +18,7 @@ CALL_END = "[[/SKILL_CALL]]"
 QQ_ALLOWED_ACTIONS = {
     "get_time", "send_qq_group_msg", "send_qq_private_msg",
     "napcat_call", "napcat_discover", "napcat_catalog", "napcat_send", "napcat_forward",
-    "napcat_events", "update_status", "search_memory", "cite_memory", "browser_search", "web_fetch",
+    "napcat_events", "update_status", "search_memory", "read_memory_source", "cite_memory", "browser_search", "web_fetch",
 }
 QQ_GROUP_OWNER_ACTIONS = {"napcat_custom_faces", "napcat_send_custom_face"}
 NAPCAT_ACTIONS = {
@@ -271,7 +271,8 @@ class SkillRunner:
                     if parameter.default is inspect.Parameter.empty:
                         required.append(name)
             tools.append({"type": "function", "function": {
-                "name": action, "description": self._action_description(action),
+                # The parameter schema already supplies the Python signature.
+                "name": action, "description": self._action_description(action).splitlines()[0],
                 "parameters": {"type": "object", "properties": properties, "required": required},
             }})
         return tools
@@ -293,14 +294,12 @@ class SkillRunner:
             if not actions:
                 continue
             sections.append(f"### {name}: {skill['description']}\n{skill['instructions']}")
-            if name == "napcat" and "napcat_call" in enabled:
-                from chatBot.catalog import model_api_index
-                from chatBot.capabilities import SCOPED
-                from tools.context import CURRENT_CONTEXT
-                identity = CURRENT_CONTEXT.get().identity
-                sections.append(model_api_index(identity.local or identity.owner, SCOPED))
-            for action in actions:
-                sections.append(f"Action `{action}` — {self._action_description(action)}")
+            if not native:
+                for action in actions:
+                    description = self._action_description(action)
+                    first, _, signature = description.partition("\nArguments:")
+                    sections.append(f"Action `{action}` — {first.splitlines()[0]}"
+                                    + (f"\nArguments:{signature}" if signature else ""))
         if native:
             return (
                 "通过原生工具调用执行操作，可在一轮中调用多个工具，按返回结果继续组合接口。"

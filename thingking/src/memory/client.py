@@ -131,6 +131,12 @@ class MemoryClient:
         return self.call("search", query=query, scopes=list(scopes), kinds=list(kinds) if kinds else None,
                          k=k, as_of=as_of, include_history=include_history)
 
+    def search_with_trace(self, query, scopes, k=8, retrieval_mode="auto"):
+        return self.call("search_with_trace", query=query, scopes=list(scopes), k=k, retrieval_mode=retrieval_mode)
+
+    def read_memory_source(self, source_id, scope, offset=0, limit=1024):
+        return self.call("read_memory_source", source_id=source_id, scope=scope, offset=offset, limit=limit)
+
     def state_history(self, scope="owner", as_of=None, limit=20):
         return self.call("state_history", scope=scope, as_of=as_of, limit=limit)
 

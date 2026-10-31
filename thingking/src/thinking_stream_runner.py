@@ -124,7 +124,10 @@ def run_main_agent_rounds(
 
                 if chunk and not memory_confirmed:
                     from thinking_model_helper import _confirm_memory_request
-                    _confirm_memory_request(messages)
+                    # Prompt assembly can exceed the per-request cap after tool
+                    # instructions are added. Credit only the actual request.
+                    if holder.get("submitted_messages") is not None:
+                        _confirm_memory_request(holder["submitted_messages"])
                     memory_confirmed = True
                 full_response.append(chunk)
                 if directive_mode:

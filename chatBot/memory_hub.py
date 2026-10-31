@@ -288,9 +288,12 @@ class MemoryHub:
                     "reason": params.get("reason", ""),
                     "source_ref": f"{self.source}:life-regulation:{event_id}",
                 }
-            elif method == "search":
+            elif method in {"search", "search_with_trace"}:
                 params["scopes"] = [identity.scope]
                 params["k"] = max(1, min(int(params.get("k", 8)), 20))
+            elif method == "read_memory_source":
+                params = {"source_id": params.get("source_id"), "scope": identity.scope,
+                          "offset": params.get("offset", 0), "limit": params.get("limit", 1024)}
             elif method == "activity_snapshot" and identity.owner and not identity.group and event_id:
                 # Only a persisted scheduler event can recheck cross-channel activity.
                 with self.store.connection() as db:

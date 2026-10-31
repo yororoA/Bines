@@ -7,8 +7,7 @@ OWNER_SCOPE = "owner"
 _MAX_CONFLICT_RETRIES = 3
 
 
-def search_memory(query: str, k: int = 8):
-    """主动检索当前会话可见的历史记忆；关键词可用人名、物品、歌曲或事件。"""
+def _memory_client():
     from tools.context import CURRENT_CONTEXT
     identity = CURRENT_CONTEXT.get().identity
     if identity.local:
@@ -18,26 +17,108 @@ def search_memory(query: str, k: int = 8):
         client = GatewayMemoryClient()
     if client is None:
         raise RuntimeError("记忆服务未就绪")
+    return client, identity
+
+
+def _snippet(text, query, counter, units):
+    from memory.evidence import _short_evidence
+    # Recenter after reducing the character window: cutting the prefix of a
+    # Chinese match-centered excerpt can otherwise discard the actual match.
+    low, high, best = 1, min(700, len(text)), ""
+    while low <= high:
+        size = (low + high) // 2
+        span = _short_evidence(text, query, size)
+        if counter.count(span) <= units:
+            best, low = span, size + 1
+        else:
+            high = size - 1
+    return best
+
+
+def search_memory(query: str, k: int = 8):
+    """检索有界主题片段；通过返回的citation_id调用read_memory_source分页展开。"""
+    import json
+    from common.context_budget import ContextTokenCounter, context_limit, diagnostic
+    from tools.context import CURRENT_CONTEXT
+    client, identity = _memory_client()
     k = max(1, min(int(k), 20))
-    hits = client.search(query, [identity.scope], k=k)
+    mode = "explore" if CURRENT_CONTEXT.get().autonomous else "auto"
+    reply = client.search_with_trace(query, [identity.scope], k=k, retrieval_mode=mode)
+    hits, trace = reply["hits"], reply.get("trace") or {}
+    counter = ContextTokenCounter()
+    budget = max(128, min(8192, context_limit() // 4))
+    result, shown = [], []
+    for hit in hits:
+        matched = [span for span in (hit.get("matched_spans") or [])
+                   if isinstance(span, str) and span and span in hit["content"]]
+        # Vector/alias retrieval can locate a passage without any literal query
+        # term in the original. Keep that located span instead of searching the
+        # whole source again and accidentally returning its unrelated opening.
+        span = _snippet(matched[0] if matched else hit["content"], query, counter, 640)
+        evidence = [{key: ev.get(key) for key in
+                     ("source_type", "source_ref", "role", "ts", "action", "status")}
+                    | {"content": _snippet(ev.get("content") or "", query, counter, 256)}
+                    for ev in (hit.get("evidence") or [])[:3]]
+        associations = [{"id": row["id"], "reason": counter.prefix(str(row.get("reason") or ""), 160)}
+                        for row in (hit.get("associations") or [])[:2]]
+        candidate = {"id": hit["id"], "citation_id": hit.get("citation_id"),
+                     "chain_ids": [row["id"] for row in associations], "associations": associations,
+                     "content": span, "kind": hit["kind"], "day_key": hit.get("day_key"),
+                     "evidence": evidence, "corrections": hit.get("corrections") or [],
+                     "is_excerpt": span != hit["content"],
+                     "expand": {"source_id": hit.get("citation_id"), "offset": max(0, hit["content"].find(span))}}
+        if hit.get("retrieval_role") == "exploration":
+            candidate["retrieval_role"] = "exploration"
+            candidate["notice"] = "探索线索，须核验；不能当作当前问题的已确认事实"
+        # Corrections are never silently dropped to make old facts appear valid.
+        if counter.count(json.dumps([*result, candidate], ensure_ascii=False)) > budget:
+            continue
+        result.append(candidate)
+        shown.append((hit, candidate))
     journal = CURRENT_CONTEXT.get().journal
     if journal:
-        for hit in hits:
-            journal.present_memory(hit, [hit["content"], *[
-                ev["content"] for ev in (hit.get("evidence") or [])[:3] if ev.get("content")]])
-    return [{
-        "id": hit["id"], "citation_id": hit.get("citation_id"), "chain_ids": hit.get("chain_ids", []),
-        "associations": hit.get("associations", []),
-        "context_id": hit.get("context_id"), "reason_shares": hit.get("reason_shares", {}),
-        "corrections": hit.get("corrections", []),
-        "content": hit["content"], "kind": hit["kind"], "day_key": hit.get("day_key"),
-        "evidence": [
-            {"source_type": ev.get("source_type"), "source_ref": ev.get("source_ref"),
-             "role": ev.get("role"), "content": ev.get("content"), "ts": ev.get("ts"),
-             "action": ev.get("action"), "status": ev.get("status"), "urls": ev.get("urls", [])}
-            for ev in (hit.get("evidence") or [])[:3]
-        ],
-    } for hit in hits]
+        for hit, candidate in shown:
+            journal.present_memory({**hit, "chain_ids": candidate["chain_ids"]},
+                                   [candidate["content"], *[e["content"] for e in candidate["evidence"] if e["content"]]])
+    diagnostic("tool", {"action": "search_memory", "retrieval": trace, "candidates": len(hits),
+                        "shown": len(result), "omitted": len(hits) - len(result), "limit": budget,
+                        "input_units": counter.count(json.dumps(result, ensure_ascii=False)),
+                        "counting_method": counter.method})
+    if hits and not result:
+        raise ValueError("检索命中资料，但完整来源与纠正说明超过本轮工具预算；请缩小查询范围")
+    return result
+
+
+def read_memory_source(source_id: str, offset: int = 0, limit: int = 1024):
+    """按字符偏移展开当前会话来源；页大小另受输入预算约束，next_offset用于下一页。"""
+    import json
+    from common.context_budget import ContextTokenCounter, context_limit, diagnostic
+    from tools.context import CURRENT_CONTEXT
+    client, identity = _memory_client()
+    page = client.read_memory_source(source_id, identity.scope, offset=offset, limit=limit)
+    if page is None:
+        return {"status": "unavailable", "source_id": source_id,
+                "message": "来源不存在、已失效或不属于当前会话"}
+    page = dict(page)
+    counter = ContextTokenCounter()
+    budget = max(128, min(4096, context_limit() // 4))
+    text = page.pop("content")
+    overhead = counter.count(json.dumps({**page, "content": ""}, ensure_ascii=False)) + 32
+    if overhead >= budget:
+        raise ValueError("来源元数据与纠正说明超过本轮预算，未展示旧原文")
+    shown = counter.prefix(text, budget - overhead)
+    page["content"] = shown
+    if len(shown) < len(text):
+        page["next_offset"] = page["offset"] + len(shown)
+        page["is_excerpt"] = True
+    journal = CURRENT_CONTEXT.get().journal
+    if journal and shown:
+        journal.present_memory(page, [shown])
+    diagnostic("tool", {"action": "read_memory_source", "source_id": source_id,
+                        "offset": page["offset"], "next_offset": page["next_offset"],
+                        "input_units": counter.count(json.dumps(page, ensure_ascii=False)),
+                        "limit": budget, "counting_method": counter.method})
+    return page
 
 
 def cite_memory(source_id: str, answer_span: str, source_quote: str = "", chain_id: str = ""):

@@ -12,7 +12,7 @@ from common.memory_journal import outcome_status
 log = logging.getLogger("bines.will")
 
 READ_ACTIONS = {
-    "get_time", "search_memory", "browser_search", "web_fetch",
+    "get_time", "search_memory", "read_memory_source", "browser_search", "web_fetch",
     "napcat_discover", "napcat_catalog", "napcat_events", "napcat_operation", "napcat_custom_faces",
     "get_screen_info", "get_visual_info", "fast_screen_analysis", "template_match", "find_color_region",
     "get_qq_group_list", "get_qq_friend_list", "get_moments", "get_comments",
@@ -30,7 +30,7 @@ CONTACT_ACTIONS = {
     "add_moment", "comment_moment", "send_ark_chat", "like_moment", "like_comment",
     "website_approve", "website_execute",
 }
-PLANNING_ACTIONS = {"get_time", "search_memory", "regulate_life",
+PLANNING_ACTIONS = {"get_time", "search_memory", "read_memory_source", "regulate_life",
                     "activity_continue", "activity_pause", "activity_finish"}
 
 

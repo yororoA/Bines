@@ -45,6 +45,8 @@ RPC_METHODS = (
     "memory_graph",
     "list_jobs",
     "search",
+    "search_with_trace",
+    "read_memory_source",
     "get_memory",
     "add_memory",
     "update_memory",

@@ -5,8 +5,6 @@ import json
 import math
 import os
 import re
-from functools import lru_cache
-from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from common.clock import clock_message, now
@@ -63,55 +61,7 @@ _STATE_LABELS = (
 _QQ_PREFIX = re.compile(r"^\[QQ(?:群消息|私聊)\]\[[^\]]*\]:\s*")
 
 
-@lru_cache(maxsize=4)
-def _local_tokenizer(path, modified):
-    # Explicit local tokenizer.json only: never download model/tokenizer files.
-    from tokenizers import Tokenizer
-    tokenizer = Tokenizer.from_file(path)
-    tokenizer.no_truncation()
-    tokenizer.no_padding()
-    return tokenizer
-
-
-class ContextTokenCounter:
-    """Local model tokenizer, or a conservative UTF-8 byte token upper bound.
-
-    Byte-level tokenizers cannot emit more content tokens than UTF-8 bytes.
-    The fallback is intentionally labelled an upper bound, not an exact count.
-    Chat framing is provider-specific; reserve 16 tokens per message as well.
-    """
-    def __init__(self):
-        self.encoder = None
-        self.method = "utf8_byte_upper_bound"
-        path = os.environ.get("BINES_CONTEXT_TOKENIZER_PATH", "").strip()
-        if path:
-            try:
-                file = Path(path).expanduser()
-                self.encoder = _local_tokenizer(str(file), file.stat().st_mtime_ns)
-                self.method = "local_tokenizer"
-            except Exception:
-                pass
-
-    def count(self, text):
-        text = str(text)
-        if self.encoder is not None:
-            return len(self.encoder.encode(text, add_special_tokens=False).ids)
-        return len(text.encode("utf-8", errors="replace"))
-
-    def messages(self, messages):
-        return sum(self.count(m.get("content", "")) + 16 for m in messages)
-
-    def prefix(self, text, limit):
-        if self.count(text) <= limit:
-            return text
-        low, high = 0, len(text)
-        while low < high:
-            mid = (low + high + 1) // 2
-            if self.count(text[:mid]) <= limit:
-                low = mid
-            else:
-                high = mid - 1
-        return text[:low]
+from common.context_budget import ContextTokenCounter, context_limit, diagnostic
 
 
 def _temporal_label(item):
@@ -437,27 +387,55 @@ def conversation_style_guard(context: Dict[str, Any]) -> str:
     return persona_profile.qq_style_guard(state=state)
 
 
-def _bounded_context(context, scene, counter, available):
-    """Allocate one shared budget; render probes never create presentation receipts."""
+def _covered_by_working(item, working):
+    """Deduplicate against displayed source IDs/spans, never a timestamp window."""
+    shown = {str(m["id"]): m for m in working if m.get("id") is not None}
+    roots = item.get("source_family") or item.get("evidence_family") or []
+    ids = {str(root).split(":", 1)[1] for root in roots if str(root).startswith("message:")}
+    if item.get("message_id") is not None:
+        ids.add(str(item["message_id"]))
+    if ids and all(mid in shown and not shown[mid].get("_partial") for mid in ids):
+        return True
+    # A partially retained message covers only the precise evidence substring.
+    # Derived summaries may say more than those substrings and stay eligible.
+    if item.get("kind") == "message":
+        evidence = (item.get("evidence") or [])[:3]
+        return bool(evidence) and all(
+            e.get("source_type") == "message" and str(e.get("source_id")) in shown
+            and bool(e.get("content")) and e["content"] in shown[str(e["source_id"])]["content"]
+            for e in evidence)
+    return False
+
+
+def _recall_candidates(context, working):
+    rows = [*(context.get("recalled") or []), *(context.get("recall_backfill") or [])]
+    # The two service lists are disjoint; retain rank across ordinary and
+    # working-window candidates, and support legacy services without backfill.
+    rows.sort(key=lambda item: -float(item.get("score") or 0))
+    seen, result = set(), []
+    for item in rows:
+        key = item.get("node_id") or item.get("id")
+        if key in seen or _covered_by_working(item, working):
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _allocate_context(context, scene, counter, quotas, item_quotas=None):
     selected = {**context, "working": [], "profile": [], "recalled": [], "bridge": None,
                 "other_channels": [], "state": {}, "life": {}}
-    # Older dialogue may be omitted, but never the current input: callers append it.
-    categories = (("working", .40), ("profile", .15), ("recall", .30), ("state", .10), ("other_channels", .05))
-    spent = {}
-    for kind, fraction in categories:
-        quota = max(0, int(available * fraction))
-        if not quota:
-            spent[kind] = 0
-            continue
+    spent, hungry = {}, []
+    for kind, quota in quotas.items():
         remaining = quota
         if kind == "state":
-            # State and life are material too; an oversized state cannot escape
-            # the cap by moving out of the retrieval sections.
             blocks = []
             for block in (_state_block(context.get("state") or {}), _life_block(context.get("life") or {}, scene)):
                 if not block:
                     continue
-                text = counter.prefix(block, max(0, remaining - 32))
+                text = counter.prefix(block, max(0, remaining - 64))
+                if text != block and kind not in hungry:
+                    hungry.append(kind)
                 if text:
                     if text != block:
                         text += "\n[历史状态节选]"
@@ -468,11 +446,14 @@ def _bounded_context(context, scene, counter, available):
             selected["_state_blocks"] = blocks
         else:
             values = (list(reversed(context.get("working") or [])) if kind == "working" else
-                      [("recalled", v) for v in context.get("recalled") or []]
-                      + ([("bridge", context["bridge"])] if context.get("bridge") else []) if kind == "recall" else
+                      [("recalled", v) for v in _recall_candidates(context, selected["working"])]
+                      + ([("bridge", context["bridge"])] if context.get("bridge") and
+                         not _covered_by_working(context["bridge"], selected["working"]) else []) if kind == "recall" else
                       list(context.get(kind) or []))
             for value in values:
                 if remaining <= 32:
+                    if kind not in hungry:
+                        hungry.append(kind)
                     break
                 section, item = value if kind == "recall" else (kind, value)
 
@@ -485,11 +466,13 @@ def _bounded_context(context, scene, counter, available):
                              candidate if section == "bridge" else [candidate]}
                     return [{"content": _memory_recall_block(trial, record=False)}]
 
-                # One giant old message/fact must not monopolize its section.
-                cap = min(remaining, max(256, quota // 3))
+                item_quota = (item_quotas or quotas)[kind]
+                cap = min(remaining, max(256, item_quota // max(1, min(3, len(values)))))
                 candidate = dict(item)
                 cost = counter.messages(render(candidate))
                 if cost > cap:
+                    if kind not in hungry:
+                        hungry.append(kind)
                     low, high = 0, len(str(item.get("content") or "")) if section in {"working", "other_channels"} else 700
                     best = None
                     while low <= high:
@@ -497,6 +480,7 @@ def _bounded_context(context, scene, counter, available):
                         trial = dict(item)
                         if section in {"working", "other_channels"}:
                             trial["content"] = str(item.get("content") or "")[:mid] + "…[历史节选]"
+                            trial["_partial"] = True
                         else:
                             trial["_display_limit"] = mid
                         trial_cost = counter.messages(render(trial))
@@ -516,10 +500,39 @@ def _bounded_context(context, scene, counter, available):
                 remaining -= cost
         spent[kind] = quota - remaining
     selected["working"].reverse()
+    return selected, spent, hungry
+
+
+def _bounded_context(context, scene, counter, available):
+    """Allocate first, deduplicate displayed sources, then lend unused quotas."""
+    weights = {"working": .40, "profile": .15, "recall": .30, "state": .10, "other_channels": .05}
+    quotas = {kind: max(0, int(available * weight)) for kind, weight in weights.items()}
+    item_quotas = dict(quotas)
+    selected, spent, hungry = _allocate_context(context, scene, counter, quotas)
+    for _ in range(3):
+        spare = available - sum(spent.values())
+        if spare <= 64 or not hungry:
+            break
+        # Recompute all sections so expanded working spans are deduplicated
+        # before allocating recall. Fixed-point passes are strictly bounded.
+        weight = sum(weights[kind] for kind in hungry)
+        quotas = {kind: spent[kind] + (int(spare * weights[kind] / weight) if kind in hungry else 0)
+                  for kind in weights}
+        # Lending unused capacity must not lower the per-item ceiling of a
+        # section whose unequal-length entries already fit in full.
+        item_quotas = {kind: max(item_quotas[kind], quotas[kind]) for kind in weights}
+        previous = sum(spent.values())
+        candidate, candidate_spent, candidate_hungry = _allocate_context(context, scene, counter, quotas, item_quotas)
+        if sum(candidate_spent.values()) < previous:
+            break
+        selected, spent, hungry = candidate, candidate_spent, candidate_hungry
+        if sum(spent.values()) <= previous:
+            break
     return selected, spent
 
 
-def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]:
+def build_conversation_messages(context: Dict[str, Any], *, budget_limit=None,
+                                reserve_current_input=True) -> List[Dict[str, str]]:
     """Bound this assembly; callers append current input and subsequent tool results."""
     prepare_relationship_turn(context)
     envelope = context.get("envelope") or {}
@@ -534,15 +547,14 @@ def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]
     clock = clock_message()
     last = {"role": "system", "content": conversation_style_guard(context)}
     counter = ContextTokenCounter()
-    try:
-        limit = max(256, min(262144, int(os.environ.get("BINES_CONTEXT_MAX_TOKENS", "32768"))))
-    except ValueError:
-        limit = 32768
+    limit = context_limit() if budget_limit is None else max(0, int(budget_limit))
     fixed = counter.messages([first, clock, last])
     # Some gateway envelopes carry identity only. recall_query still includes
     # the current request (and may conservatively include referent context).
     current = str(envelope.get("content") or context.get("recall_query") or "")
-    reserve = max(1024, counter.count(current) + 64)
+    # Initial assembly precedes the caller's current-user message. Request-level
+    # rebuilding has already charged that actual message in its outside budget.
+    reserve = max(1024, counter.count(current) + 64) if reserve_current_input else 0
     bounded, spent = _bounded_context(context, scene, counter, max(0, limit - fixed - reserve - 64))
     leading = list(bounded.get("_state_blocks") or [])
     variable = []
@@ -562,17 +574,30 @@ def build_conversation_messages(context: Dict[str, Any]) -> List[Dict[str, str]]
     if total + reserve > limit and (variable or leading):
         variable = []
         first = base_first
-        bounded = {**bounded, "profile": [], "recalled": [], "bridge": None, "other_channels": []}
+        bounded = {**bounded, "working": [], "profile": [], "recalled": [], "bridge": None, "other_channels": []}
         total = fixed
     _profile_block(bounded, scene)
     _memory_recall_block(bounded)
     context["context_budget"] = {
         "limit": limit, "counting_method": counter.method, "assembled_tokens": total,
+        "tokenizer_error": counter.tokenizer_error,
         "current_input_reserve": reserve, "fixed_tokens": fixed, "section_tokens": spent,
         "over_budget": total + reserve > limit,
-        "scope": "assembled_prompt_and_input_reserve; excludes later tool results",
+        "scope": "initial_prompt_and_input_reserve; every_model_request_bounded_separately",
     }
-    return [first, clock, *variable, last]
+    diagnostic("retrieval", context.get("retrieval_trace") or {})
+    diagnostic("presentation", {**context["context_budget"],
+        "working_candidates": len(context.get("working") or []), "working_shown": len(bounded.get("working") or []),
+        "recall_candidates": len(context.get("recalled") or []) + len(context.get("recall_backfill") or []),
+        "recall_shown": len(bounded.get("recalled") or []),
+        "profile_shown": len(bounded.get("profile") or []),
+        "node_ids": [item.get("node_id") or item.get("id") for item in
+                     [*(bounded.get("recalled") or []), *(bounded.get("profile") or [])]]})
+    messages = [first, clock, *variable, last]
+    journal = _runtime_journal()
+    if journal and hasattr(journal, "register_prompt_frame"):
+        journal.register_prompt_frame(context, messages)
+    return messages
 
 
 def format_current_input(user_input: str, now: datetime) -> str:

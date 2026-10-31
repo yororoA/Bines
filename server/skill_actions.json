@@ -296,6 +296,11 @@
       "enabled": true
     },
     {
+      "name": "read_memory_source",
+      "description": "在当前会话权限内分页展开检索来源，返回有界原文与下一页偏移。",
+      "enabled": true
+    },
+    {
       "name": "search_memory",
       "description": "按主题检索当前会话可见的历史记忆，返回可回溯的原始证据。",
       "enabled": true

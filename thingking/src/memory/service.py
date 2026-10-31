@@ -490,8 +490,12 @@ class MemoryService:
         excluded = {bridge["id"]} if bridge else set()
         recalled = self._recall(
             recall_query, scopes, [KIND_EPISODE, KIND_EXCERPT, KIND_DIARY, "message"], excluded,
-            env.conversation_id, window_start,
+            env.conversation_id, window_start, include_working=True,
         )
+        recall_trace = copy.deepcopy(getattr(self.retriever, "last_trace", {}))
+        recall_backfill = [item for item in recalled if item.pop("overlaps_working", False)]
+        backfill_ids = {item["id"] for item in recall_backfill}
+        recalled = [item for item in recalled if item["id"] not in backfill_ids]
         diaries = [item for item in recalled if item["kind"] == KIND_DIARY][: self.settings.diary_k]
         episodes = [item for item in recalled if item["kind"] != KIND_DIARY][: self.settings.recall_k]
 
@@ -510,6 +514,8 @@ class MemoryService:
         if env.scope != OWNER_SCOPE:
             visible_state.update(self.repo.get_state(state_scope)["data"])
         last_user = self.repo.last_message(env.conversation_id, ROLE_USER)
+        profile = self._profile(env, scopes, recall_query)
+        profile_trace = copy.deepcopy(getattr(self.retriever, "last_trace", {}))
         return {
             "envelope": env.to_dict(),
             "scope": env.scope,
@@ -519,7 +525,9 @@ class MemoryService:
             "other_channels": other_channels,
             "bridge": _memory_view(bridge) if bridge else None,
             "recalled": episodes + diaries,
-            "profile": self._profile(env, scopes, recall_query),
+            "recall_backfill": recall_backfill,
+            "profile": profile,
+            "retrieval_trace": {"recall": recall_trace, "profile": profile_trace},
             "state": visible_state,
             "life": self.life.snapshot(env.scope),
             "last_user_ts": last_user["ts"] if last_user else None,
@@ -551,6 +559,7 @@ class MemoryService:
         excluded: Iterable[str],
         conversation_id: str,
         window_start: Optional[float],
+        include_working: bool = False,
     ) -> List[Dict[str, Any]]:
         rows = self.retriever.search(query, scopes, kinds=kinds,
                                      k=self.settings.retrieval_candidates, excluded=excluded)
@@ -565,13 +574,12 @@ class MemoryService:
                 and window_start is not None
                 and (row.get("end_ts") or 0) >= window_start
             )
-            if overlaps_window:
-                continue
             if row["kind"] == "message" and window_start is not None:
                 message = self.repo.get_message(row["message_id"])
-                if message["conversation_id"] == conversation_id and message["ts"] >= window_start:
-                    continue
-            visible.append(_memory_view(row))
+                overlaps_window = bool(message and message["conversation_id"] == conversation_id and message["ts"] >= window_start)
+            if overlaps_window and not include_working:
+                continue
+            visible.append(_memory_view(row, **({"overlaps_working": True} if overlaps_window else {})))
         return visible
 
     def _profile(self, env: ConversationEnvelope, scopes: Sequence[str], query: str) -> List[Dict[str, Any]]:

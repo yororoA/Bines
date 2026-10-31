@@ -324,6 +324,10 @@ class MemoryJournal:
         self.confirmed_memory_presentations = {}
         self.memory_citations = []
         self.memory_corrections = []
+        self.memory_diagnostics = {}
+        self.tool_result_refs = {}
+        self.last_tool_receipt = ""
+        self.prompt_frames = []
         self.prefix = "experience:" + hashlib.sha256(str(outbox.path.resolve()).encode()).hexdigest() + ":" + turn_id
 
     def _record(self, key, record):
@@ -335,7 +339,32 @@ class MemoryJournal:
             record["memory_usage"] = {"presented": list(self.confirmed_memory_presentations.values()),
                                       "citations": self.memory_citations}
             record["memory_corrections"] = self.memory_corrections
+            record["memory_diagnostics"] = self.memory_diagnostics
         self.outbox.put(key, "record_experience", {"envelope": self.envelope, "record": safe_data(record)})
+
+    def record_memory_diagnostic(self, stage, data):
+        # Diagnostics contain counts/IDs/statuses, never another copy of raw
+        # prompts. Snapshot now so later retrievals cannot overwrite this turn.
+        snapshot = json.loads(json.dumps(safe_data(data), ensure_ascii=False))
+        if stage in {"retrieval", "presentation"}:
+            self.memory_diagnostics[stage] = snapshot
+        else:
+            rows = self.memory_diagnostics.setdefault(stage, [])
+            if len(rows) < 128:
+                rows.append(snapshot)
+            else:
+                self.memory_diagnostics[stage + "_omitted"] = self.memory_diagnostics.get(stage + "_omitted", 0) + 1
+
+    def register_prompt_frame(self, context, messages):
+        # In-memory only. Rebuild after actual tool-schema overhead is known;
+        # do not persist another copy of private prompt text in diagnostics.
+        first, last = messages[0]["content"], messages[-1]["content"]
+        for frame in self.prompt_frames:
+            if frame["first"] == first and frame["last"] == last:
+                frame["context"] = context
+                return
+        self.prompt_frames.append({"context": context, "first": first, "last": last})
+        self.prompt_frames[:] = self.prompt_frames[-64:]
 
     def present_memory(self, item, spans):
         nid = item.get("node_id")
@@ -345,7 +374,9 @@ class MemoryJournal:
         self.memory_presentations[nid] = {
             "node_id": nid, "node_digest": item["node_digest"],
             "context_id": item.get("context_id") or previous.get("context_id"),
-            "spans": list(dict.fromkeys([*(previous.get("spans") or []), *spans]))[:8],
+            # A later source page must remain eligible for confirmation; keeping
+            # only the oldest eight excerpts made page nine impossible to cite.
+            "spans": list(dict.fromkeys([*spans, *(previous.get("spans") or [])]))[:8],
             "chain_ids": list(dict.fromkeys([*(previous.get("chain_ids") or []),
                                              *(item.get("chain_ids") or [])]))[:20],
         }
@@ -365,8 +396,12 @@ class MemoryJournal:
                 previous = self.confirmed_memory_presentations.get(nid, {})
                 if previous.get("node_digest") != item["node_digest"]:
                     previous = {}
+                old_spans = previous.get("spans") or []
+                cited = [c["source_quote"] for c in self.memory_citations
+                         if c["source_id"] == nid and c.get("source_quote")
+                         and any(c["source_quote"] in span for span in old_spans)]
                 self.confirmed_memory_presentations[nid] = {
-                    **item, "spans": list(dict.fromkeys([*(previous.get("spans") or []), *spans]))[:8],
+                    **item, "spans": list(dict.fromkeys([*cited, *spans, *old_spans]))[:32],
                     "chain_ids": list(dict.fromkeys([*(previous.get("chain_ids") or []),
                                                      *(cid for cid in item["chain_ids"] if cid in text)]))[:20],
                 }
@@ -447,12 +482,14 @@ class MemoryJournal:
 
     def execute(self, command, execute):
         entry = self.begin(command)
+        self.last_tool_receipt = entry[0]
         try:
             result = execute()
         except BaseException as exc:
             self.finish(entry, f"{type(exc).__name__}: {exc}", status="failed")
             raise
         self.finish(entry, result)
+        self.tool_result_refs["result:" + hashlib.sha256(str(result).strip().encode()).hexdigest()] = entry[0]
         if command.get("action") == "update_status" and str(result).startswith("动态状态已更新"):
             self.state_updated = True
         return result

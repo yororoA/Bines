@@ -64,7 +64,16 @@ class MainAgent:
         request = dict(payload)
         request.pop("stream", None)
         request["messages"] = with_current_time(with_website_observations(request.get("messages") or []))
-        return self.client.chat.completions.create(**request, stream=stream)
+        from common.context_budget import bound_request
+        request["messages"] = bound_request(request["messages"], tools=request.get("tools"),
+                                             response_format=request.get("response_format"),
+                                             max_output_tokens=request.get("max_tokens", 0))
+        payload["messages"] = request["messages"]
+        response = self.client.chat.completions.create(**request, stream=stream)
+        if not stream and getattr(response, "choices", None):
+            from thinking_model_helper import _confirm_memory_request
+            _confirm_memory_request(request["messages"])
+        return response
 
     def _ensure_system_prompt(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [{"role": "system", "content": self.get_system_prompt()}] + _clean_legacy_messages(messages)
@@ -108,11 +117,13 @@ class MainAgent:
                     holder["interrupted"] = True
                     return
                 response = self._post_chat_completion(payload, stream=True)
+                holder["submitted_messages"] = payload["messages"]
                 with response_lock:
                     current_response[0] = response
                 if cancelled.is_set():
                     holder["interrupted"] = True
                     return
+                request_confirmed = False
                 for chunk in response:
                     if cancelled.is_set() or (interrupt_check and interrupt_check()):
                         holder["interrupted"] = True
@@ -120,6 +131,10 @@ class MainAgent:
                     choices = getattr(chunk, "choices", None) or []
                     if not choices:
                         continue
+                    if not request_confirmed:
+                        from thinking_model_helper import _confirm_memory_request
+                        _confirm_memory_request(payload["messages"])
+                        request_confirmed = True
                     finish_reason = getattr(choices[0], "finish_reason", None)
                     if finish_reason:
                         holder["finish_reason"] = finish_reason

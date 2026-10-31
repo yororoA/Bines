@@ -11,6 +11,7 @@ from common.deepseek_client import get_deepseek_client
 from common.clock import with_current_time
 from common.website_perception import with_website_observations
 from common.model_usage import measured_request
+from common.context_budget import bound_request
 from skill_runner import SkillProtocolError, SkillRunner
 
 logger = logging.getLogger("bines.thinking.model")
@@ -66,9 +67,10 @@ class ThinkingModelHelper:
             client = DeepSeekClient(self.client.with_options(max_retries=max_retries))
         retry_budget = _retry_budget(max_tokens, retry_tokens)
         for attempt in range(2):
+            request_messages = bound_request(messages, response_format=response_format, max_output_tokens=max_tokens)
             response = measured_request(client.chat.completions.create,
                 model=self.model,
-                messages=messages,
+                messages=request_messages,
                 stream=False,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -78,7 +80,7 @@ class ThinkingModelHelper:
             )
             if not response.choices:
                 raise ModelCompletionError(f"model {self.model} returned no choices")
-            _confirm_memory_request(messages)
+            _confirm_memory_request(request_messages)
             choice = response.choices[0]
             text = (choice.message.content or "").strip()
             finish_reason = getattr(choice, "finish_reason", None)
@@ -174,8 +176,10 @@ class ThinkingModelHelper:
         for _ in range(max_iterations):
             request_messages = [*conversation, *([{"role": "system", "content": voice}] if voice else [])]
             request_messages = with_current_time(with_website_observations(request_messages))
+            request_base = request_messages
             budget = max_tokens
             for attempt in range(2):
+                request_messages = bound_request(request_base, tools=tools, max_output_tokens=budget)
                 response = measured_request(self.client.chat.completions.create,
                     model=self.model, messages=request_messages, tools=tools or None,
                     temperature=temperature, max_tokens=budget, stream=False,
@@ -205,6 +209,7 @@ class ThinkingModelHelper:
             conversation.append(assistant)
             for call in calls:
                 action = call.function.name
+                executed = False
                 try:
                     args = json.loads(call.function.arguments)
                 except (TypeError, json.JSONDecodeError):
@@ -215,6 +220,11 @@ class ThinkingModelHelper:
                          "action": action, "args": args}, source=source,
                         allowed_skills=allowed_skills,
                     )
+                    executed = True
                 history.append({"action": action, "result": result})
+                from tools.context import CURRENT_CONTEXT
+                journal = CURRENT_CONTEXT.get().journal
+                if executed and journal and isinstance(getattr(journal, "last_tool_receipt", None), str) and journal.last_tool_receipt:
+                    journal.tool_result_refs[call.id] = journal.last_tool_receipt
                 conversation.append({"role": "tool", "tool_call_id": call.id, "content": result})
         raise RuntimeError("QQ 工具调用达到轮次上限；已执行的操作保留回执")

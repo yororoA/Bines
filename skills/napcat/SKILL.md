@@ -7,7 +7,7 @@ actions: napcat_discover, napcat_catalog, napcat_call, napcat_operation, napcat_
 
 QQ空间可用 `napcat_discover(action="send_qzone_msg")` 查看真实参数，再自主发表说说；也可通过website的qzone浏览器入口读取和互动。接口未确认支持、登录验证或回执不确定时暂停，不声称发表成功。发消息、搜索、网页和QQ空间可以在同一持续活动中组合，用activity_continue保存下一步。
 
-本机及主人在私聊、群聊中的提示词均包含完整官方 API 索引。自主组合任意原生接口，已有参数时直接调用 `napcat_call(action="动作名", params={...})`；需要参数说明或运行状态时使用 `napcat_discover` / `napcat_catalog`，无需固定执行顺序。
+完整官方 API 索引通过 `napcat_discover` / `napcat_catalog` 按需读取，不重复放入每轮提示词。自主组合任意原生接口，已有参数时直接调用 `napcat_call(action="动作名", params={...})`；需要参数说明或运行状态时查询目录，无需固定执行顺序。
 
 目录优先合并运行中的 WebUI schema，并保留随项目附带的 NapCatDocs 版本文档。未配置 WebUI token 或服务离线时，全部文档 API 仍可查询，不需要凭空猜测动作和字段。每个条目会返回 schema_source 和 runtime_supported；null 表示未确认，false 表示运行时未发现，不得声称已支持或已执行。新增运行时 API 通过 napcat_discover() 发现；无参数 schema 的动作会保留提示。
 

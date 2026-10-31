@@ -63,13 +63,15 @@ class APIExposure(unittest.TestCase):
         self.assertEqual(manifest["actions"], 178)
         expected = {path.removeprefix("/") for path in document["paths"]}
         instructions = self.runner.instructions_for_source()
+        self.assertIn("Action `napcat_discover`", instructions)
+        self.assertIn("Arguments:", instructions)
         discovered = self.client.discover()
         self.assertEqual({row["action"] for row in discovered}, expected)
         self.assertTrue(all(row["runtime_supported"] is None for row in discovered))
         with patch("tools.napcat_tool.GatewayClient", return_value=self.client):
             for index, action in enumerate(sorted(expected)):
                 with self.subTest(action=action):
-                    self.assertIn(f"- {action}:", instructions)
+                    self.assertNotIn(f"- {action}:", instructions)
                     details = self.client.discover(action=action)
                     self.assertIn("payload", details)
                     self.assertIn("response", details)
@@ -90,19 +92,19 @@ class APIExposure(unittest.TestCase):
         self.assertEqual(status["allowed_actions"], 178)
         self.assertFalse(status["runtime_verified"])
 
-    def test_owner_model_has_full_index_and_remote_permissions_remain_scoped(self):
+    def test_owner_discovers_full_index_and_remote_permissions_remain_scoped(self):
         expected = set(reference_catalog())
         owner = Identity("99", "1", owner=True)
         with tool_context(ToolContext(owner, "trusted-test-event", "owner")):
             instructions = self.runner.instructions_for_source("QQ")
             self.assertIn("napcat_catalog", self.runner.actions_for_source("QQ"))
             self.assertIn("regulate_life", self.runner.actions_for_source("QQ"))
-            for action in expected:
-                self.assertIn(f"- {action}:", instructions)
+            self.assertIn("Action `napcat_discover`", instructions)
+            self.assertEqual({row["action"] for row in self.catalog.discover(owner)}, expected)
         stranger_group = Identity("99", "2", "10")
         with tool_context(ToolContext(stranger_group, "trusted-test-event", "remote")):
             instructions = self.runner.instructions_for_source("QQ")
-            self.assertIn(f"- send_group_msg:", instructions)
+            self.assertIn("Action `napcat_send`", instructions)
             self.assertNotIn("Action `napcat_send_custom_face`", instructions)
             self.assertNotIn("Action `regulate_life`", instructions)
             self.assertNotIn("- get_credentials:", instructions)
@@ -114,7 +116,7 @@ class APIExposure(unittest.TestCase):
             instructions = self.runner.instructions_for_source("QQ")
             self.assertIn("napcat_send_custom_face", instructions)
             self.assertNotIn("Action `regulate_life`", instructions)
-            self.assertIn("- get_credentials:", instructions)
+            self.assertIn("Action `napcat_discover`", instructions)
         discovered = self.catalog.discover(owner_group)
         self.assertEqual(
             {row["action"] for row in discovered},
@@ -128,7 +130,7 @@ class APIExposure(unittest.TestCase):
         for identity in (Identity("99", "2"),):
             with tool_context(ToolContext(identity, "trusted-test-event", "remote")):
                 instructions = self.runner.instructions_for_source("QQ")
-                self.assertIn(f"- send_group_msg:", instructions)
+                self.assertIn("Action `napcat_send`", instructions)
                 self.assertNotIn("- get_credentials:", instructions)
             discovered = self.catalog.discover(identity)
             self.assertEqual({row["action"] for row in discovered}, expected & SCOPED)
