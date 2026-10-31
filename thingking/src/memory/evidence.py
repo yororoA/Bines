@@ -27,6 +27,13 @@ _TOKEN_RUNS = re.compile(
 _RECALLED = {"[\u6d88\u606f\u5df2\u64a4\u56de]", "[message recalled]", "[message deleted]"}
 _INACTIVE = {"recalled", "withdrawn", "retracted", "deleted", "system"}
 _EXPANSIONS = ("retrieval", "context", "entities", "keywords", "aliases")
+_FINGERPRINT_FIELDS = (
+    "id", "scope", "content", "kind", "conversation_id", "subject_id", "role",
+    "actor_id", "actor_name", "origin", "source_ref", "ts", "start_ts", "end_ts",
+    "day_key", "episode_id", "tags",
+)
+_SOURCE_UPDATE_FIELDS = ",".join((*_FINGERPRINT_FIELDS, "meta", "deleted", "recalled", "withdrawn",
+                                 "retracted", "is_system_event", "status"))
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS retrieval_keys (
@@ -49,6 +56,19 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS idx_retrieval_keys_scope ON retrieval_keys(scope, kind)",
     "CREATE INDEX IF NOT EXISTS idx_retrieval_keys_pending ON retrieval_keys(indexed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_retrieval_keys_memory ON retrieval_keys(memory_id)",
+    "CREATE INDEX IF NOT EXISTS idx_retrieval_keys_message ON retrieval_keys(message_id)",
+    "CREATE INDEX IF NOT EXISTS idx_retrieval_message_episode ON messages(episode_id,scope)",
+    """CREATE TABLE IF NOT EXISTS retrieval_dirty_sources (
+        source_type TEXT NOT NULL, source_id TEXT NOT NULL,
+        PRIMARY KEY(source_type, source_id))""",
+    """CREATE TABLE IF NOT EXISTS retrieval_dependencies (
+        source_type TEXT NOT NULL, source_id TEXT NOT NULL,
+        dependent_type TEXT NOT NULL, dependent_id TEXT NOT NULL,
+        PRIMARY KEY(source_type,source_id,dependent_type,dependent_id))""",
+    "CREATE INDEX IF NOT EXISTS idx_retrieval_dependents ON retrieval_dependencies(dependent_type,dependent_id)",
+    "CREATE TABLE IF NOT EXISTS retrieval_sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS retrieval_vector_deletions (id TEXT PRIMARY KEY)",
     """CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_keys_fts
         USING fts5(id UNINDEXED, tokens, tokenize='unicode61 remove_diacritics 2')""",
     """CREATE TRIGGER IF NOT EXISTS retrieval_keys_ai AFTER INSERT ON retrieval_keys BEGIN
@@ -175,12 +195,7 @@ def _active(row: Mapping[str, Any], source_type: str, *, include_archived: bool 
 def _fingerprint(row: Mapping[str, Any], source_type: str) -> str:
     # Hash exact text, not models.content_hash's whitespace-normalized text.
     # Exclude lifecycle timestamps and vector marks so no-op sync stays a no-op.
-    names = (
-        "id", "scope", "content", "kind", "conversation_id", "subject_id", "role",
-        "actor_id", "actor_name", "origin", "source_ref", "ts", "start_ts", "end_ts",
-        "day_key", "episode_id", "tags",
-    )
-    payload = {name: row.get(name) for name in names}
+    payload = {name: row.get(name) for name in _FINGERPRINT_FIELDS}
     payload.update(source_type=source_type, meta=_object(row.get("meta")),
                    key_version=1, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
     return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
@@ -224,11 +239,121 @@ class EvidenceStore:
     def ensure_schema(self) -> None:
         """Fail atomically if FTS5 is unavailable; never change schema_version."""
         with self._atomic():
+            tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for statement in _SCHEMA:
                 self.conn.execute(statement)
+            tracking_changed = self._install_dirty_triggers(tables)
+            initialized = self.conn.execute(
+                "SELECT 1 FROM retrieval_sync_state WHERE key='dirty_sources_v1'").fetchone()
+            if tracking_changed or not initialized or "retrieval_keys" not in tables:
+                self._queue_all_sources()
+                self.conn.execute("INSERT OR REPLACE INTO retrieval_sync_state VALUES('dirty_sources_v1','1')")
+            if "retrieval_keys_fts" not in tables:
+                self.conn.execute("INSERT OR REPLACE INTO retrieval_sync_state VALUES('repair_fts','1')")
+
+    def _install_dirty_triggers(self, tables):
+        # SQLite triggers, rather than Python callbacks/total_changes, also catch
+        # direct SQL and other connections, and roll back with the source write.
+        triggers = {r[0]: r[1] for r in self.conn.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'retrieval_dirty_%'")}
+        changed = False
+        # SQLite permits absent names in UPDATE OF. Include importer extensions
+        # before they exist, so ALTER TABLE followed by UPDATE cannot slip through
+        # the interval before our next sync; never reference those optional values
+        # directly in the trigger body.
+        specs = [
+            ("memories", "memory", "id", _SOURCE_UPDATE_FIELDS, ""),
+            ("messages", "message", "id", _SOURCE_UPDATE_FIELDS,
+             "INSERT OR IGNORE INTO retrieval_dirty_sources VALUES('conversation',{alias}.conversation_id);"
+             "INSERT OR IGNORE INTO retrieval_dirty_sources SELECT 'message_ref',{alias}.source_ref WHERE {alias}.source_ref IS NOT NULL;"
+             "INSERT OR IGNORE INTO retrieval_dirty_sources SELECT 'memory',{alias}.episode_id WHERE {alias}.episode_id IS NOT NULL;"),
+        ]
+        if "experiences" in tables:
+            specs.append(("experiences", "experience", "source_ref", "source_ref,scope,record,memory_id", ""))
+        if "association_nodes" in tables:
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_retrieval_node_memory ON association_nodes(memory_id)")
+            specs.append(("association_nodes", "node", "id",
+                          "id,scope,memory_id,message_ids,family,digest,revision,retrieval_status,superseded",
+                          "INSERT OR IGNORE INTO retrieval_dirty_sources SELECT 'memory',{alias}.memory_id WHERE {alias}.memory_id IS NOT NULL;"
+                          "INSERT OR IGNORE INTO retrieval_dirty_sources SELECT 'message',CAST(value AS TEXT) FROM json_each({alias}.message_ids) WHERE true;"))
+        if "memory_corrections" in tables:
+            specs.append(("memory_corrections", "node", "node_id", "node_id,scope,kind,quote,replacement", ""))
+        if "association_message_nodes" in tables:
+            specs.append(("association_message_nodes", "message", "message_id", "message_id,node_id", ""))
+        for table, kind, field, columns, extra in specs:
+            for event, suffix, aliases in (("INSERT", "ai", ("new",)), ("UPDATE OF " + columns, "au", ("old", "new")),
+                                           ("DELETE", "ad", ("old",))):
+                body = "".join(
+                    f"INSERT OR IGNORE INTO retrieval_dirty_sources VALUES('{kind}',CAST({alias}.{field} AS TEXT));"
+                    + extra.format(alias=alias) for alias in aliases)
+                # An outer UPSERT can override a trigger's INSERT OR IGNORE.
+                # The explicit UPSERT clause retains idempotence in that case.
+                body = body.replace("INSERT OR IGNORE INTO", "INSERT INTO").replace(
+                    ";", " ON CONFLICT(source_type,source_id) DO NOTHING;")
+                name = f"retrieval_dirty_{table}_{suffix}"
+                statement = f"CREATE TRIGGER {name} AFTER {event} ON {table} BEGIN {body} END"
+                if triggers.get(name) != statement:
+                    self.conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    self.conn.execute(statement)
+                    changed = True
+        self.conn.execute("""CREATE TRIGGER IF NOT EXISTS retrieval_keys_dirty_ad AFTER DELETE ON retrieval_keys BEGIN
+            INSERT INTO retrieval_vector_deletions VALUES(old.id) ON CONFLICT(id) DO NOTHING;
+            INSERT INTO retrieval_dirty_sources VALUES(old.source_type,COALESCE(old.memory_id,CAST(old.message_id AS TEXT)))
+                ON CONFLICT(source_type,source_id) DO NOTHING;
+        END""")
+        return changed
+
+    def _queue_all_sources(self):
+        for kind, table in (("memory", "memories"), ("message", "messages")):
+            self.conn.execute(f"INSERT OR IGNORE INTO retrieval_dirty_sources SELECT ?,CAST(id AS TEXT) FROM {table}", (kind,))
+        # Include missing sources so a rebuild also removes orphaned keys.
+        self.conn.execute("""INSERT OR IGNORE INTO retrieval_dirty_sources
+            SELECT source_type,COALESCE(memory_id,CAST(message_id AS TEXT)) FROM retrieval_keys""")
+
+    def _source_fingerprint(self, row, source_type):
+        fingerprint = _fingerprint(row, source_type)
+        experience = self._experience_record(row) if source_type == "memory" else None
+        return hashlib.sha256(_json([fingerprint, experience]).encode()).hexdigest() if experience is not None else fingerprint
+
+    def _replace_dependencies(self, row, source_type):
+        source_id = str(row["id"])
+        self.conn.execute("DELETE FROM retrieval_dependencies WHERE dependent_type=? AND dependent_id=?", (source_type, source_id))
+        dependencies = set()
+        if source_type == "memory":
+            meta = _object(row.get("meta"))
+            dependencies.update(("message", str(mid)) for mid in meta.get("source_message_ids") or [])
+            if meta.get("fact_source_message_id"):
+                dependencies.add(("message", str(meta["fact_source_message_id"])))
+            dependencies.update(("memory", str(mid)) for mid in [*(meta.get("source_memory_ids") or []), *(meta.get("episode_ids") or [])])
+            if meta.get("episode_id"):
+                dependencies.add(("memory", str(meta["episode_id"])))
+            if meta.get("experience_ref"):
+                dependencies.add(("experience", str(meta["experience_ref"])))
+            dependencies.update(("experience", str(ref)) for ref in meta.get("source_experience_refs") or [])
+            for ref in meta.get("source_message_refs") or []:
+                dependencies.add(("message_ref", str(ref)))
+                message = self.conn.execute("SELECT id FROM messages WHERE source_ref=? AND scope=?", (ref, row["scope"])).fetchone()
+                if message:
+                    dependencies.add(("message", str(message[0])))
+            if row.get("kind") == "episode":
+                dependencies.update(("message", str(r[0])) for r in self.conn.execute(
+                    "SELECT id FROM messages WHERE episode_id=? AND scope=?", (row["id"], row["scope"])))
+            if row.get("conversation_id") and meta.get("message_range"):
+                dependencies.add(("conversation", row["conversation_id"]))
+        graph = getattr(self.repo, "associations", None)
+        node = (graph.for_memory(row["id"]) if source_type == "memory" else graph.for_message(row["id"])) if graph else None
+        if node:
+            dependencies.add(("node", node["id"]))
+            for root in node["family"]:
+                kind, _, sid = root.partition(":")
+                if kind in {"memory", "message", "experience"}:
+                    dependencies.add((kind, sid))
+        self.conn.executemany("INSERT OR IGNORE INTO retrieval_dependencies VALUES(?,?,?,?)",
+                             [(kind, sid, source_type, source_id) for kind, sid in dependencies
+                              if (kind, sid) != (source_type, source_id)])
 
     def _source_keys(self, row: Dict[str, Any], source_type: str) -> Iterator[Dict[str, Any]]:
-        digest = _fingerprint(row, source_type)
+        digest = self._source_fingerprint(row, source_type)
         expansions = _expansions(_object(row.get("meta")))
         context_names = ("conversation_id", "subject_id", "actor_id", "actor_name", "role", "day_key")
         context = [str(row[name]) for name in context_names if row.get(name)]
@@ -319,7 +444,7 @@ class EvidenceStore:
         evidence.sort(key=lambda row: -len(terms.intersection(_tokens(row["content"]))))
         return list({row["source_ref"]: row for row in evidence}.values())[:limit]
 
-    def sync(self) -> Dict[str, int]:
+    def sync(self, *, rebuild: bool = False, repair_fts: bool = True) -> Dict[str, int]:
         """Incrementally upsert/prune keys and repair FTS from current sources.
 
         Stats count keys, not source rows. Changed source text, scope, metadata or
@@ -328,14 +453,29 @@ class EvidenceStore:
         stats = dict(added=0, updated=0, deleted=0, unchanged=0, total=0, fts_repaired=0)
         with self._atomic():
             self.ensure_schema()
-            existing = {row["id"]: dict(row) for row in self.conn.execute("SELECT * FROM retrieval_keys")}
-            seen = set()
-            for source_type, table in (("memory", "memories"), ("message", "messages")):
-                for raw in self.conn.execute(f"SELECT * FROM {table} ORDER BY id"):
+            if rebuild:
+                self._queue_all_sources()
+            dirty = set(tuple(r) for r in self.conn.execute("SELECT source_type,source_id FROM retrieval_dirty_sources"))
+            pending = list(dirty)
+            while pending:
+                dependency = pending.pop()
+                for dependent in self.conn.execute("SELECT dependent_type,dependent_id FROM retrieval_dependencies WHERE source_type=? AND source_id=?", dependency):
+                    dependent = tuple(dependent)
+                    if dependent not in dirty:
+                        dirty.add(dependent)
+                        pending.append(dependent)
+            for source_type, source_id in sorted(dirty):
+                if source_type not in {"memory", "message"}:
+                    continue
+                table, field = ("memories", "memory_id") if source_type == "memory" else ("messages", "message_id")
+                raw = self.conn.execute(f"SELECT * FROM {table} WHERE id=?", (source_id,)).fetchone()
+                existing = {r["id"]: dict(r) for r in self.conn.execute(f"SELECT * FROM retrieval_keys WHERE {field}=?", (source_id,))}
+                seen = set()
+                if raw:
                     row = dict(raw)
-                    if not self._direct_source(row, source_type):
-                        continue
-                    for key in self._source_keys(row, source_type):
+                    self._replace_dependencies(row, source_type)
+                    keys = self._source_keys(row, source_type) if self._direct_source(row, source_type) else ()
+                    for key in keys:
                         key_id = key["id"]
                         seen.add(key_id)
                         old = existing.get(key_id)
@@ -352,22 +492,28 @@ class EvidenceStore:
                             tuple(key.values()),
                         )
                         stats["updated" if old else "added"] += 1
-            obsolete = set(existing) - seen
-            self.conn.executemany("DELETE FROM retrieval_keys WHERE id = ?", ((key_id,) for key_id in obsolete))
-            stats["deleted"] = len(obsolete)
+                else:
+                    self.conn.execute("DELETE FROM retrieval_dependencies WHERE dependent_type=? AND dependent_id=?", (source_type, source_id))
+                obsolete = set(existing) - seen
+                self.conn.executemany("DELETE FROM retrieval_keys WHERE id = ?", ((key_id,) for key_id in obsolete))
+                stats["deleted"] += len(obsolete)
+            self.conn.executemany("DELETE FROM retrieval_dirty_sources WHERE source_type=? AND source_id=?", list(dirty))
             # Repair a missing, stale or partially rebuilt FTS without touching
             # healthy rows or the independently managed vector marks.
+            needs_repair = repair_fts or rebuild or self.conn.execute("SELECT 1 FROM retrieval_sync_state WHERE key='repair_fts'").fetchone()
             removed = self.conn.execute(
                 "DELETE FROM retrieval_keys_fts WHERE rowid IN ("
                 "SELECT f.rowid FROM retrieval_keys_fts f LEFT JOIN retrieval_keys k ON k.rowid = f.rowid "
                 "WHERE k.id IS NULL OR f.id IS NOT k.id OR f.tokens IS NOT k.tokens)"
-            ).rowcount
+            ).rowcount if needs_repair else 0
             inserted = self.conn.execute(
                 "INSERT INTO retrieval_keys_fts(rowid, id, tokens) "
                 "SELECT k.rowid, k.id, k.tokens FROM retrieval_keys k WHERE NOT EXISTS "
                 "(SELECT 1 FROM retrieval_keys_fts f WHERE f.rowid = k.rowid)"
-            ).rowcount
-            stats.update(total=len(seen), fts_repaired=removed + inserted)
+            ).rowcount if needs_repair else 0
+            self.conn.execute("DELETE FROM retrieval_sync_state WHERE key='repair_fts'")
+            total = self.conn.execute("SELECT COUNT(*) FROM retrieval_keys").fetchone()[0]
+            stats.update(total=total, unchanged=total-stats["added"]-stats["updated"], fts_repaired=removed + inserted)
         return stats
 
     def _live_keys(self, rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -387,7 +533,7 @@ class EvidenceStore:
                 ):
                     source = dict(raw)
                     if self._direct_source(source, source_type):
-                        sources[source_type, source["id"]] = (source["scope"], _fingerprint(source, source_type))
+                        sources[source_type, source["id"]] = (source["scope"], self._source_fingerprint(source, source_type))
         result = {}
         for row in rows:
             source_id = row["memory_id"] if row["source_type"] == "memory" else row["message_id"]
@@ -461,7 +607,7 @@ class EvidenceStore:
                 "ORDER BY id"
             )
             while limit is None or len(result) < limit:
-                rows = cursor.fetchmany(_BATCH_SIZE)
+                rows = cursor.fetchmany(_BATCH_SIZE if limit is None else min(_BATCH_SIZE, limit - len(result)))
                 if not rows:
                     break
                 result.extend(self._live_keys(rows).values())

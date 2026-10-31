@@ -40,30 +40,46 @@ class HybridRetriever:
     def __init__(self, repo, index, settings):
         self.repo, self.index, self.settings = repo, index, settings
         self.keys = EvidenceStore(repo)
-        self._synced_changes = -1
+        self._vector_reconciled = False
         self.last_trace = {}
 
-    def sync(self, vectors=False, rebuild=False):
+    def sync(self, vectors=False, rebuild=False, full=False):
         if rebuild:
             self.keys.clear_index_marks()
-        if self._synced_changes != self.repo.conn.total_changes or rebuild:
-            result = self.keys.sync()
-            self._synced_changes = self.repo.conn.total_changes
-        else:
-            result = {"added": 0, "updated": 0, "deleted": 0}
+        result = self.keys.sync(rebuild=rebuild, repair_fts=rebuild)
         result["vectors"] = 0
         if vectors and hasattr(self.index, "upsert_keys"):
             try:
-                alive = set(self.keys.all_ids())
-                obsolete = set(self.index.key_ids()) - alive
-                self.index.delete_keys(list(obsolete))
-                while batch := self.keys.unindexed_keys():
+                batch_size = max(1, min(512, getattr(self.settings, "index_batch_size", 64)))
+                if not self._vector_reconciled or rebuild:
+                    # One startup repair handles indexes made before deletion
+                    # tombstones existed. Normal batches never enumerate vectors.
+                    alive = {r[0] for r in self.repo.conn.execute("SELECT id FROM retrieval_keys")}
+                    self.repo.conn.executemany("INSERT OR IGNORE INTO retrieval_vector_deletions VALUES(?)",
+                                               [(key,) for key in set(self.index.key_ids()) - alive])
+                    self._vector_reconciled = not self.repo.conn.in_transaction
+                while True:
+                    obsolete = [r[0] for r in self.repo.conn.execute(
+                        "SELECT id FROM retrieval_vector_deletions ORDER BY id LIMIT ?", (batch_size,))]
+                    if not obsolete:
+                        break
+                    self.index.delete_keys(obsolete)
+                    self.repo.conn.executemany("DELETE FROM retrieval_vector_deletions WHERE id=?", [(key,) for key in obsolete])
+                    if not full:
+                        break
+                while batch := self.keys.unindexed_keys(limit=batch_size):
+                    # A re-created key may still have a queued deletion. Cancel
+                    # it only after a successful upsert, preserving failed work.
                     ids = self.index.upsert_keys(batch)
+                    if not ids:
+                        break
+                    self.repo.conn.executemany("DELETE FROM retrieval_vector_deletions WHERE id=?", [(key,) for key in ids])
                     self.keys.mark_indexed(ids)
                     result["vectors"] += len(ids)
+                    if not full:
+                        break
             except Exception:
                 log.exception("检索键向量更新失败，保留待重建标记，全文检索继续可用")
-        self._synced_changes = self.repo.conn.total_changes
         return result
 
     def search(self, query, scopes, kinds=None, k=10, excluded=(), as_of=None, include_history=False,
@@ -184,7 +200,8 @@ class HybridRetriever:
             if node["id"] not in rows:
                 rows[node["id"]] = hit
                 direct_ids.append(node["id"])
-        expanded = graph.expand(query, direct_ids, scopes, visible)
+        expansion_enabled = getattr(self.settings, "graph_expansion_enabled", True)
+        expanded = graph.expand(query, direct_ids, scopes, visible) if expansion_enabled else []
         graph_ids = []
         for nid, activation, chains in expanded:
             rows[nid] = {**rows.get(nid, {}), "graph_activation": activation, "chain_ids": chains}
@@ -211,7 +228,8 @@ class HybridRetriever:
             if len(output) == k:
                 break
         self.last_trace["graph_candidates"] = len(graph_ids)
-        self.last_trace["graph_hops"] = self.settings.graph_max_hops
+        self.last_trace["graph_hops"] = self.settings.graph_max_hops if expansion_enabled else 0
+        self.last_trace["graph_expansion"] = expansion_enabled
         competition = getattr(self.repo, "competition", None)
         return competition.mint(query, output) if competition else output
 

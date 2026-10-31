@@ -541,8 +541,9 @@ class MemoryRepository:
         )
         return [_memory_row(r) for r in rows]
 
-    def deleted_indexed_memory_ids(self) -> List[str]:
-        rows = self.conn.execute("SELECT id FROM memories WHERE deleted = 1 AND indexed_at IS NOT NULL")
+    def deleted_indexed_memory_ids(self, limit: Optional[int] = None) -> List[str]:
+        rows = self.conn.execute("SELECT id FROM memories WHERE deleted = 1 AND indexed_at IS NOT NULL ORDER BY id"
+                                 + (" LIMIT ?" if limit is not None else ""), (limit,) if limit is not None else ())
         return [r["id"] for r in rows]
 
     def mark_indexed(self, memory_ids: Sequence[str], indexed: bool = True) -> None:

@@ -51,6 +51,8 @@ class MemorySettings:
     association_model_candidates: int = 6
     association_backfill_batch: int = 16
     graph_max_hops: int = 2
+    graph_expansion_enabled: bool = True
+    index_batch_size: int = 64
     graph_candidate_limit: int = 40
     raw_protect_k: int = 3
     episode_protect_k: int = 1
@@ -87,6 +89,8 @@ def load_settings() -> MemorySettings:
         summarize_idle_seconds=max(60, int(os.environ.get("BINES_MEMORY_IDLE_SUMMARY_SECONDS", "1800"))),
         summarize_idle_min=max(2, min(40, int(os.environ.get("BINES_MEMORY_IDLE_SUMMARY_MIN", "4")))),
         associations_enabled=os.environ.get("BINES_MEMORY_ASSOCIATIONS", "true").lower() in {"true", "1", "yes", "on"},
+        graph_expansion_enabled=os.environ.get("BINES_MEMORY_GRAPH_EXPANSION", "true").lower() in {"true", "1", "yes", "on"},
+        index_batch_size=max(1, min(512, int(os.environ.get("BINES_MEMORY_INDEX_BATCH_SIZE", "64")))),
         retention_enabled=os.environ.get("BINES_MEMORY_RETENTION", "false").lower() in {"true", "1", "yes", "on"},
         association_candidates=max(1, min(40, int(os.environ.get("BINES_MEMORY_ASSOCIATION_CANDIDATES", "12")))),
         association_model_candidates=max(1, min(12, int(os.environ.get("BINES_MEMORY_ASSOCIATION_MODEL_CANDIDATES", "6")))),

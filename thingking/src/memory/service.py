@@ -48,6 +48,7 @@ JOB_STATE = "update_state"
 ASSISTANT_ACTOR = "assistant"
 SEMANTIC_DUPLICATE_DISTANCE = 0.08
 DIARY_CHECK_INTERVAL = 600
+INDEX_CHECK_INTERVAL = 5
 CROSS_CHANNEL_SECONDS = 12 * 3600
 CROSS_CHANNEL_LIMIT = 8
 
@@ -104,6 +105,7 @@ class MemoryService:
         self.settings = settings
         self.clock = clock
         self._last_diary_check = 0.0
+        self._last_index_check = float("-inf")
         # 时态历史与检索键都是派生层：服务显式挂载，独立仓库使用时不强制迁移。
         self.repo.temporal = TemporalStore(repo)
         self.retriever = HybridRetriever(repo, index, settings)
@@ -786,7 +788,13 @@ class MemoryService:
             self._last_diary_check = now
             self.enqueue_due_summaries()
             self.enqueue_due_diaries()
-            self.reconcile_index()
+            self.reconcile_index(full=False)
+            self._last_index_check = now
+        elif now - self._last_index_check >= INDEX_CHECK_INTERVAL:
+            # Keep a backlog moving without coupling every batch to the much
+            # slower diary, graph-backfill and retention maintenance interval.
+            self._reconcile_vectors(full=False)
+            self._last_index_check = now
         deferred = []
         while True:
             job = self.repo.claim_job(self.settings.job_lease_seconds,
@@ -1128,16 +1136,23 @@ class MemoryService:
             for fact in facts or ():
                 validate_corrected_text(str(fact.get("content") or ""), constraints)
             valid_facts = []
+            human_messages = [m for m in messages if m["role"] == ROLE_USER and m["origin"] == ORIGIN_LIVE]
+            actors = {m["actor_id"] for m in human_messages if m["actor_id"]}
             for fact in facts or ():
-                # A new personal fact requires a real participant's source message.
-                # Legacy callers without predicates remain compatible in ordinary
-                # dialogue; tool/observation-only chunks cannot produce user facts.
+                # Personal facts must be attributed to the speaker of the cited
+                # message. Preserve old unversioned callers only when exactly one
+                # participant makes the attribution unambiguous.
+                subject = str(fact.get("subject") or "").strip()
+                if scope == OWNER_SCOPE and subject in ("", "user"):
+                    subject = OWNER_ACTOR
+                elif not subject and len(actors) == 1:
+                    subject = next(iter(actors))
                 source_id = fact.get("source_message_id")
-                has_human = any(m["role"] == ROLE_USER and m["origin"] == ORIGIN_LIVE for m in messages)
-                source = next((m for m in messages if str(m["id"]) == str(source_id)
-                               and m["role"] == ROLE_USER and m["origin"] == ORIGIN_LIVE), None)
-                if has_human and (source_id is None or source):
-                    valid_facts.append(fact)
+                source = next((m for m in human_messages if str(m["id"]) == str(source_id)
+                               and m["actor_id"] == subject), None)
+                legacy = source_id is None and not fact.get("predicate") and actors == {subject}
+                if source or legacy:
+                    valid_facts.append({**fact, "subject": subject})
             fresh_facts = self._fresh_facts(scope, valid_facts)
             message_ids = [m["id"] for m in messages]
             day = messages[0]["day_key"]
@@ -1153,7 +1168,6 @@ class MemoryService:
             new_ids.append(episode_id)
             self.repo.mark_consolidated_ids(conversation_id, message_ids, episode_id)
             protected = self.retention.apply(job_id, episode_id)
-            actors = {m["actor_id"] for m in messages if m["role"] == ROLE_USER}
             for fact in fresh_facts:
                 subject = str(fact.get("subject") or "").strip()
                 if scope == OWNER_SCOPE and subject in ("", "user"):
@@ -1207,7 +1221,7 @@ class MemoryService:
             existing = self.repo.find_memory_by_hash(scope, KIND_SEMANTIC, content_hash(text), fact.get("subject"))
             if existing is None:
                 try:
-                    near = self.index.query(text, [scope], [KIND_SEMANTIC], n=1)
+                    near = self.index.query(text, [scope], [KIND_SEMANTIC], n=1, subject_id=fact.get("subject"))
                 except Exception:
                     near = []
                 if near and near[0][1] < SEMANTIC_DUPLICATE_DISTANCE:
@@ -1295,7 +1309,8 @@ class MemoryService:
 
     # ---------- index maintenance ----------
     def _index_ids(self, memory_ids: Sequence[str]) -> None:
-        rows = list(self.repo.get_memories(memory_ids).values())
+        batch_size = max(1, min(512, getattr(self.settings, "index_batch_size", 64)))
+        rows = list(self.repo.get_memories(list(memory_ids)[:batch_size]).values())
         self._index_rows(rows)
         self.retriever.sync(vectors=True)
 
@@ -1312,23 +1327,30 @@ class MemoryService:
         self.repo.mark_indexed(indexed)
         return len(indexed)
 
-    def reconcile_index(self) -> Dict[str, int]:
+    def reconcile_index(self, full: bool = True) -> Dict[str, int]:
+        """Explicit maintenance drains the index; worker polling does one batch."""
         with self.repo.transaction():
             self.graph.backfill(limit=self.settings.association_backfill_batch)
             self.retention.enforce_budget()
-        keys = self.retriever.sync(vectors=True)
+        return self._reconcile_vectors(full=full)
+
+    def _reconcile_vectors(self, full: bool = False) -> Dict[str, int]:
+        keys = self.retriever.sync(vectors=True, full=full)
         if not getattr(self.index, "persistent", True):
             return {"indexed": 0, "removed": 0, "keys": keys}
         indexed = 0
+        batch_size = max(1, min(512, getattr(self.settings, "index_batch_size", 64)))
         while True:
-            batch = self.repo.unindexed_memories()
+            batch = self.repo.unindexed_memories(limit=batch_size)
             if not batch:
                 break
             done = self._index_rows(batch)
             if done == 0:
                 break
             indexed += done
-        removed = self.repo.deleted_indexed_memory_ids()
+            if not full:
+                break
+        removed = self.repo.deleted_indexed_memory_ids(limit=None if full else batch_size)
         if removed:
             self.index.delete(removed)
             self.repo.mark_indexed(removed, indexed=False)
@@ -1340,7 +1362,8 @@ class MemoryService:
         self.index.reset()
         self.retriever.keys.clear_index_marks()
         self.repo.clear_index_marks()
-        result = self.reconcile_index()
+        self.retriever.keys.sync(rebuild=True)
+        result = self.reconcile_index(full=True)
         result["total"] = self.index.count()
         return result
 

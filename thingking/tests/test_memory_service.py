@@ -200,7 +200,7 @@ class ConsolidationTest(unittest.TestCase):
         facts = {f["content"]: f for f in self.fx.repo.list_memories(kinds=["semantic"])}
         self.assertEqual(facts["小明喜欢打篮球"]["subject_id"], f"qq:{STRANGER_QQ}")
         self.assertEqual(facts["小明喜欢打篮球"]["scope"], f"qq_group:{GROUP_ID}")
-        self.assertIsNone(facts["伪造的管理员事实"]["subject_id"])
+        self.assertNotIn("伪造的管理员事实", facts)
         context = self.fx.service.build_context(qq_group_env(STRANGER_QQ), "篮球")
         self.assertIn("小明喜欢打篮球", [p["content"] for p in context["profile"]])
 
