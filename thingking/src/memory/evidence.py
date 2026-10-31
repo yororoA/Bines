@@ -47,6 +47,7 @@ _SCHEMA = (
         chunk_index INTEGER NOT NULL,
         content TEXT NOT NULL,
         search_text TEXT NOT NULL,
+        search_hash TEXT NOT NULL DEFAULT '',
         source_hash TEXT NOT NULL,
         indexed_at REAL,
         meta TEXT NOT NULL,
@@ -221,9 +222,10 @@ def _strings(values: Sequence[str]) -> List[str]:
 class EvidenceStore:
     """Derived storage on repo.conn; construction creates only its own schema."""
 
-    def __init__(self, repo: MemoryRepository):
+    def __init__(self, repo: MemoryRepository, index=None):
         self.repo = repo
         self.conn = repo.conn
+        self.index = index
         self.reads = read_cache(repo)
         self.ensure_schema()
 
@@ -249,8 +251,17 @@ class EvidenceStore:
             columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(retrieval_dirty_sources)")}
             if "generation" not in columns:
                 self.conn.execute("ALTER TABLE retrieval_dirty_sources ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_retrieval_dirty_generation ON retrieval_dirty_sources(generation,source_type,source_id)")
             self.conn.execute("INSERT OR IGNORE INTO retrieval_sync_state VALUES('generation','0')")
+            key_columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(retrieval_keys)")}
+            if "search_hash" not in key_columns:
+                self.conn.execute("ALTER TABLE retrieval_keys ADD COLUMN search_hash TEXT NOT NULL DEFAULT ''")
             tracking_changed = self._install_dirty_triggers(tables)
+            signature = str(getattr(self.index, "chunking_signature", "chars-700-80")) + ":cold-fts-v2:search-hash-v1"
+            prior_signature = self.conn.execute("SELECT value FROM retrieval_sync_state WHERE key='chunking_signature'").fetchone()
+            if not prior_signature or prior_signature[0] != signature:
+                self._queue_all_sources()
+                self.conn.execute("INSERT OR REPLACE INTO retrieval_sync_state VALUES('chunking_signature',?)", (signature,))
             initialized = self.conn.execute(
                 "SELECT 1 FROM retrieval_sync_state WHERE key='dirty_sources_v1'").fetchone()
             if tracking_changed or not initialized or "retrieval_keys" not in tables:
@@ -336,33 +347,18 @@ class EvidenceStore:
     def _source_fingerprint(self, row, source_type):
         fingerprint = _fingerprint(row, source_type)
         experience = self._experience_record(row) if source_type == "memory" else None
-        return hashlib.sha256(_json([fingerprint, experience]).encode()).hexdigest() if experience is not None else fingerprint
+        signature = str(getattr(self.index, "chunking_signature", "chars-700-80"))
+        return hashlib.sha256(_json([fingerprint, experience, signature]).encode()).hexdigest()
 
     def _replace_dependencies(self, row, source_type):
         source_id = str(row["id"])
         self.conn.execute("DELETE FROM retrieval_dependencies WHERE dependent_type=? AND dependent_id=?", (source_type, source_id))
         dependencies = set()
         if source_type == "memory":
-            meta = _object(row.get("meta"))
-            dependencies.update(("message", str(mid)) for mid in meta.get("source_message_ids") or [])
-            if meta.get("fact_source_message_id"):
-                dependencies.add(("message", str(meta["fact_source_message_id"])))
-            dependencies.update(("memory", str(mid)) for mid in [*(meta.get("source_memory_ids") or []), *(meta.get("episode_ids") or [])])
-            if meta.get("episode_id"):
-                dependencies.add(("memory", str(meta["episode_id"])))
-            if meta.get("experience_ref"):
-                dependencies.add(("experience", str(meta["experience_ref"])))
-            dependencies.update(("experience", str(ref)) for ref in meta.get("source_experience_refs") or [])
-            for ref in meta.get("source_message_refs") or []:
-                dependencies.add(("message_ref", str(ref)))
-                message = self.conn.execute("SELECT id FROM messages WHERE source_ref=? AND scope=?", (ref, row["scope"])).fetchone()
-                if message:
-                    dependencies.add(("message", str(message[0])))
-            if row.get("kind") == "episode":
-                dependencies.update(("message", str(r[0])) for r in self.conn.execute(
-                    "SELECT id FROM messages WHERE episode_id=? AND scope=?", (row["id"], row["scope"])))
-            if row.get("conversation_id") and meta.get("message_range"):
-                dependencies.add(("conversation", row["conversation_id"]))
+            from .dependencies import direct_dependencies
+            dependencies.update(direct_dependencies(self.repo, row, include_context=True))
+        elif row.get("episode_id"):
+            dependencies.add(("memory", row["episode_id"]))
         graph = getattr(self.repo, "associations", None)
         node = (graph.for_memory(row["id"]) if source_type == "memory" else graph.for_message(row["id"])) if graph else None
         if node:
@@ -393,7 +389,13 @@ class EvidenceStore:
         if experience:
             from .experience import text
             source_text += "\n" + text(experience.get("args", {})) + "\n" + text(experience.get("result", ""))
-        for chunk_index, chunk in enumerate(_chunks(source_text)):
+        splitter = getattr(self.index, "split_text", _chunks)
+        fit_text = getattr(self.index, "fit_text", lambda text: text)
+        tier = "hot" if self._direct_source(row, source_type) else "cold"
+        lexical_context = "\n".join([*context, *(text for _, text in expansions)])
+        for chunk_index, chunk in enumerate(splitter(source_text)):
+            lexical_text = "\n".join([chunk, lexical_context])
+            search_text = fit_text(lexical_text)
             yield {
                 "id": f"{prefix}:{row['id']}:{chunk_index}",
                 "scope": row["scope"],
@@ -404,12 +406,18 @@ class EvidenceStore:
                 "source_ref": row.get("source_ref"),
                 "chunk_index": chunk_index,
                 "content": chunk,
-                "search_text": "\n".join([chunk, *context, *(text for _, text in expansions)]),
+                "search_text": search_text,
+                "search_hash": hashlib.sha256(search_text.encode()).hexdigest(),
+                "tokens": " ".join(_tokens(lexical_text)),
                 "source_hash": digest,
                 "meta": _json({
                     "source_type": source_type, "source_id": row["id"],
                     "source_ref": row.get("source_ref"), "origin": row.get("origin"),
                     "subject_id": row.get("subject_id"),
+                    "retrieval_status": tier,
+                    "episode_id": row.get("episode_id"),
+                    "ts": row.get("ts"),
+                    "lexical_context": lexical_context,
                     "expansion_sources": sorted({path for path, _ in expansions}),
                 }),
             }
@@ -420,6 +428,22 @@ class EvidenceStore:
         if status is False:
             return False
         return _active(row, source_type, include_archived=status is True)
+
+    def _cold_source(self, row, source_type):
+        """Archived originals retain a lexical rescue path, never cold vectors."""
+        if source_type != "message" or not _active(row, source_type, include_archived=True):
+            return False
+        graph = getattr(self.repo, "associations", None)
+        node = graph.for_message(row["id"]) if graph else None
+        if node and (not graph.valid(node) or node["retrieval_status"] != "cold"):
+            return False
+        if not node and not (row.get("episode_id") or row.get("origin") == "archived"):
+            return False
+        if row.get("episode_id"):
+            summary = self.repo.get_memory(row["episode_id"])
+            if not summary or summary["scope"] != row["scope"] or not _active(summary, "memory"):
+                return False
+        return True
 
     def _experience_record(self, memory):
         ref = _object(memory.get("meta")).get("experience_ref")
@@ -507,7 +531,7 @@ class EvidenceStore:
             while limit_sources is None or processed < limit_sources:
                 batch_size = _BATCH_SIZE if limit_sources is None else min(_BATCH_SIZE, limit_sources - processed)
                 queued = self.conn.execute("SELECT source_type,source_id,generation FROM retrieval_dirty_sources "
-                                           "ORDER BY source_type,source_id LIMIT ?", (batch_size,)).fetchall()
+                                           "ORDER BY generation,source_type,source_id LIMIT ?", (batch_size,)).fetchall()
                 if not queued:
                     break
                 for source_type, source_id, generation in queued:
@@ -524,7 +548,8 @@ class EvidenceStore:
                     if raw:
                         row = dict(raw)
                         self._replace_dependencies(row, source_type)
-                        keys = self._source_keys(row, source_type) if self._direct_source(row, source_type) else ()
+                        keys = self._source_keys(row, source_type) if (self._direct_source(row, source_type)
+                                or self._cold_source(row, source_type)) else ()
                         for key in keys:
                             key_id = key["id"]
                             seen.add(key_id)
@@ -532,7 +557,10 @@ class EvidenceStore:
                             if old and all(old[name] == value for name, value in key.items()):
                                 stats["unchanged"] += 1
                                 continue
-                            key["tokens"] = " ".join(_tokens(key["search_text"]))
+                            if "tokens" not in key:
+                                key["tokens"] = " ".join(_tokens(key["search_text"]))
+                            if _object(key["meta"]).get("retrieval_status") == "cold":
+                                self.conn.execute("INSERT OR IGNORE INTO retrieval_vector_deletions VALUES(?)", (key_id,))
                             columns = list(key)
                             updates = ", ".join(f"{name} = excluded.{name}" for name in columns if name != "id")
                             self.conn.execute(
@@ -567,7 +595,7 @@ class EvidenceStore:
             stats.update(total=total, unchanged=total-stats["added"]-stats["updated"], fts_repaired=removed + inserted)
         return stats
 
-    def _live_keys(self, rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def _live_keys(self, rows: Sequence[Mapping[str, Any]], *, include_cold=False) -> Dict[str, Dict[str, Any]]:
         """Revalidate hashes after SQL authorization, including changes before sync."""
         sources = {}
         for source_type, table, field in (
@@ -583,7 +611,7 @@ class EvidenceStore:
                     f"AND scope IN ({_placeholders(scopes)})", (*batch, *scopes),
                 ):
                     source = dict(raw)
-                    if self._direct_source(source, source_type):
+                    if self._direct_source(source, source_type) or (include_cold and self._cold_source(source, source_type)):
                         sources[source_type, source["id"]] = (source["scope"], self._source_fingerprint(source, source_type))
         result = {}
         for row in rows:
@@ -591,12 +619,16 @@ class EvidenceStore:
             if sources.get((row["source_type"], source_id)) != (row["scope"], row["source_hash"]):
                 continue
             item = dict(row)
+            # This auxiliary index field is not a second source of truth. Old
+            # rows may be blank until their queued migration batch is processed.
+            if item.get("search_hash") and item["search_hash"] != hashlib.sha256(item["search_text"].encode()).hexdigest():
+                continue
             item["meta"] = _object(item["meta"])
             item.pop("tokens", None)
             result[item["id"]] = item
         return result
 
-    def get_keys(self, ids: Sequence[str], scopes: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    def get_keys(self, ids: Sequence[str], scopes: Sequence[str], *, include_cold=False) -> Dict[str, Dict[str, Any]]:
         """Return only authorized keys whose source is still active and unchanged."""
         ids, scopes = _strings(ids), _strings(scopes)
         if not ids or not scopes:
@@ -609,12 +641,13 @@ class EvidenceStore:
                     f"WHERE k.id IN ({_placeholders(batch)}) AND k.scope IN ({_placeholders(scopes)}) "
                     f"AND {_SOURCE_EXISTS}", (*batch, *scopes),
                 ).fetchall()
-                result.update(self._live_keys(rows))
+                result.update(self._live_keys(rows, include_cold=include_cold))
         return result
 
     def bm25_query(
         self, query: str, scopes: Sequence[str], kinds: Optional[Sequence[str]] = None, limit: int = 40,
-        *, accept=None, per_source: Optional[int] = None,
+        *, accept=None, per_source: Optional[int] = None, include_cold=False, cold_only=False,
+        scan_limit: Optional[int] = None,
     ) -> List[Tuple[str, float]]:
         """Return (key_id, raw FTS5 bm25), ascending: smaller is more relevant."""
         scopes = _strings(scopes)
@@ -622,6 +655,10 @@ class EvidenceStore:
         if not scopes or not terms or limit <= 0:
             return []
         conditions = [f"k.scope IN ({_placeholders(scopes)})", _SOURCE_EXISTS]
+        if cold_only:
+            conditions.append("json_extract(k.meta,'$.retrieval_status')='cold'")
+        elif not include_cold:
+            conditions.append("COALESCE(json_extract(k.meta,'$.retrieval_status'),'hot')!='cold'")
         params: List[Any] = list(scopes)
         if kinds is not None:
             kinds = _strings(kinds)
@@ -641,11 +678,13 @@ class EvidenceStore:
             )
             # Apply the limit after freshness checks so stale hits cannot crowd
             # out valid ones. Scope/kind filtering is already done inside SQL.
-            while len(hits) < limit:
-                rows = cursor.fetchmany(_BATCH_SIZE)
+            scanned = 0
+            while len(hits) < limit and (scan_limit is None or scanned < scan_limit):
+                rows = cursor.fetchmany(_BATCH_SIZE if scan_limit is None else min(_BATCH_SIZE, scan_limit-scanned))
                 if not rows:
                     break
-                live = self._live_keys(rows)
+                scanned += len(rows)
+                live = self._live_keys(rows, include_cold=include_cold or cold_only)
                 if accept is not None:
                     live = accept(live)
                 for row in rows:
@@ -666,7 +705,7 @@ class EvidenceStore:
         result = []
         with self._atomic():
             cursor = self.conn.execute(
-                "SELECT * FROM retrieval_keys " + ("WHERE indexed_at IS NULL " if only_unindexed else "") +
+                "SELECT * FROM retrieval_keys WHERE COALESCE(json_extract(meta,'$.retrieval_status'),'hot')!='cold' " + ("AND indexed_at IS NULL " if only_unindexed else "") +
                 "ORDER BY id"
             )
             while limit is None or len(result) < limit:
@@ -678,6 +717,10 @@ class EvidenceStore:
 
     def unindexed_keys(self, limit: int = 128) -> List[Dict[str, Any]]:
         return self._current_keys(only_unindexed=True, limit=limit)
+
+    def vector_pending_count(self):
+        return self.conn.execute("SELECT COUNT(*) FROM retrieval_keys WHERE indexed_at IS NULL "
+            "AND COALESCE(json_extract(meta,'$.retrieval_status'),'hot')!='cold'").fetchone()[0]
 
     def mark_indexed(self, ids: Sequence[str]) -> None:
         ids = _strings(ids)
@@ -768,6 +811,7 @@ class EvidenceStore:
 
     def evidence(
         self, key: str | Mapping[str, Any], scopes: Sequence[str], query: str = "", limit: int = 4,
+        *, include_cold: bool = False,
     ) -> List[Dict[str, Any]]:
         """Resolve real events, or explicitly label a verbatim summary fallback.
 
@@ -780,7 +824,7 @@ class EvidenceStore:
         if not key_id:
             return []
         with self._atomic():
-            current = self.get_keys([key_id], scopes).get(key_id)
+            current = self.get_keys([key_id], scopes, include_cold=include_cold).get(key_id)
             if not current:
                 return []
             source_type = current["source_type"]

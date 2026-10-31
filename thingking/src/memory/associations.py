@@ -12,7 +12,7 @@ from .read_cache import read_cache
 JOB_ASSOCIATE = "associate"
 RELATIONS = {"support", "similar", "event", "cause", "contradicts"}
 _SUPPORT = {"support": 1.0, "cause": .8, "event": .6, "similar": .3, "contradicts": 0.0}
-WEIGHT_POLICY = "event-evidence-v3"
+WEIGHT_POLICY = "citation-yield-decay-v4"
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS association_nodes (
@@ -226,23 +226,19 @@ class AssociationStore:
             if message and message["scope"] == scope:
                 return {f"message:{message['id']}"}
         roots = set()
-        for mid in meta.get("source_message_ids") or []:
-            message = self.repo.get_message(mid)
-            if message and message["scope"] == scope:
-                roots.add(f"message:{mid}")
-        for ref in meta.get("source_message_refs") or []:
-            row = self.conn.execute("SELECT id FROM messages WHERE source_ref=? AND scope=?", (ref, scope)).fetchone()
-            if row:
-                roots.add(f"message:{row[0]}")
-        linked = [*(meta.get("source_memory_ids") or []), *(meta.get("episode_ids") or [])]
-        if meta.get("episode_id"):
-            linked.append(meta["episode_id"])
-        for mid in linked:
-            source = self.repo.get_memory(mid)
-            if source and source["scope"] == scope:
-                roots.update(self._roots(source, seen))
+        from .dependencies import direct_dependencies
+        dependencies = direct_dependencies(self.repo, memory)
+        for kind, sid in dependencies:
+            if kind == "message":
+                message = self.repo.get_message(int(sid))
+                if message and message["scope"] == scope:
+                    roots.add(f"message:{sid}")
+            elif kind == "memory":
+                source = self.repo.get_memory(sid)
+                if source and source["scope"] == scope:
+                    roots.update(self._roots(source, seen))
         if not roots:
-            roots.update("experience:" + ref for ref in meta.get("source_experience_refs") or [])
+            roots.update("experience:" + sid for kind, sid in dependencies if kind == "experience")
         return roots or {f"memory:{memory['id']}"}
 
     def _upsert(self, scope, source_type, source_ref, memory_id, message_ids, family, prior=.5, background=False):
@@ -261,7 +257,7 @@ class AssociationStore:
         if source_type == "raw":
             sources = [self.repo.get_message(i) for i in message_ids]
             consolidated = sources[0].get("episode_id") if all(m.get("episode_id") for m in sources) else None
-            status = "cold" if consolidated else "hot"
+            status = "cold" if consolidated or any(m.get("origin") == "archived" for m in sources) else "hot"
         self.conn.execute("""INSERT INTO association_nodes
             (id,scope,source_type,source_ref,memory_id,message_ids,family,digest,revision,prior,
              retrieval_status,consolidated_into,activation_factor)
@@ -379,7 +375,9 @@ class AssociationStore:
         if not chain:
             return {}
         members = self.conn.execute("SELECT * FROM chain_memberships WHERE chain_id=?", (chain_id,)).fetchall()
-        if any(m["scored_revision"] != chain["revision"] for m in members):
+        result = {m["node_id"]: dict(m) for m in members}
+        # Citation reward changes with time even when no source/edge changes.
+        if members:
             nodes = {m["node_id"]: self.get(m["node_id"], scope) for m in members}
             nodes = {nid: n for nid, n in nodes.items() if self.valid(n)}
             supports = {nid: {} for nid in nodes}
@@ -406,18 +404,16 @@ class AssociationStore:
                 base = math.log(prior / (1 - prior)) + support
                 uses = getattr(self.repo, "usage", None)
                 counts = uses.counts(nid, chain_id) if uses else {}
-                recall = min(.6, .1 * math.log1p(counts.get("presented", 0)))
-                citation = min(.9, .25 * math.log1p(counts.get("cited", 0)))
+                citation = uses.reward(nid, chain_id) if uses else 0.0
                 correction = min(2, .5 * counts.get("corrected", 0))
-                self.conn.execute("""UPDATE chain_memberships SET recall_strength=?,citation_strength=?,
-                    scored_revision=? WHERE chain_id=? AND node_id=?""",
-                    (_sigmoid(base + recall + citation - correction),
-                     _sigmoid(base + citation - correction), chain["revision"], chain_id, nid))
-            self.conn.execute("UPDATE chain_memberships SET scored_revision=? WHERE chain_id=?",
-                              (chain["revision"], chain_id))
-        return {m["node_id"]: dict(m) for m in self.conn.execute(
-            "SELECT * FROM chain_memberships WHERE chain_id=?", (chain_id,))
-                if self.valid(self.get(m["node_id"], scope))}
+                # Decay is a read-time projection. Persisting every score here
+                # changes the read-cache epoch and makes alternating chains
+                # invalidate one another even with identical sources/time.
+                strength = _sigmoid(base + citation - correction)
+                result[nid].update(recall_strength=strength, citation_strength=strength,
+                                   scored_revision=chain["revision"])
+            result = {nid: result[nid] for nid in nodes}
+        return result
 
     def _reason_quality(self, chain_id, scope, members):
         def load():
@@ -500,7 +496,7 @@ class AssociationStore:
             if correction:
                 reason = correction["replacement"]
             self.conn.execute("""INSERT INTO association_chains(id,scope,reason_key,reason_text) VALUES(?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET revision=revision+1""",
+                ON CONFLICT(id) DO UPDATE SET reason_text=excluded.reason_text,revision=revision+1""",
                 (cid, scope, reason_key, reason))
             self.conn.execute("DELETE FROM association_reason_fts WHERE id=?", (cid,))
             self.conn.execute("INSERT INTO association_reason_fts(id,scope,tokens) VALUES(?,?,?)",

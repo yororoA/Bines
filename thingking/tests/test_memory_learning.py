@@ -213,7 +213,8 @@ class MemoryLearningTest(unittest.TestCase):
         self.assertEqual(self.service.competition.shares("owner", "生日礼物", [gift, hobby])[gift], .5)
         self.service.usage.record("owner", "turn1", [shown], [citation, citation], "礼物")
         shares = self.service.competition.shares("owner", "生日礼物", [gift, hobby])
-        self.assertAlmostEqual(shares[gift], 2 / 3)
+        self.assertGreater(shares[gift], .5)
+        self.assertLess(shares[gift], .6)  # One citation cannot dominate the reason competition.
         self.assertAlmostEqual(sum(shares.values()), 1)
         self.service.usage.record("owner", "turn1", [shown], [citation], "礼物")
         self.assertEqual(self.service.competition.shares("owner", "生日礼物", [gift, hobby]), shares)
@@ -226,6 +227,16 @@ class MemoryLearningTest(unittest.TestCase):
         self.service.usage.record("owner", "no-evidence", [shown], [{**citation, "source_quote": ""}], "礼物")
         self.assertEqual(self.service.competition.shares("owner", "生日礼物", [gift, hobby])[gift], .5)
         self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM context_credit_events").fetchone()[0], 0)
+
+    def test_reason_reward_decays_toward_equal_attention(self):
+        a, gift, hobby, shown, citation = self.context()
+        self.service.usage.record("owner", "cited-once", [shown], [citation], "礼物")
+        before = self.service.competition.shares("owner", "生日礼物", [gift, hobby])[gift]
+        self.clock.advance(365 * 86400)
+        after = self.service.competition.shares("owner", "生日礼物", [gift, hobby])[gift]
+        self.assertGreater(before, after)
+        self.assertGreaterEqual(after, .5)
+        self.assertLess(after, .501)
 
     def test_reason_correction_invalidates_previous_context_snapshot(self):
         a, gift, hobby, shown, citation = self.context()
@@ -246,7 +257,7 @@ class MemoryLearningTest(unittest.TestCase):
     def test_corrected_reason_does_not_inherit_old_reason_credit(self):
         a, gift, hobby, shown, citation = self.context()
         self.service.usage.record("owner", "used-old-reason", [shown], [citation], "礼物")
-        self.assertAlmostEqual(self.service.competition.shares("owner", "生日礼物", [gift, hobby])[gift], 2 / 3)
+        self.assertGreater(self.service.competition.shares("owner", "生日礼物", [gift, hobby])[gift], .5)
         revision = self.repo.conn.execute("SELECT revision FROM association_chains WHERE id=?", (gift,)).fetchone()[0]
         self.service.correct_memory(scope="owner", node_id=a["id"], operation_id="reason-reset",
             expected_digest=a["digest"], kind="reason", chain_id=gift, expected_chain_revision=revision,

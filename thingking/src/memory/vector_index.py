@@ -107,7 +107,7 @@ class VectorIndex:
     def publish_if_ready(self, repo, *, cleanup=True):
         if not self._manifest.get("pending") or repo.conn.in_transaction:
             return False
-        for table, where in (("retrieval_keys", "WHERE indexed_at IS NULL"),
+        for table, where in (("retrieval_keys", "WHERE indexed_at IS NULL AND COALESCE(json_extract(meta,'$.retrieval_status'),'hot')!='cold'"),
                              ("retrieval_dirty_sources", ""), ("retrieval_vector_deletions", "")):
             if repo.conn.execute(f"SELECT 1 FROM {table} {where} LIMIT 1").fetchone():
                 return False

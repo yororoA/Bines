@@ -660,7 +660,7 @@ class HybridRetrievalTest(unittest.TestCase):
         self.fx.close()
 
     def test_search_returns_original_message_evidence(self):
-        self.fx.service.record_turn(local_env(), "我新买了一条蓝色围巾", "挺适合你")
+        self.fx.service.record_turn(local_env(self.fx.clock()), "我新买了一条蓝色围巾", "挺适合你")
         hits = self.fx.service.search("蓝色围巾", [OWNER_SCOPE], k=5)
         self.assertTrue(hits)
         evidence = [item for hit in hits for item in hit.get("evidence") or []]

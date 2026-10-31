@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import logging
 import math
@@ -85,7 +86,8 @@ def _memory_view(row: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
                     "retrieval_channels", "score", "memory_id", "message_id")
     }
     for key in ("node_id", "citation_id", "node_digest", "source_family", "chain_ids", "associations", "retrieval_status",
-                "context_id", "reason_shares", "corrections", "evidence_family", "matched_spans", "temporal"):
+                "context_id", "reason_shares", "corrections", "evidence_family", "matched_spans", "temporal",
+                "retrieval_role", "graph_activation"):
         if key in row:
             view[key] = row[key]
     view.update(extra)
@@ -961,7 +963,7 @@ class MemoryService:
                 if constraint:
                     chain["correction"] = {k: constraint[k] for k in ("kind", "replacement", "explanation")}
             plan = self.association_planner.prepare(
-                job, node, candidates[:self.settings.association_model_candidates], query, chains)
+                job, node, candidates, query, chains)
             return {"scope": job["scope"], "source": view(node),
                     "candidates": [view(c) for c in candidates], "chains": chains,
                     "compact": plan["prompt"]}
@@ -1088,8 +1090,13 @@ class MemoryService:
             if current_plan and self.graph.submit(job, links, prior):
                 if resolved is not None:
                     self.association_planner.remember(job, resolved)
+                more = self.association_planner.advance(job, resolved)
+                unresolved = job["payload"].get("association_unresolved", unresolved)
                 self.repo.update_job_payload(job_id, {**job["payload"], "rejected_links": rejected_links,
                                                      "unresolved_targets": unresolved})
+                if more:
+                    self.repo.conn.execute("UPDATE jobs SET status='pending',lease_until=NULL WHERE id=?", (job_id,))
+                    return {"status": "continuing_association", "node_id": job["payload"]["node_id"]}
                 self.repo.finish_job(job_id)
                 return {"status": "done", "node_id": job["payload"]["node_id"],
                         "rejected_links": rejected_links, "unresolved_targets": unresolved}
@@ -1423,8 +1430,7 @@ class MemoryService:
     def stats(self) -> Dict[str, Any]:
         stats = self.repo.stats()
         if not getattr(self.index, "stores_memory_vectors", True):
-            stats["unindexed"] = self.repo.conn.execute(
-                "SELECT COUNT(*) FROM retrieval_keys WHERE indexed_at IS NULL").fetchone()[0]
+            stats["unindexed"] = self.retriever.keys.vector_pending_count()
             stats["index_unit"] = "retrieval_keys"
         stats["index_count"] = self.index.count()
         maintenance = getattr(self.repo, "vector_maintenance", None)
@@ -1515,8 +1521,29 @@ class MemoryService:
         return {"items": items, "total": self.repo.count_memories(**{k: v for k, v in page_filters.items() if v})}
 
     def search(self, query: str, scopes: Sequence[str], kinds: Optional[Sequence[str]] = None, k: int = 10,
-               as_of: Optional[float] = None, include_history: bool = False) -> List[Dict[str, Any]]:
-        return self.retriever.search(query, scopes, kinds, k, as_of=as_of, include_history=include_history)
+               as_of: Optional[float] = None, include_history: bool = False, retrieval_mode: str = "auto") -> List[Dict[str, Any]]:
+        return self.retriever.search(query, scopes, kinds, k, as_of=as_of, include_history=include_history,
+                                     retrieval_mode=retrieval_mode)
+
+    def search_with_trace(self, query: str, scopes: Sequence[str], k: int = 8, **filters):
+        hits = self.search(query, scopes, k=k, **filters)
+        return {"hits": hits, "trace": copy.deepcopy(getattr(self.retriever, "last_trace", {}))}
+
+    def read_memory_source(self, source_id: str, scope: str, offset: int = 0, limit: int = 1024):
+        if not isinstance(scope, str) or not scope or not isinstance(source_id, str) or not source_id:
+            raise ValueError("source page requires an explicit scope and source id")
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 2048:
+            raise ValueError("source page requires offset >= 0 and limit between 1 and 2048")
+        node = self.graph.get(source_id, scope)
+        if not node or not self.graph.valid(node):
+            return None
+        material = self.graph.material(node)
+        text = material["text"]
+        end = min(len(text), offset + limit)
+        return {"citation_id": node["id"], "node_id": node["id"], "node_digest": node["digest"],
+                "kind": node["source_type"], "content": text[offset:end], "offset": offset,
+                "next_offset": end if end < len(text) else None, "total_chars": len(text),
+                "is_excerpt": offset > 0 or end < len(text), "corrections": self.corrections.inherited_facts(node)}
 
     def state_history(self, scope: str = OWNER_SCOPE, as_of: Optional[float] = None, limit: int = 20):
         return self.repo.temporal.state_history(scope, as_of, max(1, min(50, int(limit))))

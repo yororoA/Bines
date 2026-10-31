@@ -29,17 +29,58 @@ class CompetitionStore:
         columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(context_chain_credit)")}
         if "reason_version" not in columns:
             self.conn.execute("ALTER TABLE context_chain_credit ADD COLUMN reason_version TEXT NOT NULL DEFAULT ''")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS context_feedback (
+            scope TEXT NOT NULL, query_key TEXT NOT NULL, chain_id TEXT NOT NULL,
+            reason_version TEXT NOT NULL, turn_id TEXT NOT NULL, family TEXT NOT NULL,
+            event_type TEXT NOT NULL, created_at REAL NOT NULL,
+            PRIMARY KEY(scope,turn_id,family,chain_id,event_type))""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS context_feedback_query ON context_feedback(scope,query_key,chain_id)")
+        self.conn.create_function("memory_decay", 2, lambda age, half_life: 2.0 ** (-max(0.0, age) / half_life))
 
     def shares(self, scope, query, chain_ids):
         ids = sorted(set(chain_ids))
         key = context_key(query)
-        credit = {r["chain_id"]: max(.1, 1 + min(30, r["cited"]) - min(30, r["rejected"]))
+        rejected = {r["chain_id"]: min(.9, .3 * r["rejected"])
                   for r in self.conn.execute(
                       "SELECT * FROM context_chain_credit WHERE scope=? AND query_key=?", (scope, key))
                   if r["reason_version"] == self.repo.associations.reason_version(r["chain_id"], scope)}
-        weights = {cid: credit.get(cid, 1.0) for cid in ids}
+        half_life = max(1.0, getattr(self.repo.associations.settings, "usage_half_life_days", 30)) * 86400
+        feedback = {}
+        for row in self.conn.execute("""SELECT chain_id,reason_version,event_type,
+                SUM(memory_decay(?-created_at,?)) AS weight FROM context_feedback
+                WHERE scope=? AND query_key=? GROUP BY chain_id,reason_version,event_type""",
+                (self.repo.clock(), half_life, scope, key)):
+            if row["reason_version"] == self.repo.associations.reason_version(row["chain_id"], scope):
+                feedback.setdefault(row["chain_id"], {})[row["event_type"]] = row["weight"]
+        weights = {}
+        for cid in ids:
+            values = feedback.get(cid, {})
+            cited = values.get("cited", 0.0)
+            reward = .9 * cited / (max(cited, values.get("presented", 0.0)) + 2.0)
+            weights[cid] = max(.1, 1.0 + reward - rejected.get(cid, 0.0))
         total = sum(weights.values())
         return {cid: value / total for cid, value in weights.items()} if total else {}
+
+    def _feedback(self, context, turn_id, node, chain_id, event_type):
+        family = json.dumps(sorted(self.repo.associations.evidence_family(node)))
+        self.conn.execute("INSERT OR IGNORE INTO context_feedback VALUES(?,?,?,?,?,?,?,?)",
+            (node["scope"], context["query_key"], chain_id,
+             self.repo.associations.reason_version(chain_id, node["scope"]), turn_id,
+             family, event_type, self.repo.clock()))
+
+    def observe(self, scope, turn_id, node, presented):
+        """Record only an actually displayed receipt, not a search result."""
+        row = self.conn.execute("SELECT * FROM retrieval_contexts WHERE id=? AND scope=?",
+            (presented.get("context_id"), scope)).fetchone()
+        if not row or row["created_at"] < self.repo.clock() - 7 * 86400:
+            return
+        snapshot = json.loads(row["snapshot"])
+        offered = snapshot["nodes"].get(node["id"], {})
+        if offered.get("digest") != node["digest"]:
+            return
+        for cid in set(presented.get("chain_ids") or []).intersection(offered.get("chains", [])):
+            if snapshot["revisions"].get(cid) == self.repo.associations.reason_version(cid, scope):
+                self._feedback(row, turn_id, node, cid, "presented")
 
     def mint(self, query, rows):
         for scope in sorted({r["scope"] for r in rows}):
@@ -105,6 +146,7 @@ class CompetitionStore:
         inserted = self.conn.execute("INSERT OR IGNORE INTO context_credit_events VALUES(?,?,?,?,?,?,?)",
             (key, context_id, scope, turn_id, json.dumps(family), chain_id, self.repo.clock())).rowcount
         if inserted:
+            self._feedback(row, turn_id, node, chain_id, "cited")
             self.conn.execute("""INSERT INTO context_chain_credit VALUES(?,?,?,1,0,?)
                 ON CONFLICT(scope,query_key,chain_id) DO UPDATE SET
                   cited=CASE WHEN reason_version=excluded.reason_version THEN MIN(10000,cited+1) ELSE 1 END,

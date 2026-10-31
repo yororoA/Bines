@@ -234,9 +234,11 @@ class MemoryAdminTest(unittest.TestCase):
                 "confidence": .8, "evidence": [{"node_id": a["id"], "quote": a["content"]},
                                              {"node_id": b["id"], "quote": "围巾约定二"}]}
         self.service.complete_association(claimed["job"]["id"], [link])
-        self.repo.conn.execute("""UPDATE chain_memberships SET recall_strength=.83,citation_strength=.92,
-            scored_revision=(SELECT revision FROM association_chains WHERE id=chain_memberships.chain_id)""")
-        node = next(n for n in self.service.memory_graph()["nodes"] if n["memory_id"] == source)
+        # Weights are now a time-dependent read projection. This view contract
+        # uses asymmetric projected values, rather than mutating its old cache.
+        weights = {item["id"]: {"recall_strength": .83, "citation_strength": .92} for item in (a, b)}
+        with patch.object(self.service.graph, "weights", return_value=weights):
+            node = next(n for n in self.service.memory_graph()["nodes"] if n["memory_id"] == source)
         self.assertEqual(node["max_weight"], .92)
         self.assertEqual(node["max_recall"], .83)
         self.assertEqual(node["weight_basis"], "chain_max")

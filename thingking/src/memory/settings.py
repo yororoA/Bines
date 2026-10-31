@@ -61,6 +61,12 @@ class MemorySettings:
     raw_hot_budget: int = 512
     episode_hot_budget: int = 256
     cold_activation_factor: float = .1
+    graph_min_activation: float = .001
+    graph_fusion_weight: float = .5
+    cold_fallback_limit: int = 3
+    usage_half_life_days: float = 30
+    retrieval_exploration_enabled: bool = False
+    retrieval_exploration_k: int = 1
     diary_maintenance_batch: int = 32
     diary_backfill_batch: int = 256
 
@@ -103,6 +109,12 @@ def load_settings() -> MemorySettings:
         association_backfill_batch=max(1, min(200, int(os.environ.get("BINES_MEMORY_BACKFILL_BATCH", "16")))),
         raw_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_RAW_HOT_BUDGET", "512"))),
         episode_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_EPISODE_HOT_BUDGET", "256"))),
+        graph_min_activation=max(0, float(os.environ.get("BINES_MEMORY_GRAPH_MIN_ACTIVATION", ".001"))),
+        graph_fusion_weight=max(0, min(1, float(os.environ.get("BINES_MEMORY_GRAPH_FUSION_WEIGHT", ".5")))),
+        cold_fallback_limit=max(0, min(10, int(os.environ.get("BINES_MEMORY_COLD_FALLBACK_LIMIT", "3")))),
+        usage_half_life_days=max(1, float(os.environ.get("BINES_MEMORY_USAGE_HALF_LIFE_DAYS", "30"))),
+        retrieval_exploration_enabled=os.environ.get("BINES_MEMORY_EXPLORATION", "false").lower() in {"true", "1", "yes", "on"},
+        retrieval_exploration_k=max(0, min(3, int(os.environ.get("BINES_MEMORY_EXPLORATION_K", "1")))),
         diary_maintenance_batch=max(1, min(128, int(os.environ.get("BINES_MEMORY_DIARY_BATCH", "32")))),
         diary_backfill_batch=max(1, min(2048, int(os.environ.get("BINES_MEMORY_DIARY_BACKFILL_BATCH", "256")))),
     )

@@ -69,7 +69,7 @@ class AssociationTest(unittest.TestCase):
         self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM messages WHERE episode_id IS NOT NULL").fetchone()[0], 8)
         self.assertEqual(self.service.graph.get(nodes[1]["id"])["activation_factor"], .1)
         hits = self.service.search("蓝色围巾", ["owner"])
-        self.assertNotIn(nodes[1]["id"], {h.get("node_id") for h in hits})
+        self.assertEqual(next(h for h in hits if h.get("node_id") == nodes[1]["id"])["retrieval_status"], "cold")
         self.service.reconcile_index()
         self.assertEqual(self.service.graph.get(nodes[1]["id"])["retrieval_status"], "cold")
 
@@ -365,7 +365,7 @@ class AssociationTest(unittest.TestCase):
         self.assertEqual(self.service.graph.weights(cid, "owner")[a["id"]]["recall_strength"], before)
         self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM association_edges").fetchone()[0], 1)
 
-    def test_citation_and_recall_strength_are_separate(self):
+    def test_presentation_alone_does_not_change_strength(self):
         a, b = self.raw("蓝色围巾甲"), self.raw("蓝色围巾乙")
         claimed = self.claim(JOB_ASSOCIATE)
         self.service.complete_association(claimed["job"]["id"], [self.link(claimed, b)], .5)
@@ -375,7 +375,7 @@ class AssociationTest(unittest.TestCase):
         presented = {"node_id": a["id"], "node_digest": a["digest"], "spans": ["蓝色围巾甲"], "chain_ids": [cid]}
         self.service.usage.record("owner", "visible", [presented], [], "")
         after = self.service.graph.weights(cid, "owner")[a["id"]]
-        self.assertGreater(after["recall_strength"], before["recall_strength"])
+        self.assertEqual(after["recall_strength"], before["recall_strength"])
         self.assertEqual(after["citation_strength"], before["citation_strength"])
 
     def test_old_data_backfill_advances_past_invalid_rows(self):
@@ -547,8 +547,9 @@ class AssociationTest(unittest.TestCase):
         before_gift = graph.weights(gift, "owner")[a["id"]]["recall_strength"]
         before_hobby = graph.weights(hobby, "owner")[a["id"]]["recall_strength"]
         presented = {"node_id": a["id"], "node_digest": a["digest"], "spans": ["蓝色围巾甲"],
-                     "chain_ids": [gift, hobby]}
-        citation = {"source_id": a["id"], "answer_span": "这件礼物", "chain_id": gift}
+                     "scope": "owner", "chain_ids": [gift, hobby]}
+        self.service.competition.mint("围巾礼物", [presented])
+        citation = {"source_id": a["id"], "answer_span": "这件礼物", "chain_id": gift, "source_quote": "蓝色围巾甲"}
         self.service.usage.record("owner", "reason-turn", [presented], [citation], "这件礼物")
         self.assertGreater(graph.weights(gift, "owner")[a["id"]]["recall_strength"], before_gift)
         self.assertEqual(graph.weights(hobby, "owner")[a["id"]]["recall_strength"], before_hobby)
@@ -636,7 +637,7 @@ class AssociationTest(unittest.TestCase):
         before = self.service.graph.strength(node)
         self.service.usage.record("owner", "new-topic", [
             {"node_id": node["id"], "node_digest": node["digest"], "spans": ["讨论热咖啡的口感"]}],
-            [{"source_id": node["id"], "answer_span": "热咖啡"}], "热咖啡")
+            [{"source_id": node["id"], "answer_span": "热咖啡", "source_quote": "热咖啡"}], "热咖啡")
         self.assertGreater(self.service.graph.strength(node), before)
 
     def test_confirmed_reason_survives_later_request_in_same_turn(self):

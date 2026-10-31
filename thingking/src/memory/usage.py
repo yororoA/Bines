@@ -17,6 +17,7 @@ class UsageStore:
             receipt TEXT NOT NULL, created_at REAL NOT NULL,
             UNIQUE(scope,turn_id,family,event_type))""")
         self.conn.execute("CREATE INDEX IF NOT EXISTS memory_usage_node ON memory_usage_events(node_id,chain_id,event_type)")
+        self.conn.create_function("memory_decay", 2, lambda age, half_life: 2.0 ** (-max(0.0, age) / half_life))
 
     def counts(self, node_id, chain_id=None):
         chain_filter = " AND u.chain_id=?" if chain_id is not None else ""
@@ -27,16 +28,63 @@ class UsageStore:
             AND json_extract(u.receipt,'$.node_digest')=n.digest GROUP BY u.event_type""",
             (node_id, chain_id) if chain_id is not None else (node_id,))}
 
+    def feedback(self, node_id, chain_id=None):
+        """Decayed opportunities and verified citations, never negative labels.
+
+        A missed citation is not evidence that a memory is false. The opportunity
+        denominator merely limits how much *positive* reward repeated exposure
+        can earn. A two-opportunity prior makes old rewards decay to zero.
+        """
+        half_life = max(1.0, getattr(self.graph.settings, "usage_half_life_days", 30)) * 86400
+        params = [self.repo.clock(), half_life, node_id]
+        chain_filter = ""
+        if chain_id is not None:
+            node = self.graph.get(node_id)
+            version = self.graph.reason_version(chain_id, node["scope"]) if node else None
+            if not version:
+                return {}
+            chain_filter = " AND (u.chain_id=? OR (u.event_type='presented' AND EXISTS (SELECT 1 FROM json_each(u.receipt,'$.chain_ids') WHERE value=?)))"
+            params.extend((chain_id, chain_id))
+            # A chain id is stable across reason edits. Only receipts bound to
+            # the displayed reason version may reward that reason; old/unversioned
+            # receipts remain useful as node-level usage, never new-chain credit.
+            chain_filter += " AND ((u.event_type='cited' AND json_extract(u.receipt,'$.reason_version')=?) "
+            chain_filter += "OR (u.event_type='presented' AND EXISTS (SELECT 1 FROM json_each(u.receipt,'$.chain_versions') WHERE key=? AND value=?)))"
+            params.extend((version, chain_id, version))
+        rows = self.conn.execute("""SELECT u.event_type,SUM(memory_decay(?-u.created_at,?)) AS weight
+            FROM memory_usage_events u JOIN association_nodes n ON n.id=u.node_id
+            WHERE u.node_id=? AND u.event_type IN ('presented','cited')
+            AND json_extract(u.receipt,'$.node_digest')=n.digest
+            AND (u.event_type='presented' OR LENGTH(COALESCE(json_extract(u.receipt,'$.source_quote'),''))>0)
+            """ + chain_filter + " GROUP BY u.event_type", params)
+        return {r["event_type"]: r["weight"] for r in rows}
+
+    def reward(self, node_id, chain_id=None):
+        feedback = self.feedback(node_id, chain_id)
+        cited = feedback.get("cited", 0.0)
+        return .9 * cited / (max(cited, feedback.get("presented", 0.0)) + 2.0)
+
     def prior(self, node):
-        counts = self.counts(node["id"])
         prior = min(.95, max(.05, node["prior"]))
         value = math.log(prior / (1 - prior))
-        value += min(.6, .1 * math.log1p(counts.get("presented", 0)))
-        value += min(.9, .25 * math.log1p(counts.get("cited", 0)))
-        # Verbatim answer reuse is a weak activation signal, never a citation
-        # or evidence of truth; it does not train causal reason competition.
-        value += min(.2, .05 * math.log1p(counts.get("answer_overlap", 0)))
+        value += self.reward(node["id"])
         return 1 / (1 + math.exp(-value))
+
+    def _presented_versions(self, scope, node, receipt, chains):
+        if not chains or not isinstance(receipt.get("context_id"), str) or not receipt["context_id"]:
+            return {}
+        context = self.conn.execute("SELECT * FROM retrieval_contexts WHERE id=? AND scope=?",
+                                    (receipt.get("context_id"), scope)).fetchone()
+        if not context or context["created_at"] < self.repo.clock() - 7 * 86400:
+            return {}
+        snapshot = json.loads(context["snapshot"])
+        offered = snapshot["nodes"].get(node["id"], {})
+        if offered.get("digest") != node["digest"]:
+            return {}
+        return {cid: snapshot["revisions"][cid]
+                for cid in chains.intersection(offered.get("chains", []))
+                if snapshot["revisions"].get(cid)
+                and snapshot["revisions"][cid] == self.graph.reason_version(cid, scope)}
 
     def _add(self, scope, turn_id, node, event_type, receipt):
         family = self.graph.evidence_family(node)
@@ -105,9 +153,13 @@ class UsageStore:
                     WHERE m.node_id=? AND c.id=? AND c.scope=?""", (node["id"], cid, scope)).fetchone():
                     allowed_chains.add(cid)
             attributed = next(iter(allowed_chains)) if len(allowed_chains) == 1 else ""
+            receipt = {**receipt, "chain_ids": sorted(allowed_chains),
+                       "chain_versions": self._presented_versions(scope, node, receipt, allowed_chains)}
             visible[node["id"]] = (node, spans, originals, allowed_chains, attributed, receipt, facts)
-            result["presented"] += self._add(scope, turn_id, node, "presented",
-                                             {**receipt, "chain_id": attributed})
+            added = self._add(scope, turn_id, node, "presented", {**receipt, "chain_id": attributed})
+            result["presented"] += added
+            if added and getattr(self.repo, "competition", None):
+                self.repo.competition.observe(scope, turn_id, node, receipt)
         for receipt in citations[:20]:
             if not isinstance(receipt, dict) or receipt.get("source_id") not in visible:
                 continue
@@ -125,7 +177,8 @@ class UsageStore:
                 continue
             if quote and any(fact["quote"] in quote for fact in facts):
                 continue
-            validated = {**receipt, "chain_id": cid}
+            validated = {**receipt, "chain_id": cid,
+                         "reason_version": presentation["chain_versions"].get(cid, "")}
             added = self._add(scope, turn_id, node, "cited", validated)
             result["cited"] += added
             if added and getattr(self.repo, "competition", None):
