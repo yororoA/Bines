@@ -127,10 +127,11 @@ python bines.py --console
 - 本机与 `BINES_OWNER_QQ_IDS` 显式绑定的主人私聊共享 owner 记忆和状态；其他私聊按机器人账号与用户隔离，群聊按账号与群号隔离，个人状态再按发言人区分。群管理员角色不赋予主人身份。
 - 动态状态按真实新消息由独立 Memory Worker 在后台更新，不再等到累计 40 条消息触发摘要。普通问候、记忆查询和假设不改变好感度；明确情感事件才使用小幅增量。状态任务完成和写库在同一事务中提交，重试不重复加分；消息撤回或同消息手动更新后取消自动任务。群聊个人状态按群和用户保存，不改主人私聊状态。
 - 记忆召回采用“原始事件＋派生检索键”：`messages`/`memories` 保存原文，`retrieval_keys` 保存可重建的片段、上下文、实体和关键词；中文 FTS5 与向量通道分别排名，再用 RRF 融合并按主题覆盖重排。每个结果带 `evidence`，优先回指原始消息；只有找不到原文的旧数据才标记为摘要或旧版记忆。`BINES_MEMORY_CANDIDATES` 控制候选数，`BINES_MEMORY_RERANKER` 可挂载本地 CrossEncoder。
-- 动态状态保留 `state_history`，单值事实保留 `fact_versions`（主体、谓词、值、有效期、来源）。普通查询默认只返回当前有效版本，问“以前/当时/为什么变化”时可读历史；撤回会清除关联快照并留下无正文的防重放记录。当前状态仍直接注入提示词，不把“现在的好感度/物品”变成概率检索。
+- 动态状态保留 `state_history`，单值事实保留 `fact_versions`（主体、谓词、值、有效期、来源）。普通查询只返回当前有效版本，明确问“以前/当时/变化”时可读带时间标记的历史；“为什么”本身不会打开历史查询。状态更新按来源消息顺序生效，旧任务重试不能覆盖新状态。当前状态仍直接注入提示词，不把“现在的好感度/物品”变成概率检索。
 - 召回质量用私有标注集评测：`verification/memory_retrieval_eval.py`。基线（旧实现）28 题 Evidence Recall@10 为 40.48%、MRR 0.2722；当前混合检索在同一批题上为 80.95%、MRR 0.6611，多证据全召回 4/6，延迟 P50 约 18 ms（词面模式）。无答案样本仍有误报，答案正确率未用 LLM 评测，不能把检索指标当成回答正确率。详见 [评测说明](docs/MEMORY_EVALUATION.md)。
 - 摘要、长期事实提取和每日日记也由 Memory Worker 统一处理所有渠道，任务状态记在 SQLite，失败会重试。除累计触发外，短会话空闲 30 分钟（`BINES_MEMORY_IDLE_SUMMARY_SECONDS`）且达到最少条数（`BINES_MEMORY_IDLE_SUMMARY_MIN`）也会生成摘要，避免长期停留在原始消息。后台更新不阻塞 QQ 回复，刚发生的变化可能要等任务完成后才能读到；每次状态任务会调用一次文本模型，可用 `BINES_MEMORY_STATE_UPDATES=false` 关闭自动更新。
-- 当前动态状态（含好感度数值）和用户画像直接注入提示词；原永久画像不再只取前 8 条。旧回忆采用向量与中文关键词联合排序，限制旧重要度 100 的过度加权。上下文不够时模型可以调用 `search_memory` 主动查询，权限边界与自动召回一致。
+- 当前状态、画像、命中证据和近期对话统一受初始上下文预算约束；命中长文时展示相关连续片段。`BINES_CONTEXT_MAX_TOKENS`默认32768，可用本地tokenizer精算，否则按UTF-8字节数保守估计。固定指令、当前输入本身超限会报告，后续工具回执另计。上下文不够时模型可以调用 `search_memory` 主动查询，权限边界与自动召回一致。
+- 向量只维护一套检索键集合，模型指纹变化会自动构建新集合并切换；在线重建在后台执行，期间全文检索继续可用。同步队列有逐条退避和隔离，前台不排空其他会话积压；任务租约恢复和累计模型调用均有上限。身份绑定变化按来源会话迁移派生数据，混合来源进入重建。配置和边界见 [ChatBot记忆模式](docs/CHATBOT_MEMORY.md)。
 - 人格只在 `thingking/persona/persona.yaml` 中维护，修改后运行 `python thingking/persona/render_doc.py` 更新 `PERSONA.md`。
 - 维护命令：`python thingking/memory_admin.py stats | verify | rebuild-index`。离线迁移、校验或重建前停止 RAG Server、ChatBot、QQ Thinking 及其他记忆客户端。迁移快照放在 `legacy_backup/`；`restore-legacy <备份目录>` 可恢复旧文件。
 - 测试：`python -m unittest discover -s thingking/tests`；QQ 回归见上面的 verification 命令。
