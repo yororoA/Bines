@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 
-_JOURNAL = re.compile(r"^experience:([0-9a-f]{64}):(.+):([^:]+)$")
+_JOURNAL = re.compile(r"^experience:([0-9a-f]{64}):")
 
 
 class ProvenanceStore:
@@ -15,26 +15,90 @@ class ProvenanceStore:
             scope TEXT NOT NULL, root TEXT NOT NULL, event_id TEXT NOT NULL,
             PRIMARY KEY(scope,root))""")
         self.conn.execute("CREATE INDEX IF NOT EXISTS evidence_event_siblings ON evidence_events(scope,event_id)")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS evidence_event_refs (
+            scope TEXT NOT NULL, source_ref TEXT NOT NULL, event_id TEXT NOT NULL,
+            PRIMARY KEY(scope,source_ref))""")
         if not self.conn.execute("SELECT 1 FROM meta WHERE key='evidence_events_v1'").fetchone():
             for row in self.conn.execute("SELECT source_ref,scope,record FROM experiences").fetchall():
                 self.register(row["scope"], row["source_ref"], json.loads(row["record"]))
             self.conn.execute("INSERT INTO meta VALUES('evidence_events_v1','1')")
 
+    def reconcile(self, limit=100):
+        """Repair old late-arrival mappings incrementally, also across restarts."""
+        with self.repo.transaction():
+            cursor = self.conn.execute("SELECT value FROM meta WHERE key='evidence_event_refs_cursor'").fetchone()
+            rows = self.conn.execute("SELECT rowid,scope,source_ref,record FROM experiences WHERE rowid>? "
+                                     "ORDER BY rowid LIMIT ?", (int(cursor[0]) if cursor else 0, limit)).fetchall()
+            for row in rows:
+                record = json.loads(row["record"])
+                self.register(row["scope"], row["source_ref"], record)
+            if rows:
+                self.conn.execute("INSERT INTO meta VALUES('evidence_event_refs_cursor',?) "
+                                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(rows[-1]["rowid"]),))
+        return len(rows)
+
+    def register_message(self, scope, source_ref, message_id, turn_ref=None):
+        if not source_ref:
+            return
+        # A supplied turn_ref is only a lookup hint; the persisted journal must
+        # explicitly own this exact message in the same scope.
+        if turn_ref:
+            turn = self.conn.execute("SELECT record FROM experiences WHERE source_ref=? AND scope=?",
+                                     (turn_ref, scope)).fetchone()
+            if turn:
+                record = json.loads(turn[0])
+                if record.get("category") == "turn" and source_ref in (record.get("turn_message_refs") or []):
+                    self.register(scope, turn_ref, record)
+        row = self.conn.execute("SELECT event_id FROM evidence_event_refs WHERE scope=? AND source_ref=?",
+                                (scope, source_ref)).fetchone()
+        if row:
+            self._register_roots(scope, [f"message:{message_id}"], row[0])
+
+    def migrate(self, old_scope, new_scope, message_ids, experience_refs):
+        """Rebind only explicitly migrated physical roots, recomputing event identity."""
+        messages = [self.repo.get_message(mid) for mid in message_ids]
+        messages = [row for row in messages if row and row["scope"] == new_scope]
+        experiences = [self.conn.execute("SELECT source_ref,record FROM experiences WHERE source_ref=? AND scope=?",
+                                         (ref, new_scope)).fetchone() for ref in experience_refs]
+        experiences = [row for row in experiences if row]
+        refs = {row["source_ref"] for row in messages if row["source_ref"]}
+        for row in experiences:
+            refs.update(json.loads(row["record"]).get("turn_message_refs") or [])
+        roots = [f"message:{row['id']}" for row in messages] + ["experience:" + row["source_ref"] for row in experiences]
+        for scope in {old_scope, new_scope}:
+            self.conn.executemany("DELETE FROM evidence_events WHERE scope=? AND root=?", [(scope, root) for root in roots])
+            self.conn.executemany("DELETE FROM evidence_event_refs WHERE scope=? AND source_ref=?", [(scope, ref) for ref in refs])
+        for row in experiences:
+            self.register(new_scope, row["source_ref"], json.loads(row["record"]))
+        for row in messages:
+            self.register_message(new_scope, row["source_ref"], row["id"])
+
     def register(self, scope, source_ref, record):
-        match = _JOURNAL.fullmatch(source_ref)
+        match = _JOURNAL.match(source_ref)
         # Only a runtime journal namespace plus its exact round identity is
         # accepted. URLs, topics and long-running activity IDs are not identity.
-        if not match or match[2] != record.get("turn_id"):
+        turn_id = record.get("turn_id")
+        prefix = match[0] + turn_id + ":" if match and isinstance(turn_id, str) and turn_id else ""
+        if not prefix or not source_ref.startswith(prefix) or len(source_ref) == len(prefix):
             return None
+        suffix = source_ref[len(prefix):]
+        if ":" in suffix and not (re.fullmatch(r"legacy:\d+", suffix) or
+                suffix.startswith("native:") and (suffix[7:] == turn_id or suffix[7:].startswith(turn_id + ":"))):
+            return None  # A different, longer turn ID cannot borrow this turn's prefix.
         event_id = "event:" + hashlib.sha256(
-            json.dumps([scope, match[1], match[2]]).encode()).hexdigest()
+            json.dumps([scope, match[1], turn_id]).encode()).hexdigest()
         roots = ["experience:" + source_ref]
         if record.get("category") == "turn":
             for ref in record.get("turn_message_refs") or []:
+                self.conn.execute("INSERT OR IGNORE INTO evidence_event_refs VALUES(?,?,?)", (scope, ref, event_id))
                 row = self.conn.execute("SELECT id FROM messages WHERE scope=? AND source_ref=?",
                                         (scope, ref)).fetchone()
                 if row:
                     roots.append(f"message:{row[0]}")
+        self._register_roots(scope, roots, event_id)
+        return event_id
+
+    def _register_roots(self, scope, roots, event_id):
         changed = []
         for root in roots:
             inserted = self.conn.execute("INSERT OR IGNORE INTO evidence_events VALUES(?,?,?)", (scope, root, event_id))
@@ -52,7 +116,6 @@ class ProvenanceStore:
                     a, b = graph.get(edge["source_node"]), graph.get(edge["target_node"])
                     if a and b and not graph.independent(a, b):
                         self.conn.execute("UPDATE association_edges SET confidence=0 WHERE id=?", (edge["id"],))
-        return event_id
 
     def family(self, scope, roots):
         roots = sorted(set(roots))

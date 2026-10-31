@@ -31,6 +31,7 @@ class MemoryMaintenance:
                     continue
                 row = self.repo.conn.execute("""SELECT * FROM jobs WHERE kind=? AND status='failed'
                     AND updated_at<=?
+                    AND json_extract(payload,'$.terminal_reason') IS NULL
                     AND COALESCE(json_extract(payload,'$.recovery_cycle'),0)<?
                     ORDER BY updated_at,id LIMIT 1""",
                     (kind, now - settings.job_recovery_seconds, settings.job_recovery_cycles)).fetchone()
@@ -58,4 +59,8 @@ class MemoryMaintenance:
                 (self.service.settings.job_recovery_cycles,)).fetchone()[0],
             "recovery_cycles": self.service.settings.job_recovery_cycles,
             "cooldown_seconds": self.service.settings.job_recovery_seconds,
+            "lease_recovery_limit": self.service.settings.job_max_lease_recoveries,
+            "model_call_limit": self.service.settings.job_max_model_calls,
+            "budget_exhausted": self.repo.conn.execute("SELECT COUNT(*) FROM jobs WHERE status='failed' "
+                "AND json_extract(payload,'$.terminal_reason') IN ('lease_recovery_budget','model_call_budget')").fetchone()[0],
         }

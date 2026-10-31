@@ -35,6 +35,21 @@ class ScopeError(ValueError):
     pass
 
 
+def private_conversation_envelope(conversation_id: str) -> Optional[ConversationEnvelope]:
+    """Decode only server-generated private conversation identifiers."""
+    if conversation_id.startswith("qq_private:"):
+        account, user = "", conversation_id[len("qq_private:"):]
+    elif conversation_id.startswith("qq:") and ":private:" in conversation_id:
+        account, user = conversation_id[3:].rsplit(":private:", 1)
+    else:
+        return None
+    if not user:
+        return None
+    return ConversationEnvelope(source="QQ", channel_type=CHANNEL_QQ_PRIVATE,
+                                conversation_id=conversation_id, actor_id="",
+                                external_account_id=account, external_user_id=user)
+
+
 def resolve(envelope: ConversationEnvelope, lookup_identity: IdentityLookup) -> ConversationEnvelope:
     """Return a copy of ``envelope`` with conversation, actor, scope and visibility recomputed."""
     resolved = ConversationEnvelope.from_dict(envelope.to_dict())

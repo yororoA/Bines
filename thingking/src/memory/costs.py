@@ -14,7 +14,7 @@ class ModelCostStore:
             finish_reason TEXT, error_type TEXT)""")
         repo.conn.execute("CREATE INDEX IF NOT EXISTS model_calls_job ON memory_model_calls(job_id,attempt)")
 
-    def record(self, job, attempt, event):
+    def record(self, job, attempt, event, max_calls=None):
         call_id = event.get("call_id")
         status = event.get("status")
         if (not isinstance(call_id, str) or len(call_id) != 32
@@ -36,6 +36,10 @@ class ModelCostStore:
             raise ValueError("模型调用编号不可跨任务使用")
         if existing and (existing["status"] != "started" or status == "started"):
             return {"status": "duplicate"}
+        if status == "started" and max_calls is not None:
+            count = self.repo.conn.execute("SELECT COUNT(*) FROM memory_model_calls WHERE job_id=?", (job["id"],)).fetchone()[0]
+            if count >= max_calls:
+                return {"status": "budget_exhausted", "calls": count, "limit": max_calls}
         values = (call_id, job["id"], attempt, job["kind"], str(event.get("model", ""))[:160],
                   status, started_at, elapsed, number("prompt_tokens"), number("completion_tokens"),
                   number("total_tokens"), number("reasoning_tokens"), number("cached_tokens"),

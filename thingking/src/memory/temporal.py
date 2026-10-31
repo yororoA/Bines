@@ -78,6 +78,9 @@ _SCHEMA = (
     )""",
     """CREATE INDEX IF NOT EXISTS idx_temporal_retractions_boundary
         ON temporal_retractions(scope, fact_key, valid_from)""",
+    """CREATE TABLE IF NOT EXISTS temporal_fact_key_aliases (
+        scope TEXT NOT NULL, subject TEXT NOT NULL, prior_scope TEXT NOT NULL, prior_subject TEXT NOT NULL,
+        PRIMARY KEY(scope,subject,prior_scope,prior_subject))""",
 )
 
 
@@ -287,17 +290,11 @@ class TemporalStore:
                 (*key, valid_from),
             ).fetchone():
                 raise StateConflict("fact key already has a version at valid_from")
-            next_row = conn.execute(
-                "SELECT MIN(valid_from) AS boundary FROM ("
-                "SELECT valid_from FROM fact_versions WHERE scope = ? AND subject = ? AND predicate = ? "
-                "AND valid_from > ? UNION ALL "
-                "SELECT valid_from FROM temporal_retractions WHERE scope = ? AND fact_key = ? AND valid_from > ?)",
-                (*key, valid_from, scope, _fact_key(*key), valid_from),
-            ).fetchone()
+            boundary = self._next_boundary(*key, valid_from)
             conn.execute(
                 "INSERT INTO fact_versions(memory_id, scope, subject, predicate, value, valid_from, valid_to, "
                 "recorded_at, source_memory_id, source_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (memory_id, *key, encoded, valid_from, next_row["boundary"],
+                (memory_id, *key, encoded, valid_from, boundary,
                  _timestamp(self.repo.clock(), "recorded_at"), source_memory_id, source_ref),
             )
             # Never extend a predecessor across a gap left by a retraction.
@@ -307,6 +304,33 @@ class TemporalStore:
                 (valid_from, *key, valid_from, valid_from),
             )
         return True
+
+    def _next_boundary(self, scope, subject, predicate, valid_from):
+        keys = {_fact_key(scope, subject, predicate)}
+        for row in self.repo.conn.execute("SELECT prior_scope,prior_subject FROM temporal_fact_key_aliases "
+                                           "WHERE scope=? AND subject=?", (scope, subject)):
+            keys.add(_fact_key(row[0], row[1], predicate))
+        marks = ",".join("?" for _ in keys)
+        return self.repo.conn.execute(
+            "SELECT MIN(valid_from) FROM (SELECT valid_from FROM fact_versions "
+            "WHERE scope=? AND subject=? AND predicate=? AND valid_from>? UNION ALL "
+            f"SELECT valid_from FROM temporal_retractions WHERE scope=? AND fact_key IN ({marks}) AND valid_from>?)",
+            (scope, subject, predicate, valid_from, scope, *sorted(keys), valid_from)).fetchone()[0]
+
+    def migrate_fact_key(self, old_scope, old_subject, new_scope, new_subject):
+        aliases = {(old_scope, old_subject)}
+        aliases.update(tuple(r) for r in self.repo.conn.execute(
+            "SELECT prior_scope,prior_subject FROM temporal_fact_key_aliases WHERE scope=? AND subject=?",
+            (old_scope, old_subject)))
+        self.repo.conn.executemany("INSERT OR IGNORE INTO temporal_fact_key_aliases VALUES(?,?,?,?)",
+                                  [(new_scope, new_subject, *alias) for alias in aliases])
+
+    def rebuild_fact_intervals(self, scopes):
+        for scope in set(scopes):
+            rows = self.repo.conn.execute("SELECT * FROM fact_versions WHERE scope=?", (scope,)).fetchall()
+            for row in rows:
+                boundary = self._next_boundary(scope, row["subject"], row["predicate"], row["valid_from"])
+                self.repo.conn.execute("UPDATE fact_versions SET valid_to=? WHERE memory_id=?", (boundary, row["memory_id"]))
 
     def visible_memory_ids(
         self, memory_ids: Sequence[str], as_of: Optional[float] = None, include_history: bool = False,
@@ -336,6 +360,25 @@ class TemporalStore:
             ).fetchall()
             visible.update(row["id"] for row in rows)
         return [memory_id for memory_id in ids if memory_id in visible]
+
+    def describe_memory_ids(self, memory_ids: Sequence[str], as_of: Optional[float] = None) -> Dict[str, Dict[str, Any]]:
+        """Describe pre-authorized candidates without turning old facts into current ones."""
+        when = self._as_of(as_of)
+        ids = list(dict.fromkeys(memory_ids))
+        visible = set(self.visible_memory_ids(ids, as_of=when))
+        result = {}
+        for offset in range(0, len(ids), 400):
+            chunk = ids[offset:offset + 400]
+            marks = ",".join("?" for _ in chunk)
+            for row in self.repo.conn.execute(
+                f"SELECT m.id,m.created_at,m.meta,f.valid_from,f.valid_to FROM memories m "
+                f"LEFT JOIN fact_versions f ON f.memory_id=m.id WHERE m.id IN ({marks})", chunk,
+            ):
+                meta = json.loads(row["meta"] or "{}")
+                result[row["id"]] = {"valid_from": row["valid_from"] if row["valid_from"] is not None else row["created_at"],
+                                     "valid_to": row["valid_to"], "as_of": when,
+                                     "is_current": row["id"] in visible and not meta.get("repair_pending")}
+        return result
 
     def facts(
         self, scope: str, subject: Optional[str] = None, predicate: Optional[str] = None,

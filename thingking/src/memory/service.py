@@ -85,7 +85,7 @@ def _memory_view(row: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
                     "retrieval_channels", "score", "memory_id", "message_id")
     }
     for key in ("node_id", "citation_id", "node_digest", "source_family", "chain_ids", "associations", "retrieval_status",
-                "context_id", "reason_shares", "corrections", "evidence_family"):
+                "context_id", "reason_shares", "corrections", "evidence_family", "matched_spans", "temporal"):
         if key in row:
             view[key] = row[key]
     view.update(extra)
@@ -108,6 +108,8 @@ class MemoryService:
         self._last_index_check = float("-inf")
         # 时态历史与检索键都是派生层：服务显式挂载，独立仓库使用时不强制迁移。
         self.repo.temporal = TemporalStore(repo)
+        from .state_effects import StateEffects
+        self.state_effects = StateEffects(repo)
         self.retriever = HybridRetriever(repo, index, settings)
         self.repo.conn.execute("""CREATE TABLE IF NOT EXISTS experiences (
             source_ref TEXT PRIMARY KEY, memory_id TEXT NOT NULL, scope TEXT NOT NULL,
@@ -150,13 +152,24 @@ class MemoryService:
             for qq_id in self.settings.owner_qq_ids:
                 self.repo.link_identity("qq", qq_id, OWNER_ACTOR)
             self.repo.unlink_identities("qq", OWNER_ACTOR, self.settings.owner_qq_ids)
+            for row in self.repo.conn.execute("SELECT id FROM conversations WHERE channel='qq_private'").fetchall():
+                envelope = scope_policy.private_conversation_envelope(row["id"])
+                if envelope:
+                    # Fence background jobs at binding time, even if this user
+                    # never sends another message after being unlinked.
+                    self.resolve(envelope)
 
     def resolve(self, envelope: Dict[str, Any] | ConversationEnvelope) -> ConversationEnvelope:
         if isinstance(envelope, dict):
             envelope = ConversationEnvelope.from_dict(envelope)
         resolved = scope_policy.resolve(envelope, self.repo.lookup_identity)
         title = resolved.actor_name if resolved.channel_type != "qq_group" else ""
-        self.repo.ensure_conversation(resolved.conversation_id, resolved.channel_type, resolved.scope, title)
+        with self.repo.transaction():
+            previous = self.repo.conn.execute("SELECT scope FROM conversations WHERE id=?", (resolved.conversation_id,)).fetchone()
+            if previous and previous["scope"] != resolved.scope:
+                from .identity_migration import migrate
+                migrate(self, resolved, previous["scope"])
+            self.repo.ensure_conversation(resolved.conversation_id, resolved.channel_type, resolved.scope, title)
         return resolved
 
     def _day(self, ts: Optional[float]) -> str:
@@ -394,6 +407,7 @@ class MemoryService:
                 source_ref=source_ref,
                 origin="recalled" if recalled else ORIGIN_LIVE,
             )
+            self.provenance.register_message(env.scope, source_ref, message_id, turn_ref=turn_ref)
             self.life.record_message(message_id)
             if not recalled:
                 previous = self.graph.for_message(message_id)
@@ -470,6 +484,9 @@ class MemoryService:
                           "corrections": self.corrections.inherited_facts(node)}
             else:
                 bridge = None
+
+        if bridge:
+            bridge["temporal"] = self.repo.temporal.describe_memory_ids([bridge["id"]]).get(bridge["id"])
 
         recall_query = self._recall_query(query or env.content, working)
         excluded = {bridge["id"]} if bridge else set()
@@ -569,15 +586,21 @@ class MemoryService:
         current_ids = set(self.repo.temporal.visible_memory_ids([f["id"] for f in facts], include_history=historical))
         facts = [f for f in facts if f["id"] in current_ids]
         relevant = self._recall(query, scopes, [KIND_SEMANTIC], (), env.conversation_id, None)
-        selected = [f for f in relevant if f.get("subject_id") == subject][:self.settings.profile_k]
+        # Reserve a bounded identity slot inside the configured budget.
+        selected = [f for f in facts if f.get("origin") == "legacy"][:min(1, self.settings.profile_k)]
+        selected += [f for f in relevant if f.get("subject_id") == subject
+                     and f["id"] not in {item["id"] for item in selected}]
         selected_ids = {item["id"] for item in selected}
         selected += [f for f in facts if f["id"] not in selected_ids]
         output = []
-        for fact in selected[:max(self.settings.profile_k, 12)]:
+        selected = selected[:self.settings.profile_k]
+        times = self.repo.temporal.describe_memory_ids([f["id"] for f in selected])
+        for fact in selected:
             node = self.graph.for_memory(fact["id"]) or self.graph.register_memory(fact["id"])
             if node and self.graph.valid(node):
                 output.append(_memory_view(fact, node_id=node["id"], citation_id=node["id"],
-                                           node_digest=node["digest"], source_family=node["family"]))
+                                           node_digest=node["digest"], source_family=node["family"],
+                                           temporal=times.get(fact["id"])))
         return output
 
     # ---------- state ----------
@@ -587,7 +610,7 @@ class MemoryService:
     def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
                   source_ref: Optional[str] = None) -> Dict[str, Any]:
         with self.repo.transaction():
-            version = self.repo.put_state(scope, data, expected_version, source_ref=source_ref)
+            version = self.state_effects.manual(scope, data, expected_version, source_ref=source_ref)
             if source_ref:
                 message = self.repo.conn.execute(
                     "SELECT id FROM messages WHERE source_ref=?", (source_ref,),
@@ -784,6 +807,7 @@ class MemoryService:
     def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
         now = self.clock()
         self.maintenance.tick()
+        self.provenance.reconcile(limit=100)
         if now - self._last_diary_check >= DIARY_CHECK_INTERVAL:
             self._last_diary_check = now
             self.enqueue_due_summaries()
@@ -799,7 +823,7 @@ class MemoryService:
         while True:
             job = self.repo.claim_job(self.settings.job_lease_seconds,
                                      kinds=kinds or [JOB_ASSOCIATE, JOB_SUMMARIZE, JOB_DIARY, "summarize_experience", "repair_memory", "audit_memory"],
-                                     excluded=deferred)
+                                     excluded=deferred, max_lease_recoveries=self.settings.job_max_lease_recoveries)
             if job is None:
                 return None
             with self.repo.transaction():
@@ -1082,15 +1106,10 @@ class MemoryService:
                 raise ValueError("状态文本字段必须是字符串")
             if delta == 0:
                 changes.pop("relationship_delta", None)
-            if changes:
-                current = self.repo.get_state(job["scope"])
-                updated = _apply_changes(current["data"], **changes)
-                if updated != current["data"]:
-                    self.repo.put_state(job["scope"], updated,
-                                        current["version"] if expected_version is None else expected_version,
-                                        source_ref=f"message:{job['payload']['message_id']}")
+            message = self.repo.get_message(job["payload"]["message_id"])
+            changed = self.state_effects.automatic(job["scope"], message, changes, expected_version)
             self.repo.finish_job(job["id"])
-        return {"status": "done", "scope": job["scope"], "changed": bool(changes)}
+        return {"status": "done", "scope": job["scope"], "changed": changed}
 
     def _running_job(self, job_id: int, kind: str, expected_attempt=None) -> Optional[Dict[str, Any]]:
         job = self.repo.get_job(int(job_id))
@@ -1298,7 +1317,14 @@ class MemoryService:
                 raise ValueError("模型调用缺少有效任务领取凭据")
             if event.get("status") == "started" and not self._running_job(job_id, job["kind"], expected_attempt):
                 raise ValueError("模型调用所属任务租约已失效")
-            return self.model_costs.record(job, expected_attempt, event)
+            result = self.model_costs.record(job, expected_attempt, event, self.settings.job_max_model_calls)
+            if result["status"] == "budget_exhausted":
+                self.repo.update_job_payload(job["id"], {**job["payload"], "terminal_reason": "model_call_budget"})
+                self.repo.conn.execute("UPDATE jobs SET status='failed',lease_until=NULL,updated_at=?, "
+                                       "last_error='model call budget exhausted' WHERE id=?", (self.clock(), job["id"]))
+        if result["status"] == "budget_exhausted":
+            raise ValueError("model call budget exhausted")
+        return result
 
     @staticmethod
     def _clamp_importance(value: Any) -> float:
@@ -1315,6 +1341,8 @@ class MemoryService:
         self.retriever.sync(vectors=True)
 
     def _index_rows(self, rows: Sequence[Dict[str, Any]]) -> int:
+        if not getattr(self.index, "stores_memory_vectors", True):
+            return 0
         if not rows:
             return 0
         if not getattr(self.index, "persistent", True):
@@ -1336,7 +1364,7 @@ class MemoryService:
 
     def _reconcile_vectors(self, full: bool = False) -> Dict[str, int]:
         keys = self.retriever.sync(vectors=True, full=full)
-        if not getattr(self.index, "persistent", True):
+        if not getattr(self.index, "persistent", True) or not getattr(self.index, "stores_memory_vectors", True):
             return {"indexed": 0, "removed": 0, "keys": keys}
         indexed = 0
         batch_size = max(1, min(512, getattr(self.settings, "index_batch_size", 64)))
@@ -1357,6 +1385,9 @@ class MemoryService:
         return {"indexed": indexed, "removed": len(removed), "keys": keys}
 
     def rebuild_index(self) -> Dict[str, int]:
+        maintenance = getattr(self.repo, "vector_maintenance", None)
+        if maintenance is not None:
+            return maintenance.rebuild()
         if not getattr(self.index, "persistent", True):
             return {"indexed": 0, "removed": 0, "total": self.index.count()}
         self.index.reset()
@@ -1370,7 +1401,16 @@ class MemoryService:
     # ---------- admin ----------
     def stats(self) -> Dict[str, Any]:
         stats = self.repo.stats()
+        if not getattr(self.index, "stores_memory_vectors", True):
+            stats["unindexed"] = self.repo.conn.execute(
+                "SELECT COUNT(*) FROM retrieval_keys WHERE indexed_at IS NULL").fetchone()[0]
+            stats["index_unit"] = "retrieval_keys"
         stats["index_count"] = self.index.count()
+        maintenance = getattr(self.repo, "vector_maintenance", None)
+        if maintenance is not None:
+            stats["vector_status"] = maintenance.status()
+        elif hasattr(self.index, "status"):
+            stats["vector_status"] = self.index.status()
         stats["identity_links"] = self.repo.identity_links()
         stats["conversations"] = self.repo.list_conversations()
         for table in ("retrieval_keys", "state_history", "fact_versions", "association_nodes",

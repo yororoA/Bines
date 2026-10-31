@@ -241,7 +241,10 @@ class EvidenceStoreTest(unittest.TestCase):
         self.store.sync()
         old_key = self.store.get_keys([self.key(message_id, "message")], ["owner"])[self.key(message_id, "message")]
         self.repo.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-        self.repo.ensure_conversation("conversation:owner", "local", "new_scope")
+        # Simulate an external legacy write; identity migrations now require the
+        # service's source-aware transaction rather than ensure_conversation.
+        self.repo.conn.execute("UPDATE conversations SET scope='new_scope' WHERE id='conversation:owner'")
+        self.repo.conn.execute("UPDATE messages SET scope='new_scope' WHERE conversation_id='conversation:owner'")
         self.assertEqual(self.store.get_keys(self.store.all_ids(), ["owner"]), {})
         self.assertEqual(self.store.evidence(old_key, ["owner", "new_scope"]), [])
         self.assertEqual(self.store.bm25_query("唯一", ["owner"]), [])

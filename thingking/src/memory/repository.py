@@ -157,6 +157,8 @@ class MemoryRepository:
         for column in ("started_at", "duration_seconds"):
             if column not in job_columns:
                 self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} REAL")
+        if "lease_recoveries" not in job_columns:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN lease_recoveries INTEGER NOT NULL DEFAULT 0")
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
         )
@@ -221,9 +223,7 @@ class MemoryRepository:
             )
             return
         if existing["scope"] != scope:
-            # Identity links changed (e.g. a QQ account was linked to the owner): move the conversation.
-            self.conn.execute("UPDATE conversations SET scope = ? WHERE id = ?", (scope, conversation_id))
-            self.conn.execute("UPDATE messages SET scope = ? WHERE conversation_id = ?", (scope, conversation_id))
+            raise StateConflict("conversation identity changed; use MemoryService.resolve for a source-aware migration")
         if title:
             self.conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
 
@@ -635,7 +635,7 @@ class MemoryRepository:
         )
 
     def claim_job(self, lease_seconds: int, kinds: Optional[Sequence[str]] = None,
-                  excluded: Sequence[int] = ()) -> Optional[Dict[str, Any]]:
+                  excluded: Sequence[int] = (), max_lease_recoveries: Optional[int] = None) -> Optional[Dict[str, Any]]:
         now = self.clock()
         sql = (
             "SELECT * FROM jobs WHERE ((status = 'pending' AND available_at <= ?) "
@@ -649,6 +649,14 @@ class MemoryRepository:
             sql += f" AND id NOT IN ({','.join('?' for _ in excluded)})"
             params.extend(excluded)
         with self.transaction():
+            if max_lease_recoveries is not None:
+                expired = self.conn.execute("SELECT id,payload FROM jobs WHERE status='running' AND lease_until<? "
+                                            "AND lease_recoveries>=?", (now, max_lease_recoveries)).fetchall()
+                for row in expired:
+                    payload = {**json.loads(row["payload"]), "terminal_reason": "lease_recovery_budget"}
+                    self.conn.execute("UPDATE jobs SET status='failed',lease_until=NULL,updated_at=?,payload=?, "
+                                      "last_error='lease recovery budget exhausted' WHERE id=?",
+                                      (now, json.dumps(payload), row["id"]))
             row = self.conn.execute(sql + " ORDER BY CASE WHEN kind='repair_memory' THEN 0 "
                                     "WHEN kind IN ('update_state','audit_memory') THEN 1 "
                                     "WHEN kind='associate' AND COALESCE(json_extract(payload,'$.background'),0)=0 THEN 2 "
@@ -657,7 +665,8 @@ class MemoryRepository:
             if not row:
                 return None
             self.conn.execute(
-                "UPDATE jobs SET status = 'running', attempts = attempts + 1, lease_until = ?, "
+                "UPDATE jobs SET lease_recoveries=lease_recoveries+CASE WHEN status='running' THEN 1 ELSE 0 END, "
+                "status = 'running', attempts = attempts + 1, lease_until = ?, "
                 "started_at = ?, duration_seconds = NULL, updated_at = ? WHERE id = ?",
                 (now + max(lease_seconds, 420 if row["kind"] in {"associate", "audit_memory"} else lease_seconds), now, now, row["id"]),
             )
