@@ -107,7 +107,7 @@ hybrid 适配点仍为 `MemoryRepository`、`MemorySettings`、`MemoryService(re
 
 ## 混合检索结果（2026-10-22）
 
-当前工作区的新实现已可评测：`search` 返回候选及 `evidence`，原文消息和派生记忆都进入同一检索管线。使用同一 28 题标注、同一临时库副本，词面混合模式（不开向量）结果：
+2026-10-22 的实现通过 `search` 返回候选及 `evidence`，原文消息和派生记忆进入同一检索管线。以下是当日同一 28 题标注、同一临时库副本的词面混合结果（不开向量），不是后续代码版本的重新测量：
 
 | 指标 | @1 | @5 | @10 |
 | --- | ---: | ---: | ---: |
@@ -156,3 +156,19 @@ hybrid 适配点仍为 `MemoryRepository`、`MemorySettings`、`MemoryService(re
 ```bash
 .venv/bin/python -B verification/memory_retrieval_eval.py --self-test
 ```
+
+## 构建与召回边界回归（2026-11-01）
+
+新增的隔离回归覆盖：原话ID/ref统一失效传播、增量日记、冷原话精确细节、弱关联不能压过直接命中、候选全部分页判断、引用奖励版本与时间衰减、展示后去重及每次工具请求预算。向量侧使用假embedding与真实Chroma，覆盖逐键失败隔离、缓存复用、tokenizer字符边界、查询优先、版本/删除竞争和持续写入下的构建切换。它们验证实现契约，不代表真实中文模型的召回率或回答正确率。
+
+索引参数可独立与精确近邻比较，无需模型或私有数据：
+
+```bash
+BINES_ENV_FILE=/dev/null ANONYMIZED_TELEMETRY=False \
+  thingking/thinking_venv/bin/python -m verification.vector_index_eval \
+  --size 10000 --queries 100 --ef-search 32 100 256
+```
+
+本机一次合成测试为10000条64维向量、100个查询、k=10、seed=731，Chroma 1.5.9，构建参数`ef_construction=100/max_neighbors=16`。三个ef_search值的ANN Recall@10均为0.99，P95约0.18–0.22毫秒；构建约0.83秒。这里只测索引查询，排除了embedding、SQLite、提示词和模型生成，且受热缓存与本机负载影响，不能当作生产P95，也没有证据据此改变默认HNSW参数或更换向量库。
+
+更换embedding模型前，使用新的独立标注版本覆盖中文同义改写、专名/编号、跨句事实、历史状态、冷原话及无答案负例；固定语料、模型revision、tokenizer和预处理，比较Recall@K、呈现覆盖率、核验引用准确率与答案正确率。构建运维同时记录向量覆盖/隔离数量、索引滞后和query busy比例，建联记录候选判断覆盖率。默认模型未因这些合成回归自动替换，本轮没有重新运行真实私有28题集或调用真实生成模型。

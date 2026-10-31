@@ -38,7 +38,7 @@ CATEGORIES = {
 EXTRA_SOURCE_FILES = ("common/env.py", "config.py", "config.example.py", "runtime_environments.py")
 PROMPT_SOURCE_FILES = ("thingking/src/prompt_builder.py", "thingking/src/persona_profile.py",
                        "thingking/src/relationship_state.py", "thingking/persona/persona.yaml",
-                       "common/clock.py")
+                       "common/clock.py", "common/context_budget.py")
 KS = (1, 5, 10)
 sys.dont_write_bytecode = True
 
