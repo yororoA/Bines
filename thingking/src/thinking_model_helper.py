@@ -9,6 +9,7 @@ from config import DEEPSEEK_MODEL
 from common.deepseek_client import get_deepseek_client
 from common.clock import with_current_time
 from common.website_perception import with_website_observations
+from common.model_usage import measured_request
 from skill_runner import SkillProtocolError, SkillRunner
 
 logger = logging.getLogger("bines.thinking.model")
@@ -45,7 +46,7 @@ class ThinkingModelHelper:
             client = DeepSeekClient(self.client.with_options(max_retries=max_retries))
         retry_budget = _MAX_TEXT_RETRY_TOKENS if retry_tokens is None else retry_tokens
         for attempt in range(2):
-            response = client.chat.completions.create(
+            response = measured_request(client.chat.completions.create,
                 model=self.model,
                 messages=messages,
                 stream=False,
@@ -154,7 +155,7 @@ class ThinkingModelHelper:
             request_messages = with_current_time(with_website_observations(request_messages))
             budget = max_tokens
             for attempt in range(2):
-                response = self.client.chat.completions.create(
+                response = measured_request(self.client.chat.completions.create,
                     model=self.model, messages=request_messages, tools=tools or None,
                     temperature=temperature, max_tokens=budget, stream=False,
                 )

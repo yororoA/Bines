@@ -153,7 +153,8 @@ class MemoryAdmin:
         total = self.repo.conn.execute("SELECT COUNT(*) FROM jobs" + clause, params).fetchone()[0]
         items = [dict(row) for row in self.repo.conn.execute(
             "SELECT id,kind,scope,status,attempts,last_error,created_at,updated_at,started_at,duration_seconds,"
-            "json_extract(payload,'$.rejected_links') AS rejected_links FROM jobs" + clause
+            "json_extract(payload,'$.rejected_links') AS rejected_links,"
+            "json_array_length(payload,'$.unresolved_targets') AS unresolved_count FROM jobs" + clause
             + " ORDER BY id DESC LIMIT ? OFFSET ?",
             (*params, max(1, min(100, int(limit))), max(0, int(offset))))]
         return {"items": items, "total": total}

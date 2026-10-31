@@ -90,6 +90,27 @@ class MemoryLearningTest(unittest.TestCase):
         self.assertEqual(memory["meta"]["repair_history"][0]["content"], "管理员住在北京")
         self.assertTrue(self.graph.valid(self.graph.for_memory(derived["memory_id"])))
 
+    def test_paraphrased_dependencies_repair_transitively_without_touching_unrelated_sources(self):
+        source = self.raw("我住在北京")
+        summary = self.memory("管理员居住在首都", source_message_ids=source["message_ids"])
+        diary = self.memory("朋友来自首都", source_memory_ids=[summary["memory_id"]])
+        unrelated = self.memory("同事也住在首都")
+        self.service.correct_memory(**self.correction(source))
+        for item in (summary, diary):
+            self.assertEqual(self.repo.get_memory(item["memory_id"])["meta"]["repair_pending"], "fix-1")
+            self.assertFalse(self.graph.valid(item))
+        self.assertTrue(self.graph.valid(unrelated))
+        claimed = self.service.claim_job(["repair_memory"])
+        self.assertEqual(claimed["job"]["payload"]["memory_id"], summary["memory_id"])
+        self.assertEqual(claimed["materials"]["corrections"][0]["replacement"], "上海")
+        self.service.complete_memory_repair(claimed["job"]["id"], "管理员住在上海")
+        next_job = self.service.claim_job(["repair_memory"])
+        self.assertEqual(next_job["job"]["payload"]["memory_id"], diary["memory_id"])
+        self.assertIn("上海", json.dumps(next_job["materials"], ensure_ascii=False))
+        self.service.complete_memory_repair(next_job["job"]["id"], "朋友住在上海")
+        self.assertTrue(self.graph.valid(self.graph.for_memory(diary["memory_id"])))
+        self.assertEqual(self.repo.get_message(source["message_ids"][0])["content"], "我住在北京")
+
     def test_repair_cannot_commit_after_new_source_revision(self):
         source = self.memory("北京是居住城市")
         child = self.memory("住在北京", source_memory_ids=[source["memory_id"]])

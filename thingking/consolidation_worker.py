@@ -3,6 +3,7 @@
 QQ 与桌面共用；通过 ChatBot 网关访问 Memory Server。
 """
 import logging
+import argparse
 import os
 import signal
 import sys
@@ -28,10 +29,10 @@ def build_worker(client, model=None):
     return MemoryWorker(
         client,
         complete_text=lambda messages: model.complete_text(
-            messages, temperature=0.3, max_tokens=8192,
+            messages, temperature=0.3, max_tokens=8192, timeout=120, max_retries=0,
         ),
         summary_complete_text=lambda messages: model.complete_text(
-            messages, temperature=0.3, max_tokens=8192,
+            messages, temperature=0.3, max_tokens=8192, timeout=120, max_retries=0,
             response_format={"type": "json_object"},
         ),
         association_complete_text=lambda messages: model.complete_text(
@@ -41,7 +42,7 @@ def build_worker(client, model=None):
         ),
         diary_system_prompt=persona_profile.diary_system_prompt,
         state_complete_text=lambda messages: model.complete_text(
-            messages, temperature=0.0, max_tokens=4096,
+            messages, temperature=0.0, max_tokens=4096, retry_tokens=8192, timeout=90, max_retries=0,
             response_format={"type": "json_object"},
         ),
         idle_seconds=2.0,
@@ -51,14 +52,23 @@ def build_worker(client, model=None):
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    client = GatewayMemoryClient()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--direct-memory-server", action="store_true",
+                        help="直接连接本机 Memory Server；无需启动 QQ 网关即可整理记忆")
+    args = parser.parse_args()
+    if args.direct_memory_server:
+        from config import ZMQ_PORTS
+        from memory.client import MemoryClient
+        client = MemoryClient("127.0.0.1", ZMQ_PORTS["RAG_SERVER_REQREP"])
+    else:
+        client = GatewayMemoryClient()
     timeout = float(os.environ.get("BINES_CONSOLIDATION_WAIT", "180"))
     if not wait_for_server(client, timeout_seconds=timeout):
-        raise SystemExit("记忆网关未就绪；请先启动 ChatBot 网关")
+        raise SystemExit("记忆服务未就绪；请先启动 Memory Server 或 ChatBot 网关")
     deps.register_memory_client(client)
     worker = build_worker(client)
     worker.start()
-    mark_ready("Memory Worker", {"transport": "gateway"})
+    mark_ready("Memory Worker", {"transport": "direct" if args.direct_memory_server else "gateway"})
     log.info("Memory Worker ready")
 
     stop = threading.Event()

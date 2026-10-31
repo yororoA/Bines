@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 
 from .associations import digest
 
@@ -32,6 +33,9 @@ class UsageStore:
         value = math.log(prior / (1 - prior))
         value += min(.6, .1 * math.log1p(counts.get("presented", 0)))
         value += min(.9, .25 * math.log1p(counts.get("cited", 0)))
+        # Verbatim answer reuse is a weak activation signal, never a citation
+        # or evidence of truth; it does not train causal reason competition.
+        value += min(.2, .05 * math.log1p(counts.get("answer_overlap", 0)))
         return 1 / (1 + math.exp(-value))
 
     def _add(self, scope, turn_id, node, event_type, receipt):
@@ -126,6 +130,17 @@ class UsageStore:
             result["cited"] += added
             if added and getattr(self.repo, "competition", None):
                 self.repo.competition.learn(scope, turn_id, node, presentation, validated)
+        for node, spans, originals, _, attributed, _, facts in visible.values():
+            for span in spans:
+                reused = next((part.strip() for part in re.split(r"[。！？!?\n]", span)
+                               if 12 <= len(part.strip()) <= 400 and part.strip() in str(answer)
+                               and any(part.strip() in original for original in originals)
+                               and not any(fact["quote"] in part for fact in facts)), None)
+                if reused:
+                    self._add(scope, turn_id, node, "answer_overlap",
+                              {"chain_id": attributed, "source_quote": reused, "answer_span": reused,
+                               "inferred": True})
+                    break
         if result["presented"] or result["cited"]:
             self.conn.execute("INSERT OR IGNORE INTO association_events(event_key,scope) VALUES(?,?)",
                               (f"usage:{turn_id}", scope))

@@ -648,16 +648,17 @@ class MemoryRepository:
             sql += f" AND id NOT IN ({','.join('?' for _ in excluded)})"
             params.extend(excluded)
         with self.transaction():
-            row = self.conn.execute(sql + " ORDER BY CASE WHEN kind='update_state' THEN 0 "
-                                    "WHEN kind='associate' AND COALESCE(json_extract(payload,'$.background'),0)=0 THEN 1 "
-                                    "WHEN kind='associate' THEN 3 ELSE 2 END, available_at, id LIMIT 1",
+            row = self.conn.execute(sql + " ORDER BY CASE WHEN kind='repair_memory' THEN 0 "
+                                    "WHEN kind IN ('update_state','audit_memory') THEN 1 "
+                                    "WHEN kind='associate' AND COALESCE(json_extract(payload,'$.background'),0)=0 THEN 2 "
+                                    "WHEN kind='associate' THEN 4 ELSE 3 END, available_at, id LIMIT 1",
                                     params).fetchone()
             if not row:
                 return None
             self.conn.execute(
                 "UPDATE jobs SET status = 'running', attempts = attempts + 1, lease_until = ?, "
                 "started_at = ?, duration_seconds = NULL, updated_at = ? WHERE id = ?",
-                (now + max(lease_seconds, 420 if row["kind"] == "associate" else lease_seconds), now, now, row["id"]),
+                (now + max(lease_seconds, 420 if row["kind"] in {"associate", "audit_memory"} else lease_seconds), now, now, row["id"]),
             )
         job = dict(self.conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone())
         job["payload"] = json.loads(job["payload"])
@@ -686,10 +687,12 @@ class MemoryRepository:
         if job["status"] != "running":
             return job["status"]  # 撤回或手动更新取消的任务不能因迟到的失败通知复活。
         now = self.clock()
-        if job["attempts"] >= max_attempts:
+        failures = int(job["payload"].get("generation_failures", 0)) + 1
+        self.update_job_payload(job_id, {**job["payload"], "generation_failures": failures})
+        if failures >= max_attempts:
             status, available_at = "failed", now
         else:
-            status, available_at = "pending", now + 60 * (2 ** max(0, job["attempts"] - 1))
+            status, available_at = "pending", now + 60 * (2 ** min(10, failures - 1))
         self.conn.execute(
             "UPDATE jobs SET status = ?, available_at = ?, lease_until = NULL, last_error = ?, "
             "duration_seconds = CASE WHEN started_at IS NOT NULL THEN MAX(0, ? - started_at) END, updated_at = ? WHERE id = ?",

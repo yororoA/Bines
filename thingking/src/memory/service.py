@@ -121,6 +121,14 @@ class MemoryService:
         self.corrections = self.repo.corrections = CorrectionStore(self)
         self.usage = self.repo.usage = UsageStore(repo, self.graph)
         self.retention = self.repo.retention = RetentionStore(repo, self.graph, settings)
+        from .association_plan import AssociationPlanner
+        self.association_planner = AssociationPlanner(self)
+        from .maintenance import MemoryMaintenance
+        self.maintenance = MemoryMaintenance(self)
+        from .costs import ModelCostStore
+        self.model_costs = ModelCostStore(repo)
+        from .turn_audit import TurnAudit
+        self.turn_audit = TurnAudit(self)
         with self.repo.transaction():
             # Existing unsummarized receipts must settle before association.
             for row in self.repo.conn.execute("""SELECT DISTINCT e.memory_id FROM experiences e JOIN jobs j
@@ -239,6 +247,7 @@ class MemoryService:
                 self.usage.record(env.scope, source_ref, feedback.get("presented") or [],
                                   feedback.get("citations") or [], record.get("result") or "")
                 self._commit_turn_corrections(env, source_ref, record, feedback)
+                self.turn_audit.enqueue(env, source_ref, revision, record, feedback)
                 used = [r[0] for r in self.repo.conn.execute(
                     "SELECT node_id FROM memory_usage_events WHERE scope=? AND turn_id=? AND event_type='cited'",
                     (env.scope, source_ref))]
@@ -259,16 +268,7 @@ class MemoryService:
             return
         if env.scope != OWNER_SCOPE or env.actor_id != OWNER_ACTOR:
             return
-        refs = (record.get("correction_source_refs") or []) if env.channel_type != "local" else [
-            ref for ref in record.get("turn_message_refs") or record.get("source_message_refs") or []
-            if ref.startswith(source_ref.removesuffix(":turn") + ":")]
-        user_messages = []
-        for ref in refs:
-            row = self.repo.conn.execute("""SELECT * FROM messages WHERE source_ref=? AND scope=?
-                AND conversation_id=? AND role='user' AND actor_id=?""",
-                (ref, env.scope, env.conversation_id, OWNER_ACTOR)).fetchone()
-            if row and self.graph._message_valid(row["id"], env.scope):
-                user_messages.append(row["content"])
+        user_messages = [m["content"] for m in self.turn_audit.user_messages(env, source_ref, record)]
         shown = {item.get("node_id"): item for item in feedback.get("presented") or [] if isinstance(item, dict)}
         outcomes = []
         for proposal in proposals[:5]:
@@ -781,6 +781,7 @@ class MemoryService:
 
     def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
         now = self.clock()
+        self.maintenance.tick()
         if now - self._last_diary_check >= DIARY_CHECK_INTERVAL:
             self._last_diary_check = now
             self.enqueue_due_summaries()
@@ -789,15 +790,14 @@ class MemoryService:
         deferred = []
         while True:
             job = self.repo.claim_job(self.settings.job_lease_seconds,
-                                     kinds=kinds or [JOB_ASSOCIATE, JOB_SUMMARIZE, JOB_DIARY, "summarize_experience", "repair_memory"],
+                                     kinds=kinds or [JOB_ASSOCIATE, JOB_SUMMARIZE, JOB_DIARY, "summarize_experience", "repair_memory", "audit_memory"],
                                      excluded=deferred)
             if job is None:
                 return None
             with self.repo.transaction():
                 materials = self._job_materials(job)
             if materials is False:
-                self.repo.conn.execute("""UPDATE jobs SET status='pending',lease_until=NULL,
-                    attempts=attempts-1 WHERE id=?""", (job["id"],))
+                self.repo.conn.execute("UPDATE jobs SET status='pending',lease_until=NULL WHERE id=?", (job["id"],))
                 deferred.append(job["id"])
                 continue
             if materials is not None:
@@ -852,6 +852,8 @@ class MemoryService:
         return {} if unsafe else snapshot["data"]
 
     def _job_materials(self, job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if job["kind"] == "audit_memory":
+            return self.turn_audit.materials(job)
         if job["kind"] == JOB_ASSOCIATE:
             node = self.graph.get(job["payload"]["node_id"], job["scope"])
             if not self.graph.valid(node) or node["revision"] != job["payload"]["revision"]:
@@ -901,15 +903,16 @@ class MemoryService:
                         "content": _association_excerpt(self.graph.material(candidate)["text"], query[:4000]),
                         "corrections": self.corrections.facts(candidate["id"], job["scope"]),
                         "source_type": candidate["source_type"]}
-            chains = [dict(r) for r in self.repo.conn.execute(
-                "SELECT id,reason_key,reason_text,revision FROM association_chains WHERE scope=? ORDER BY revision DESC LIMIT 16",
-                (job["scope"],))]
+            chains = self.association_planner.relevant_chains(job["scope"], query)
             for chain in chains:
                 constraint = self.corrections.reason(job["scope"], chain["id"])
                 if constraint:
                     chain["correction"] = {k: constraint[k] for k in ("kind", "replacement", "explanation")}
+            plan = self.association_planner.prepare(
+                job, node, candidates[:self.settings.association_model_candidates], query, chains)
             return {"scope": job["scope"], "source": view(node),
-                    "candidates": [view(c) for c in candidates], "chains": chains}
+                    "candidates": [view(c) for c in candidates], "chains": chains,
+                    "compact": plan["prompt"]}
         if job["kind"] == "repair_memory":
             return self.corrections.repair_materials(job)
         if job["kind"] == "summarize_experience":
@@ -1011,18 +1014,33 @@ class MemoryService:
         return None
 
     def complete_association(self, job_id: int, links: List[Dict[str, Any]], prior: float = .5,
-                             expected_attempt=None, rejected_links=0) -> Dict[str, Any]:
+                             expected_attempt=None, rejected_links=0, decisions=None) -> Dict[str, Any]:
         with self.repo.transaction():
             job = self._running_job(job_id, JOB_ASSOCIATE, expected_attempt)
             if not job:
                 return {"status": "ignored"}
             if type(rejected_links) is not int or not 0 <= rejected_links <= 40:
                 raise ValueError("丢弃的关联条目数量无效")
-            if self.graph.submit(job, links, prior):
-                if rejected_links:
-                    self.repo.update_job_payload(job_id, {**job["payload"], "rejected_links": rejected_links})
+            resolved = None
+            if decisions is not None:
+                links, resolved = self.association_planner.decode(job, decisions)
+            current_plan = self.association_planner.current(job)
+            unresolved = [job["payload"]["association_plan"]["aliases"][alias]
+                          for alias, value in (resolved or {}).items() if value is None]
+            if current_plan and unresolved and not job["payload"].get("evidence_expanded"):
+                # One immediate evidence expansion, separate from transport failures.
+                # A genuine ambiguity must never enter the outage recovery loop.
+                self.repo.update_job_payload(job_id, {**job["payload"], "evidence_expanded": True})
+                self.repo.conn.execute("UPDATE jobs SET status='pending',lease_until=NULL WHERE id=?", (job_id,))
+                return {"status": "expanding_evidence"}
+            if current_plan and self.graph.submit(job, links, prior):
+                if resolved is not None:
+                    self.association_planner.remember(job, resolved)
+                self.repo.update_job_payload(job_id, {**job["payload"], "rejected_links": rejected_links,
+                                                     "unresolved_targets": unresolved})
                 self.repo.finish_job(job_id)
-                return {"status": "done", "node_id": job["payload"]["node_id"], "rejected_links": rejected_links}
+                return {"status": "done", "node_id": job["payload"]["node_id"],
+                        "rejected_links": rejected_links, "unresolved_targets": unresolved}
             # Invalidate only model materials, retaining the same source job when still current.
             node = self.graph.get(job["payload"]["node_id"], job["scope"])
             if self.graph.valid(node) and node["revision"] == job["payload"]["revision"]:
@@ -1258,6 +1276,16 @@ class MemoryService:
                     self.graph.register_memory(memory["id"])
             return {"status": status}
 
+    def record_model_call(self, job_id, event, expected_attempt):
+        with self.repo.transaction():
+            job = self.repo.get_job(int(job_id))
+            if (not job or type(expected_attempt) is not int or not 0 < expected_attempt <= job["attempts"]
+                    or not isinstance(event, dict)):
+                raise ValueError("模型调用缺少有效任务领取凭据")
+            if event.get("status") == "started" and not self._running_job(job_id, job["kind"], expected_attempt):
+                raise ValueError("模型调用所属任务租约已失效")
+            return self.model_costs.record(job, expected_attempt, event)
+
     @staticmethod
     def _clamp_importance(value: Any) -> float:
         try:
@@ -1338,6 +1366,12 @@ class MemoryService:
             "SELECT COUNT(*) FROM association_nodes WHERE ready=1 AND superseded=0").fetchone()[0]
         stats["jobs_by_kind"] = [dict(r) for r in self.repo.conn.execute(
             "SELECT kind,status,COUNT(*) n FROM jobs GROUP BY kind,status")]
+        stats["maintenance"] = self.maintenance.stats()
+        stats["model_costs"] = self.model_costs.stats()
+        stats["association_decisions"] = self.repo.conn.execute(
+            "SELECT COUNT(*) FROM association_decisions").fetchone()[0]
+        stats["unresolved_associations"] = self.repo.conn.execute(
+            "SELECT COALESCE(SUM(json_array_length(payload,'$.unresolved_targets')),0) FROM jobs WHERE status='done'").fetchone()[0]
         return stats
 
     def list_association_nodes(self, **filters):
@@ -1367,6 +1401,15 @@ class MemoryService:
             if not job:
                 return {"status": "ignored"}
             result = self.corrections.complete_repair(job, content)
+        self.retriever.sync()
+        return result
+
+    def complete_memory_audit(self, job_id, decisions, approved, expected_attempt=None):
+        with self.repo.transaction():
+            job = self._running_job(job_id, "audit_memory", expected_attempt)
+            if not job:
+                return {"status": "ignored"}
+            result = self.turn_audit.complete(job, decisions, approved)
         self.retriever.sync()
         return result
 

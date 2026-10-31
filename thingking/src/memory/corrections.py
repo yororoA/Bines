@@ -156,9 +156,13 @@ class CorrectionStore:
                 dependencies = set(meta.get("source_memory_ids") or []) | set(meta.get("episode_ids") or [])
                 if meta.get("episode_id") and not meta.get("fact_source_message_id"):
                     dependencies.add(meta["episode_id"])
-                raw_dependent = bool(messages.intersection(meta.get("source_message_ids") or []))
-                if (dependencies.intersection(source_ids | invalid)
-                        or raw_dependent and quote in memory["content"]):
+                raw_sources = set(meta.get("source_message_ids") or [])
+                if meta.get("fact_source_message_id"):
+                    raw_sources.add(meta["fact_source_message_id"])
+                raw_dependent = bool(messages.intersection(raw_sources))
+                # A paraphrase can omit every character of the corrected quote.
+                # Source dependencies, rather than a text match, determine invalidation.
+                if dependencies.intersection(source_ids | invalid) or raw_dependent:
                     if memory["id"] not in source_ids and not meta.get("audit_only"):
                         linked.add(memory["id"])
             if linked <= invalid:
@@ -194,7 +198,10 @@ class CorrectionStore:
                 return False
             sources.append({"id": mid, "content": source["content"][:12000]})
             versions["memory:" + mid] = digest([source["content"], source["meta"]])
-        for mid in meta.get("source_message_ids") or []:
+        message_ids = set(meta.get("source_message_ids") or [])
+        if meta.get("fact_source_message_id"):
+            message_ids.add(meta["fact_source_message_id"])
+        for mid in sorted(message_ids):
             source = self.repo.get_message(mid)
             if source and source["scope"] == job["scope"] and self.graph._message_valid(mid, job["scope"]):
                 raw = self.graph.for_message(mid)
@@ -211,10 +218,17 @@ class CorrectionStore:
                    "target_digest": digest([memory["content"], memory["meta"]])}
         self.repo.update_job_payload(job["id"], payload)
         job["payload"] = payload
+        target = self.graph.for_memory(memory["id"])
+        constraints = self.inherited_facts(target) if target else []
+        # The triggering correction remains relevant even when an older derived
+        # node has incomplete family metadata or rephrased the obsolete fact.
+        trigger = self.conn.execute("""SELECT quote,replacement,explanation,operation_id
+            FROM memory_corrections WHERE scope=? AND operation_id=? AND kind='fact'""",
+            (job["scope"], job["payload"]["operation_id"])).fetchone()
+        if trigger and not any(c["operation_id"] == trigger["operation_id"] for c in constraints):
+            constraints.append(dict(trigger))
         return {"scope": job["scope"], "kind": memory["kind"], "sources": sources,
-                "corrections": [dict(r) for r in self.conn.execute(
-                    "SELECT quote,replacement,explanation FROM memory_corrections WHERE scope=? AND kind='fact'",
-                    (job["scope"],)) if r["quote"] in memory["content"]]}
+                "corrections": constraints}
 
     def complete_repair(self, job, content):
         memory = self.repo.get_memory(job["payload"]["memory_id"])

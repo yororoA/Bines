@@ -197,19 +197,21 @@ class AssociationTest(unittest.TestCase):
         for i in range(4):
             self.raw("蓝色围巾" + str(i))
         while claimed := self.service.claim_job([JOB_ASSOCIATE]):
-            self.repo.conn.execute("UPDATE jobs SET attempts=5 WHERE id=?", (claimed["job"]["id"],))
+            self.repo.update_job_payload(claimed["job"]["id"],
+                {**claimed["job"]["payload"], "generation_failures": 4})
             self.assertEqual(self.service.fail_job(claimed["job"]["id"], "模型不可用")["status"], "failed")
         claimed = self.claim("summarize")
         self.assertEqual(len(claimed["materials"]["retention"]["data"]["association_incomplete"]), 4)
 
-    def test_backoff_dependencies_defer_without_spending_attempts(self):
+    def test_backoff_dependencies_defer_without_spending_generation_budget(self):
         for i in range(4):
             self.raw("蓝色围巾" + str(i))
         claimed = self.claim(JOB_ASSOCIATE)
         self.service.fail_job(claimed["job"]["id"], "temporary")
         self.assertIsNone(self.service.claim_job(["summarize"]))
-        summary = self.repo.conn.execute("SELECT attempts,status FROM jobs WHERE kind='summarize'").fetchone()
-        self.assertEqual(tuple(summary), (0, "pending"))
+        summary = self.repo.conn.execute("""SELECT attempts,status,
+            COALESCE(json_extract(payload,'$.generation_failures'),0) FROM jobs WHERE kind='summarize'""").fetchone()
+        self.assertEqual(tuple(summary), (1, "pending", 0))  # Lease tokens are never reused.
 
     def test_complete_turn_not_cut_by_message_chunk(self):
         settings = MemorySettings(data_dir=Path(self.tmp.name), state_updates=False, associations_enabled=False,
@@ -280,7 +282,11 @@ class AssociationTest(unittest.TestCase):
                 return self.service.complete_association(*args, **claim)
             def fail_job(inner, *args, **claim):
                 return self.service.fail_job(*args, **claim)
-        worker = MemoryWorker(Client(), lambda _: '{"prior":0.7,"links":[]}', lambda: "")
+        def model(messages):
+            materials = json.loads(messages[1]["content"])
+            return json.dumps({"prior": .7, "decisions": [
+                {"target": card["id"], "links": []} for card in materials["candidates"]]})
+        worker = MemoryWorker(Client(), model, lambda: "")
         self.assertTrue(worker.run_once())
         self.assertEqual(self.repo.conn.execute("SELECT ready,prior FROM association_nodes").fetchone()[1], .7)
         self.repo.conn.execute("UPDATE jobs SET status='done' WHERE kind='summarize'")

@@ -1,6 +1,6 @@
 # ChatBot 记忆模式
 
-所有渠道使用新版 MemoryService。完整模式由独立的 RAG Server 持有 `memory.db` 和 Chroma 向量索引；纯 QQ 模式把服务嵌入网关，使用词面检索，不下载嵌入模型，仍只运行网关和 QQ Thinking 两个 Python 进程。数据目录由 `.env` 中的 `BINES_MEMORY_DIR` 指定，默认 `thingking/memory_data`。
+所有渠道使用 MemoryService。默认 Docker 模式下，完整模式与纯 QQ 模式均由独立的 Memory Server 持有 `memory.db` 和 Chroma 向量索引，网关通过远端服务读写记忆。宿主机纯 QQ 模式在没有 Memory Server 时才退回网关内置的词面检索。数据目录由 `.env` 中的 `BINES_MEMORY_DIR` 指定，默认 `thingking/memory_data`。
 
 QQ 原始消息、事件队列、回复轮次和工具发送回执放在独立的 `gateway.db`。网关确认记忆服务提交后才标记同步成功，重启时继续同步，通过来源标识去重。启动时会识别旧 NapCat `memory.db` 的表结构，先迁移为 `gateway.db`，再创建新版记忆库。
 
@@ -12,9 +12,43 @@ QQ 原始消息、事件队列、回复轮次和工具发送回执放在独立�
 4. 人格和场景提示词统一由 `persona.yaml` 与 `prompt_builder` 生成。QQ 输入、引用、图片观察和工具结果作为数据处理。
 5. 回复确认发送成功后才记录 assistant；结果不确定时保留回执并暂停，禁止自动重复发送。
 
-QQ Thinking 的后台 MemoryWorker 对所有渠道进行情节总结、稳定事实提取和主人日记整理。默认每积累 40 条待整合消息，总结较早的 30 条；任务和重试保存在 SQLite 中。完整模式使用向量召回，纯 QQ 使用词面召回，两种模式共享原始记录与派生记忆。
+独立的 Memory Worker 对所有渠道进行状态更新、情节总结、稳定事实提取和主人日记整理。默认每积累 40 条待整合消息，总结较早的 30 条；短会话也可在空闲后触发摘要。任务和重试保存在 SQLite 中，后台模型请求不占用对话进程。
 
-记忆任务沿用 `DEEPSEEK_THINKING` 的思考模式；推理与正文共享输出额度。摘要和日记默认给 8192 个 token，状态更新给 4096 个 token；摘要与状态更新使用 JSON 输出格式。遇到 `finish_reason=length` 时，同一请求以 262144 个 token 的 256k 上限重试一次。仍被截断或正文为空时按失败任务退避重试，保留原始消息，不把推理、半段 JSON 或空正文写入记忆；状态无变化必须由模型明确返回 `{}`。
+摘要、日记和状态任务沿用 `DEEPSEEK_THINKING` 的思考模式，推理与正文共享输出额度。摘要和日记默认给 8192 个 token，状态更新给 4096 个 token；摘要与状态更新使用 JSON 输出格式。遇到 `finish_reason=length` 时，摘要和日记的同一请求最多以 262144 个 token 重试一次，状态更新最多以 8192 个 token 重试一次。仍被截断或正文为空时按失败任务退避重试，保留原始消息，不把推理、半段 JSON 或空正文写入记忆；状态无变化必须由模型明确返回 `{}`。
+
+## 自动维护
+
+- 真实完成的主人本机或私聊回合可触发自动纠错审查，范围限当前用户原话和本轮实际呈现的记忆。服务端核对身份、来源、版本和租约；第三方陈述、假设、时间变化或歧义不直接覆盖事实。
+- 原始消息保留，纠错写入版本账本；依赖旧事实的派生记忆暂停召回，按依赖重建后重新建联。
+- 建联使用紧凑证据编号和版本缓存；正、负判断均可缓存，缺失判断不当作负例。证据不足时自动扩大一次预算，仍不确定则保留未决记录，原文继续可检索。
+- 失败任务按有限次数退避和恢复，迟到结果不能覆盖新租约。管理页显示自动纠错任务及未决关联。
+- 后台记忆任务按模型请求记录 Token 用量，包括截断、重试与失败；未知用量明确标记。该账本不覆盖全部前台聊天、视觉或搜索费用。
+
+可在 `.env` 调整以下参数，修改后重启相关服务：
+
+| 参数 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `BINES_MEMORY_ASSOCIATION_MODEL_CANDIDATES` | `6` | 单次建联送入模型的候选上限 |
+| `BINES_MEMORY_RECOVERY_CYCLES` | `2` | 失败任务最多自动恢复轮数，设为 0 可关闭 |
+| `BINES_MEMORY_RECOVERY_SECONDS` | `3600` | 自动恢复探测的间隔秒数 |
+
+已有 Memory Server 时，可独立运行整理进程：
+
+```bash
+python thingking/consolidation_worker.py --direct-memory-server
+```
+
+离线回归使用 Thinking 环境：
+
+```bash
+BINES_ENV_FILE=/dev/null thingking/thinking_venv/bin/python -m unittest discover -s thingking/tests
+```
+
+真实模型验收会产生 API 请求和费用，默认写入隔离的系统临时目录，不连接 QQ：
+
+```bash
+PYTHONPATH=.:thingking/src thingking/thinking_venv/bin/python tools/validate_memory_automation.py --trials 3
+```
 
 ## 可见范围
 

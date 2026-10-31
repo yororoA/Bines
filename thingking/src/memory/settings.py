@@ -37,6 +37,8 @@ class MemorySettings:
     day_start_hour: int = 4
     job_lease_seconds: int = 300
     job_max_attempts: int = 5
+    job_recovery_cycles: int = 2
+    job_recovery_seconds: int = 3600
     state_updates: bool = True
     retrieval_candidates: int = 40
     retrieval_rrf_constant: int = 60
@@ -46,6 +48,7 @@ class MemorySettings:
     associations_enabled: bool = True
     retention_enabled: bool = False
     association_candidates: int = 12
+    association_model_candidates: int = 6
     association_backfill_batch: int = 16
     graph_max_hops: int = 2
     graph_candidate_limit: int = 40
@@ -76,6 +79,8 @@ def load_settings() -> MemorySettings:
         data_dir=data_dir,
         owner_qq_ids=_owner_qq_ids_from_env(),
         owner_name=os.environ.get("BINES_OWNER_NAME", "管理员"),
+        job_recovery_cycles=max(0, min(4, int(os.environ.get("BINES_MEMORY_RECOVERY_CYCLES", "2")))),
+        job_recovery_seconds=max(300, int(os.environ.get("BINES_MEMORY_RECOVERY_SECONDS", "3600"))),
         state_updates=os.environ.get("BINES_MEMORY_STATE_UPDATES", "true").strip().lower() in {"true", "1", "yes", "on"},
         retrieval_candidates=max(10, min(100, int(os.environ.get("BINES_MEMORY_CANDIDATES", "40")))),
         reranker_model=os.environ.get("BINES_MEMORY_RERANKER", "").strip(),
@@ -84,6 +89,7 @@ def load_settings() -> MemorySettings:
         associations_enabled=os.environ.get("BINES_MEMORY_ASSOCIATIONS", "true").lower() in {"true", "1", "yes", "on"},
         retention_enabled=os.environ.get("BINES_MEMORY_RETENTION", "false").lower() in {"true", "1", "yes", "on"},
         association_candidates=max(1, min(40, int(os.environ.get("BINES_MEMORY_ASSOCIATION_CANDIDATES", "12")))),
+        association_model_candidates=max(1, min(12, int(os.environ.get("BINES_MEMORY_ASSOCIATION_MODEL_CANDIDATES", "6")))),
         association_backfill_batch=max(1, min(200, int(os.environ.get("BINES_MEMORY_BACKFILL_BATCH", "16")))),
         raw_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_RAW_HOT_BUDGET", "512"))),
         episode_hot_budget=max(0, int(os.environ.get("BINES_MEMORY_EPISODE_HOT_BUDGET", "256"))),

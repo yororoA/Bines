@@ -1,7 +1,7 @@
 /* Reuses the existing memory editor, API client and navigation. */
 const SOURCE_LABEL = { ...KIND_LABEL, raw: "原始回合" };
 const RELATION_LABEL = { support: "相互支持", similar: "相似经历", event: "同一事件", cause: "因果", contradicts: "存在矛盾" };
-const JOB_LABEL = { associate: "记忆建联", summarize: "对话摘要", diary: "日记巩固", update_state: "状态更新", summarize_experience: "经历摘要", repair_memory: "纠错重建" };
+const JOB_LABEL = { associate: "记忆建联", summarize: "对话摘要", diary: "日记巩固", update_state: "状态更新", summarize_experience: "经历摘要", repair_memory: "纠错重建", audit_memory: "自动纠错审查" };
 const STATUS_LABEL = { pending: "等待中", running: "处理中", done: "已完成", failed: "失败" };
 let nodeOffset = 0, nodeTotal = 0, detailMemoryId = null, nodeRequest = 0, detailRequest = 0;
 let noticeTimer;
@@ -26,7 +26,7 @@ function renderOverview(stats) {
     [stats.association_ready || 0, "已完成建联判断"],
     [stats.nodes_by_status?.hot || 0, "活跃记忆"],
     [stats.nodes_by_status?.cold || 0, "冷层记忆"],
-    [stats.memory_usage_events || 0, "真实召回与引用记录"],
+    [stats.memory_usage_events || 0, "呈现、引用与复用记录"],
     [stats.consolidation_snapshots || 0, "巩固快照 · 原文 Top3 / 摘要 Top1"],
   ];
   $("overview-cards").innerHTML = metrics.map(([value, label]) => `<div class="metric"><strong>${value.toLocaleString()}</strong><span>${label}</span></div>`).join("");
@@ -134,8 +134,16 @@ async function openMemoryDetail(params) {
   }
 }
 
+function jobNote(job) {
+  if (job.last_error) return job.last_error;
+  return [
+    job.unresolved_count ? `${job.unresolved_count} 项关系补证后仍未确定，保留原文` : "",
+    job.rejected_links ? `丢弃 ${job.rejected_links} 条不合格引用` : "",
+  ].filter(Boolean).join("；") || "—";
+}
+
 function jobTable(items) {
-  return items.length ? `<div class="table-scroll"><table><thead><tr><th>任务</th><th>类型</th><th>状态</th><th>尝试</th><th>执行耗时</th><th>更新时间</th><th>处理说明</th></tr></thead><tbody>${items.map((j) => `<tr><td>#${j.id}</td><td>${esc(JOB_LABEL[j.kind] || j.kind)}</td><td>${badge(j.status)}</td><td>${j.attempts}</td><td>${j.duration_seconds == null ? "—" : Number(j.duration_seconds).toFixed(1) + " 秒"}</td><td>${esc(fmtTs(j.updated_at))}</td><td>${esc(j.last_error || (j.rejected_links ? `丢弃 ${j.rejected_links} 条不合格引用` : "—"))}</td></tr>`).join("")}</tbody></table></div>` : empty("暂无任务");
+  return items.length ? `<div class="table-scroll"><table><thead><tr><th>任务</th><th>类型</th><th>状态</th><th>尝试</th><th>执行耗时</th><th>更新时间</th><th>处理说明</th></tr></thead><tbody>${items.map((j) => `<tr><td>#${j.id}</td><td>${esc(JOB_LABEL[j.kind] || j.kind)}</td><td>${badge(j.status)}</td><td>${j.attempts}</td><td>${j.duration_seconds == null ? "—" : Number(j.duration_seconds).toFixed(1) + " 秒"}</td><td>${esc(fmtTs(j.updated_at))}</td><td>${esc(jobNote(j))}</td></tr>`).join("")}</tbody></table></div>` : empty("暂无任务");
 }
 
 function openCorrection(kind, chainId) {
