@@ -66,10 +66,12 @@ class ExperienceIntegration(MemoryMergeIntegration):
                 raise RuntimeError("commit acknowledged too late")
             return result
         with patch.object(self.hub, "_call", side_effect=lose_ack):
-            with self.assertRaises(RuntimeError):
-                self.hub.sync()
+            self.hub.sync()
+        self.assertEqual(self.hub.outbox.stats()["retrying"], 1)
         restarted = MemoryOutbox(self.store.path)
+        restarted.retry(entry[0])
         restarted.sync(original)
+        self.assertEqual(restarted.stats()["pending"], 0)
         hits = self.memory.search("朱雀星座", ["owner"])
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["evidence"][0]["status"], "succeeded")

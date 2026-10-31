@@ -102,6 +102,7 @@ def recover_native(journal, operation, result):
             params = {"envelope": journal.envelope}
         revision = previous["revision"] + 1 if previous else 1
         params = {**params, "record": safe_data(record), "source_ref": key, "revision": revision}
+        journal.outbox.dependencies(db, key, params, replace=True)
         db.execute("""INSERT INTO memory_outbox VALUES(?, 'record_experience', ?, ?, 0, ?)
             ON CONFLICT(source_ref) DO UPDATE SET params=excluded.params,revision=excluded.revision,
             synced=0,updated=excluded.updated""",

@@ -83,9 +83,30 @@ def tool_failure(message, *, code="execution_error"):
     return {"status": "failed", "code": code, "message": str(message)}
 
 
+class OutboxDependencyPending(RuntimeError):
+    def __init__(self, refs):
+        self.refs = list(dict.fromkeys(refs))
+        super().__init__("source messages are not committed yet")
+
+
+def delivery_error_kind(exc):
+    message = str(exc).lower()
+    if (isinstance(exc, PermissionError) or re.search(r"(?:^|failed: )permissionerror:", message)
+            or any(text in message for text in ("authentication required", "unauthorized", "invalid api key", "unknown method:"))):
+        return "auth_config"
+    if (isinstance(exc, (ValueError, TypeError)) or re.search(r"(?:^|failed: )(?:valueerror|typeerror):", message)
+            or re.search(r"(?:^|failed: )(?:invalid_request|invalid_json|invalid_multipart_request|request_too_large)(?:$|\b)", message)):
+        return "validation"
+    if (isinstance(exc, (TimeoutError, ConnectionError, OSError)) or type(exc).__name__ == "MemoryUnavailable"
+            or any(text in message for text in ("timed out", "connection refused", "connection reset", "database is locked"))):
+        return "transient"
+    return "unknown"
+
+
 class MemoryOutbox:
     def __init__(self, path):
         self.path = Path(path)
+        self.local_sources = "experience:" + hashlib.sha256(str(self.path.resolve()).encode()).hexdigest() + ":%"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.stop = threading.Event()
         self.thread = None
@@ -96,6 +117,22 @@ class MemoryOutbox:
                 revision INTEGER NOT NULL, synced INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS memory_outbox_pending ON memory_outbox(synced,updated)")
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS memory_outbox_delivery (
+                    source_ref TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+                    quarantined INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+                    lease_owner TEXT, lease_until REAL NOT NULL DEFAULT 0, error_kind TEXT
+                );
+                CREATE TABLE IF NOT EXISTS memory_outbox_dependencies (
+                    source_ref TEXT NOT NULL, depends_on TEXT NOT NULL,
+                    PRIMARY KEY(source_ref,depends_on)
+                );
+                CREATE TABLE IF NOT EXISTS memory_outbox_omissions (source_ref TEXT PRIMARY KEY);
+            """)
+            db.execute("BEGIN IMMEDIATE")
+            if "error_kind" not in {row["name"] for row in db.execute("PRAGMA table_info(memory_outbox_delivery)")}:
+                db.execute("ALTER TABLE memory_outbox_delivery ADD COLUMN error_kind TEXT")
 
     @contextmanager
     def connection(self):
@@ -107,10 +144,33 @@ class MemoryOutbox:
         finally:
             db.close()
 
-    def put(self, source_ref, method, params):
+    @staticmethod
+    def dependencies(db, source_ref, params, *, replace=False):
+        if replace:
+            db.execute("DELETE FROM memory_outbox_dependencies WHERE source_ref=?", (source_ref,))
+        record = params.get("record") or {}
+        refs = set()
+        if isinstance(record, dict):
+            for field in ("source_message_refs", "turn_message_refs", "correction_source_refs"):
+                values = record.get(field) or []
+                if isinstance(values, (list, tuple)):
+                    refs.update(ref for ref in values if isinstance(ref, str))
+        db.executemany("INSERT OR IGNORE INTO memory_outbox_dependencies VALUES(?,?)",
+                       [(source_ref, ref) for ref in refs if isinstance(ref, str) and ref != source_ref])
+
+    def put(self, source_ref, method, params, *, if_changed=False):
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            previous = db.execute("SELECT revision FROM memory_outbox WHERE source_ref=?", (source_ref,)).fetchone()
+            previous = db.execute("SELECT revision,method,params FROM memory_outbox WHERE source_ref=?", (source_ref,)).fetchone()
+            if previous and if_changed:
+                try:
+                    old = json.loads(previous["params"])
+                except (ValueError, TypeError):
+                    old = None
+                if isinstance(old, dict):
+                    old.pop("source_ref", None)
+                if previous["method"] == method and old == params:
+                    return previous["revision"]
             revision = (previous["revision"] if previous else 0) + 1
             params = {**params, "source_ref": source_ref}
             if method == "record_experience":
@@ -119,19 +179,114 @@ class MemoryOutbox:
                 ON CONFLICT(source_ref) DO UPDATE SET method=excluded.method,params=excluded.params,
                 revision=excluded.revision,synced=0,updated=excluded.updated""",
                 (source_ref, method, json.dumps(params, ensure_ascii=False, allow_nan=False), revision, time.time()))
+            self.dependencies(db, source_ref, params, replace=True)
+            db.execute("DELETE FROM memory_outbox_omissions WHERE source_ref=?", (source_ref,))
         return revision
 
-    def sync(self, call, limit=500):
-        with self.lock:
+    def sync(self, call, limit=500, *, source_refs=None, time_budget=2.0):
+        """Independent deliveries progress despite a bad record; prerequisites stay ordered."""
+        limit = max(1, min(500, limit))
+        processed = 0
+        deadline = time.monotonic() + max(0.01, float(time_budget))
+        while processed < limit and time.monotonic() < deadline and not self.stop.is_set():
+            count = self._sync_batch(call, limit - processed, source_refs=source_refs, deadline=deadline)
+            processed += count
+            if not count:
+                break
+        return processed
+
+    def _sync_batch(self, call, limit, *, source_refs=None, deadline):
+        now, owner = time.time(), uuid.uuid4().hex
+        where, bindings = "", [now, now, self.local_sources]
+        if source_refs is not None:
+            if not source_refs:
+                return 0
+            where = " AND o.source_ref IN (" + ",".join("?" for _ in source_refs) + ")"
+            bindings.extend(source_refs)
+        with self.connection() as db:
+            rows = db.execute("""SELECT o.* FROM memory_outbox o LEFT JOIN memory_outbox_delivery d
+                ON d.source_ref=o.source_ref WHERE o.synced=0
+                AND (d.source_ref IS NULL OR d.lease_until<=?)
+                AND (d.source_ref IS NULL OR d.revision!=o.revision OR d.next_attempt<=?)
+                AND NOT EXISTS (SELECT 1 FROM memory_outbox_dependencies x
+                    LEFT JOIN memory_outbox p ON p.source_ref=x.depends_on
+                    WHERE x.source_ref=o.source_ref AND (p.synced=0 OR (p.source_ref IS NULL
+                        AND x.depends_on LIKE ? AND (substr(x.depends_on,-5)=':user' OR substr(x.depends_on,-10)=':assistant')
+                        AND NOT EXISTS (SELECT 1 FROM memory_outbox_omissions z WHERE z.source_ref=x.depends_on))))""" + where +
+                " ORDER BY o.updated,o.source_ref LIMIT ?", (*bindings, max(1, min(500, limit)))).fetchall()
+        processed = 0
+        for row in rows:
+            if time.monotonic() >= deadline or self.stop.is_set():
+                break
+            processed += 1
+            parse_error = None
+            try:
+                params = json.loads(row["params"])
+                if not isinstance(params, dict):
+                    raise ValueError("outbox params must be an object")
+            except Exception as exc:
+                params, parse_error = {}, exc
             with self.connection() as db:
-                rows = db.execute("SELECT * FROM memory_outbox WHERE synced=0 ORDER BY updated,source_ref LIMIT ?",
-                                  (limit,)).fetchall()
-            for row in rows:
-                call(row["method"], **json.loads(row["params"]))
+                db.execute("BEGIN IMMEDIATE")
+                current = db.execute("SELECT revision,synced FROM memory_outbox WHERE source_ref=?", (row["source_ref"],)).fetchone()
+                if not current or current["synced"] or current["revision"] != row["revision"]:
+                    continue
+                self.dependencies(db, row["source_ref"], params)  # Older queues gain dependencies lazily.
+                if db.execute("""SELECT 1 FROM memory_outbox_dependencies x LEFT JOIN memory_outbox p
+                    ON p.source_ref=x.depends_on WHERE x.source_ref=? AND (p.synced=0 OR (p.source_ref IS NULL
+                        AND x.depends_on LIKE ? AND (substr(x.depends_on,-5)=':user' OR substr(x.depends_on,-10)=':assistant')
+                        AND NOT EXISTS (SELECT 1 FROM memory_outbox_omissions z WHERE z.source_ref=x.depends_on))) LIMIT 1""",
+                    (row["source_ref"], self.local_sources)).fetchone():
+                    continue
+                state = db.execute("SELECT * FROM memory_outbox_delivery WHERE source_ref=?", (row["source_ref"],)).fetchone()
+                if state and state["lease_until"] > time.time():
+                    continue
+                if not state or state["revision"] != row["revision"]:
+                    db.execute("INSERT OR REPLACE INTO memory_outbox_delivery(source_ref,revision) VALUES(?,?)",
+                               (row["source_ref"], row["revision"]))
+                db.execute("UPDATE memory_outbox_delivery SET lease_owner=?,lease_until=? WHERE source_ref=?",
+                           (owner, time.time() + 120, row["source_ref"]))
+            try:
+                if parse_error:
+                    raise parse_error
+                call(row["method"], **params)
+            except OutboxDependencyPending as exc:
+                with self.connection() as db:
+                    db.executemany("INSERT OR IGNORE INTO memory_outbox_dependencies VALUES(?,?)",
+                                   [(row["source_ref"], ref) for ref in exc.refs if ref != row["source_ref"]])
+                    db.execute("UPDATE memory_outbox_delivery SET lease_owner=NULL,lease_until=0 "
+                               "WHERE source_ref=? AND lease_owner=?", (row["source_ref"], owner))
+            except Exception as exc:
+                kind = delivery_error_kind(exc)
+                isolate = kind in {"validation", "auth_config"}
+                with self.connection() as db:
+                    db.execute("UPDATE memory_outbox_delivery SET attempts=attempts+1,"
+                               "next_attempt=?+CASE WHEN ? OR attempts>=4 THEN 300 ELSE (1 << attempts) END,"
+                               "quarantined=(? OR attempts>=4),last_error=?,error_kind=?,lease_owner=NULL,lease_until=0 "
+                               "WHERE source_ref=? AND lease_owner=?",
+                               (time.time(), isolate, isolate, f"{type(exc).__name__}: {exc}"[:2000], kind, row["source_ref"], owner))
+                log.warning("记忆记录同步失败，保留并隔离重试：%s", row["source_ref"])
+            else:
                 with self.connection() as db:
                     db.execute("UPDATE memory_outbox SET synced=1 WHERE source_ref=? AND revision=?",
                                (row["source_ref"], row["revision"]))
-            return len(rows)
+                    db.execute("DELETE FROM memory_outbox_delivery WHERE source_ref=? AND lease_owner=?",
+                               (row["source_ref"], owner))
+        return processed
+
+    def retry(self, source_ref):
+        """Explicit retry after repairing a quarantined record; never drop its payload."""
+        with self.connection() as db:
+            db.execute("UPDATE memory_outbox_delivery SET next_attempt=0,attempts=0,quarantined=0 "
+                       "WHERE source_ref=?", (source_ref,))
+
+    def stats(self):
+        with self.connection() as db:
+            pending = db.execute("SELECT COUNT(*) FROM memory_outbox WHERE synced=0").fetchone()[0]
+            failed = db.execute("""SELECT COUNT(*),COALESCE(SUM(d.quarantined),0) FROM memory_outbox_delivery d
+                JOIN memory_outbox o ON o.source_ref=d.source_ref AND o.revision=d.revision
+                WHERE o.synced=0 AND d.attempts>0""").fetchone()
+        return {"pending": pending, "retrying": failed[0], "quarantined": failed[1]}
 
     def start(self, client):
         if self.thread and self.thread.is_alive():
@@ -150,6 +305,8 @@ class MemoryOutbox:
     def record_message(self, envelope, role, content, source_ref, **fields):
         from memory.models import is_system_event
         if not content.strip() or (role == "user" and is_system_event(content)):
+            with self.connection() as db:
+                db.execute("INSERT OR IGNORE INTO memory_outbox_omissions VALUES(?)", (source_ref,))
             return
         self.put(source_ref, "record_message", {
             "envelope": envelope, "role": role, "content": content, **fields,
