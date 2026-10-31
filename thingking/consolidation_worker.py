@@ -15,6 +15,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 
 from chatBot.memory_hub import GatewayMemoryClient
 from common.service_ready import mark_ready
+from common.healthcheck import heartbeat
 from memory.worker import MemoryWorker, wait_for_server
 import persona_profile
 from thinking_model_helper import ThinkingModelHelper
@@ -68,6 +69,7 @@ def main():
     deps.register_memory_client(client)
     worker = build_worker(client)
     worker.start()
+    heartbeat("memory-worker", worker.alive)
     mark_ready("Memory Worker", {"transport": "direct" if args.direct_memory_server else "gateway"})
     log.info("Memory Worker ready")
 
@@ -79,13 +81,15 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
     try:
-        while not stop.wait(1):
+        while not stop.wait(5):
+            heartbeat("memory-worker", worker.alive)
             if not worker.alive:
                 raise RuntimeError("Memory Worker 线程已退出")
     except KeyboardInterrupt:
         pass
     finally:
         worker.stop()
+        heartbeat("memory-worker", False)
         log.info("Memory Worker stopped")
     return 0
 

@@ -116,5 +116,20 @@ class DockerRebuildTests(unittest.TestCase):
         cleanup.assert_called_once()
 
 
+class DockerReadinessTests(unittest.TestCase):
+    def test_worker_or_missing_health_must_not_report_startup_complete(self):
+        services = docker_launcher.REQUIRED_SERVICES["chatbot"]
+        ready = {name: {"State": "running", "Health": "healthy"} for name in services}
+        for name in ("qq-thinking", "memory-worker", "memory-server"):
+            for health in ("", "starting", "unhealthy"):
+                with self.subTest(service=name, health=health):
+                    pending = {**ready, name: {"State": "running", "Health": health}}
+                    with patch.object(docker_launcher, "_ps", side_effect=[pending, ready]) as statuses, patch(
+                        "time.sleep",
+                    ), patch("time.monotonic", side_effect=[0, 0, 0]):
+                        docker_launcher.wait_ready("chatbot", timeout=1)
+                    self.assertEqual(statuses.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

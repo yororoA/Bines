@@ -26,7 +26,7 @@ REQUIRED_SERVICES = {
     "chatbot": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
     "full": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
 }
-HEALTH_REQUIRED = {"chatbot", "memory-server", "rag-web", "napcat"}
+HEALTH_REQUIRED = {"chatbot", "memory-server", "rag-web", "napcat", "qq-thinking", "memory-worker"}
 
 
 class DockerError(RuntimeError):
@@ -349,7 +349,7 @@ def wait_ready(profile: str, timeout: float = 420) -> None:
             row = last.get(service) or {}
             running = (row.get("State") or "").lower() == "running"
             health = (row.get("Health") or "").lower()
-            if not running or (service in HEALTH_REQUIRED and health not in {"", "healthy"}):
+            if not running or (service in HEALTH_REQUIRED and health != "healthy"):
                 ready = False
                 break
         if ready:

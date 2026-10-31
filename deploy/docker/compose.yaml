@@ -14,7 +14,7 @@ services:
   gateway-init:
     image: bines-launcher:local
     user: "0:0"
-    command: ["sh", "-c", "chown -R ${BINES_UID:-1000}:${BINES_GID:-1000} /app/gateway_data || true; chmod -R 0777 /app/gateway_data"]
+    command: ["sh", "-c", "chown -R ${BINES_UID:-1000}:${BINES_GID:-1000} /app/gateway_data && chmod -R u+rwX,go-rwx /app/gateway_data"]
     restart: "no"
     volumes:
       - bines-gateway:/app/gateway_data
@@ -98,7 +98,7 @@ services:
     networks:
       - bines
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 6102), 2).close()"]
+      test: ["CMD", "python", "-m", "common.healthcheck", "gateway"]
       interval: 15s
       timeout: 5s
       retries: 20
@@ -130,6 +130,12 @@ services:
         condition: service_healthy
     networks:
       - bines
+    healthcheck:
+      test: ["CMD", "python", "-m", "common.healthcheck", "qq-thinking"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   memory-worker:
     image: bines-launcher:local
@@ -153,6 +159,12 @@ services:
         condition: service_healthy
     networks:
       - bines
+    healthcheck:
+      test: ["CMD", "python", "-m", "common.healthcheck", "memory-worker"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   memory-server:
     build:
@@ -175,7 +187,7 @@ services:
       <<: *bines-timezone
       BINES_DOCKER_MODE: "1"
       BINES_MEMORY_DIR: /app/thingking/memory_data
-      BINES_ZMQ_HOST: 0.0.0.0
+      BINES_MEMORY_BIND_HOST: 0.0.0.0
       HF_HOME: /app/thingking/models/hf-cache
     ports:
       - "127.0.0.1:5560:5560"
@@ -185,7 +197,7 @@ services:
     networks:
       - bines
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 5560), 2).close()"]
+      test: ["CMD", "python", "-m", "common.healthcheck", "memory"]
       interval: 15s
       timeout: 5s
       retries: 20
@@ -205,6 +217,7 @@ services:
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_ZMQ_HOST: memory-server
       BINES_HTTP_HOST: 0.0.0.0
+      BINES_ADMIN_LOCAL_PROXY: docker
     ports:
       - "127.0.0.1:${BINES_RAG_WEB_PORT:-5001}:5001"
     volumes:
@@ -216,7 +229,7 @@ services:
     networks:
       - bines
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/', timeout=3).read()"]
+      test: ["CMD", "python", "-m", "common.healthcheck", "admin"]
       interval: 15s
       timeout: 5s
       retries: 20
