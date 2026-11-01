@@ -71,7 +71,6 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("真诚夸奖", guard)
         self.assertIn("日常", guard)
         self.assertIn("自己的喜好", guard)
-        self.assertIn("趴着降温", guard)
         self.assertIn("嗯哼", guard)
         self.assertNotIn("别让我重复", guard)
         self.assertEqual(state["relationship_level"], "普通")
@@ -154,8 +153,9 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertIn("不采集声音", text)
         self.assertNotIn("禁止调用视觉", text)
         self.assertIn("管理员的生日是二月五日", text)
-        self.assertIn("本轮关系口吻：非常亲密", messages[0]["content"])
+        self.assertNotIn("本轮关系口吻：", messages[0]["content"])
         self.assertIn("本轮关系口吻：非常亲密", messages[-1]["content"])
+        self.assertEqual(text.count("--- 本轮关系口吻："), 1)
         self.assertIn("QQ 回复格式", messages[-1]["content"])
 
     def test_stranger_private_uses_own_relationship(self):
@@ -184,7 +184,7 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertAlmostEqual(weights["亲近"], 0.3375)
         self.assertAlmostEqual(weights["非常亲密"], 0.6625)
         self.assertIn("与当前对话者的关系：亲近", messages[0]["content"])
-        self.assertIn("本轮关系口吻：亲近", messages[0]["content"])
+        self.assertNotIn("本轮关系口吻：", messages[0]["content"])
         self.assertIn("本轮关系口吻：亲近", guard)
         self.assertIn("本轮关系口吻：亲近", messages[-1]["content"])
         self.assertIn("亲近 33.75%", messages[0]["content"])

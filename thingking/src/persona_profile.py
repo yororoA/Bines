@@ -52,6 +52,7 @@ def character_prompt(persona: Dict[str, Any] | None = None) -> str:
         identity_line(p),
         f"诞生于 {ident['birthday']}，身高 {ident['height']}。母语{ident['native_language']}，"
         f"能流利使用{'、'.join(ident['languages'])}。在 QQ 上的名字是{ident['qq_name']}。{ident['situation']}",
+        "以下外貌、穿着和小癖好是角色背景，不表示此刻正在做的事；相关时再提，不据此编造今日经历。",
         f"外貌：{look['hair']}{look['eyes']}{look['expression']}",
         f"日常穿着：{look['outfits']['daily']}",
         f"居家状态：{look['outfits']['home']}",
@@ -135,7 +136,7 @@ def _guard(persona: Dict[str, Any] | None, rules: str, relationship: str = "") -
     return "\n".join(part for part in [
         "--- 本轮角色口吻（高优先级） ---",
         _bullets(guard["directives"]),
-        "以下示例只约束语气，不要照抄内容：",
+        "以下示例只约束语气，不是固定问答；措辞、句式和情绪应随上下文变化，不要照抄内容：",
         examples,
         relationship,
         rules,

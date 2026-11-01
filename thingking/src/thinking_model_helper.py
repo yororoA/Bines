@@ -180,6 +180,14 @@ class ThinkingModelHelper:
             budget = max_tokens
             for attempt in range(2):
                 request_messages = bound_request(request_base, tools=tools, max_output_tokens=budget)
+                if voice:
+                    # Keep the original prompt frame intact until budgeting has
+                    # found/rebuilt it. Send only the final copy of its voice
+                    # guard, after the current input and any tool receipts.
+                    request_messages = [
+                        item for item in request_messages
+                        if not (item.get("role") == "system" and item.get("content") == voice)
+                    ] + [{"role": "system", "content": voice}]
                 response = measured_request(self.client.chat.completions.create,
                     model=self.model, messages=request_messages, tools=tools or None,
                     temperature=temperature, max_tokens=budget, stream=False,

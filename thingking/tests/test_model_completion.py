@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 from helpers import MemoryFixture, local_env
 from memory.worker import MemoryWorker
+from persona_profile import qq_style_guard
 from thinking_model_helper import ModelCompletionError, ThinkingModelHelper
 
 
@@ -46,12 +47,32 @@ class ModelCompletionTest(unittest.TestCase):
         runner.function_tools.return_value = []
         runner.action_to_skill = {"browser_search": "web-research"}
         runner.execute.return_value = "真实搜索结果"
-        text, _, _ = model.run_tool_calls([{"role": "user", "content": "读资料"}], runner)
+        voice = qq_style_guard(state={"relationship_turn_level": "亲近"})
+        messages = [
+            {"role": "system", "content": voice},
+            {"role": "system", "content": "当前会话的工具与消息上下文"},
+            {"role": "system", "content": voice},
+            {"role": "user", "content": "读资料"},
+        ]
+        text, _, _ = model.run_tool_calls(messages, runner)
         self.assertEqual(text, "已读到资料")
         self.assertEqual(runner.execute.call_count, 1)
         requests = model.client.chat.completions.create.call_args_list
         self.assertEqual([call.kwargs["max_tokens"] for call in requests], [2048, 2048, 8192])
         self.assertEqual(requests[1].kwargs["messages"], requests[2].kwargs["messages"])
+        for request in requests:
+            sent = request.kwargs["messages"]
+            self.assertEqual(sum(m.get("content") == voice for m in sent), 1)
+            self.assertEqual(sent[-1], {"role": "system", "content": voice})
+            self.assertIn({"role": "user", "content": "读资料"}, sent)
+        continuation = requests[1].kwargs["messages"]
+        receipt_index = next(i for i, m in enumerate(continuation) if m.get("tool_call_id") == "read:1")
+        self.assertEqual(continuation[receipt_index], {
+            "role": "tool", "tool_call_id": "read:1", "content": "真实搜索结果",
+        })
+        self.assertEqual(continuation[receipt_index - 1]["reasoning_content"], "读资料")
+        self.assertLess(receipt_index, len(continuation) - 1)
+        self.assertEqual(sum(m.get("content") == voice for m in messages), 2)
 
     def test_reasoning_only_truncation_retries_original_request_in_json_mode(self):
         model = model_with_responses(

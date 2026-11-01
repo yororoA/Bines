@@ -540,7 +540,8 @@ def build_conversation_messages(context: Dict[str, Any], *, budget_limit=None,
     system_sections = [
         persona_profile.character_prompt(),
         _scene_policy(envelope, scene),
-        persona_profile.relationship_guard(context.get("state") or {}),
+        # The final voice guard already carries this turn's relationship.
+        # Repeating it here gives the tone more weight than the conversation.
         "--- 行为准则 ---\n" + "\n".join(f"{i}. {rule}" for i, rule in enumerate(_OPERATING_RULES, 1)),
     ]
     first = {"role": "system", "content": "\n\n".join(s for s in system_sections if s)}
