@@ -120,10 +120,10 @@ class ThinkingModelHelper:
                                        allowed_skills=allowed_skills)
         conversation = [dict(message) for message in messages]
         skill_rules = skill_runner.instructions_for_source(source, allowed_skills)
-        if not conversation or conversation[0].get("role") != "system":
-            conversation.insert(0, {"role": "system", "content": skill_rules})
-        else:
-            conversation[0]["content"] = f"{conversation[0].get('content', '')}\n\n{skill_rules}"
+        # Preserve the bounded prompt frame's original first/last messages, as
+        # the native-tool path does. Merging rules into its first message hides
+        # the frame from request budgeting and can erase its recalled evidence.
+        conversation.insert(0, {"role": "system", "content": skill_rules})
 
         history: List[Dict[str, str]] = []
         final_text = ""

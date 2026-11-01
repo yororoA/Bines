@@ -61,6 +61,7 @@ class ContextTokenCounter:
 
 
 def context_limit():
+    """Soft context-selection target, including legacy explicit 32768 settings."""
     try:
         return max(256, min(262144, int(os.environ.get("BINES_CONTEXT_MAX_TOKENS", "65536"))))
     except ValueError:
@@ -75,15 +76,26 @@ def diagnostic(stage, data):
 
 
 class ContextBudgetExceeded(ValueError):
-    """Required instructions, current input, schemas or call receipts cannot fit."""
+    """Required request material exceeds an explicitly configured model window."""
+
+    code = "input_budget_exceeded"
+    scope = "request"
+
+    def __init__(self, message, *, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = dict(diagnostic or {})
 
 
 def bound_request(messages, *, tools=None, response_format=None, max_output_tokens=0):
-    """Bound every request; never delete tool-call IDs or leave orphan replies.
+    """Manage each request toward a soft target and respect explicit hard windows.
 
     Historical dialogue may be removed. Tool replies remain attached to their
     calls, with an explicit excerpt marker and durable receipt reference when
     available. Required current input/instructions are never silently cut.
+    BINES_CONTEXT_MAX_TOKENS was originally a prompt-selection target, not a
+    model limit. In particular, exceeding its UTF-8 byte estimate must not block
+    an otherwise valid request. Only BINES_MODEL_CONTEXT_TOKENS opts into a hard
+    model-window guard (conservative when a local tokenizer is unavailable).
     """
     counter, configured_limit = ContextTokenCounter(), context_limit()
     window = os.environ.get("BINES_MODEL_CONTEXT_TOKENS", "").strip()
@@ -91,7 +103,8 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
     if window is not None and window <= 0:
         raise ValueError("BINES_MODEL_CONTEXT_TOKENS must be positive")
     output_reserve = max(0, int(max_output_tokens or 0))
-    limit = min(configured_limit, max(0, window - output_reserve - 256)) if window else configured_limit
+    hard_limit = max(0, window - output_reserve - 256) if window else None
+    limit = min(configured_limit, hard_limit) if hard_limit is not None else configured_limit
     result = [dict(message) for message in messages]
     schemas = {k: v for k, v in {"tools": tools, "response_format": response_format}.items() if v}
     schema_cost = counter.count(schemas) + 16 if schemas else 0
@@ -100,13 +113,27 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
     original_contents = [m.get("content") or "" for m in result]
     current_user = next((i for i in range(len(result) - 1, -1, -1)
                          if result[i].get("role") == "user"), None)
+
+    def optional_history(index, message):
+        content = str(message.get("content") or "")
+        if (index == current_user or message.get("tool_calls") or message.get("role") == "tool"
+                or (message.get("role") == "assistant" and content.lstrip().startswith("[[SKILL_CALL]]"))):
+            return False
+        return message.get("role") in {"user", "assistant"} or (
+            message.get("role") == "system" and content.startswith(
+                ("<historical_assistant_message>", "<memory_recall>")))
+
     from tools.context import CURRENT_CONTEXT
     journal = CURRENT_CONTEXT.get().journal
     refs = getattr(journal, "tool_result_refs", {}) if journal else {}
     # First trim verbose tool payloads, preserving their identities and outcomes
     # as excerpts, not manufacturing a replacement success receipt.
-    for cap in (min(2048, limit // 8), 256, 64):
-        if cost() <= limit:
+    for cap, target in ((min(2048, limit // 8), limit), (256, hard_limit), (64, hard_limit)):
+        # A soft target below fixed instructions/schemas is unreachable. Do not
+        # reduce useful answers to 64 bytes merely trying to meet that target.
+        if target is None:
+            continue
+        if cost() <= target:
             break
         for i, message in enumerate(result):
             content = original_contents[i]
@@ -133,8 +160,10 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
             message["content"] = "<skill_result>\n" + excerpt + "\n</skill_result>" if legacy else excerpt
             if i not in trimmed:
                 trimmed.append(i)
-            if cost() <= limit:
+            if cost() <= target:
                 break
+    protected_frame = set()
+    preserved_frame = False
     if cost() > limit:
         # Re-budget the original memory material *after* the complete request's
         # schema/current-input/tool overhead is known. This prevents second-stage
@@ -149,7 +178,29 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
             if end is None:
                 continue
             outside = [*result[:start], *result[end + 1:]]
-            available = max(0, limit - schema_cost - counter.messages(outside))
+            required_outside = [m for i, m in enumerate(result)
+                                if not start <= i <= end and not optional_history(i, m)]
+            frame_budget = frame["context"].get("context_budget") or {}
+            frame_cost = counter.messages(result[start:end + 1])
+            already_bounded = (frame_budget.get("counting_method") == counter.method
+                               and 0 < frame_budget.get("limit", 0) <= configured_limit
+                               and frame_cost <= configured_limit
+                               and isinstance(frame_budget.get("fixed_tokens"), int))
+            unreachable_soft_target = (already_bounded and schema_cost + counter.messages(required_outside)
+                                       + frame_budget["fixed_tokens"] > configured_limit)
+            if unreachable_soft_target and (hard_limit is None or
+                    frame_cost + schema_cost + counter.messages(required_outside) <= hard_limit):
+                # This frame already respected the original prompt budget. Tool
+                # declarations must not wipe its evidence simply because their
+                # unavoidable cost alone makes the soft request target impossible.
+                protected_frame = set(range(start, end + 1))
+                preserved_frame = True
+                break
+            target = hard_limit if unreachable_soft_target else limit
+            outside_cost = counter.messages(required_outside if unreachable_soft_target else outside)
+            available = max(0, target - schema_cost - outside_cost)
+            if unreachable_soft_target:
+                available = min(available, configured_limit)
             from common.clock import CLOCK_MARKER
             from prompt_builder import build_conversation_messages
             # outside already includes this request's actual current input.
@@ -159,6 +210,8 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
             if any(str(m.get("content") or "").startswith(CLOCK_MARKER) for m in outside):
                 rebuilt = [m for m in rebuilt if not str(m.get("content") or "").startswith(CLOCK_MARKER)]
             result = [*result[:start], *rebuilt, *result[end + 1:]]
+            if unreachable_soft_target:
+                protected_frame = set(range(start, start + len(rebuilt)))
             current_user = next((i for i in range(len(result) - 1, -1, -1)
                                  if result[i].get("role") == "user"), None)
             break
@@ -169,15 +222,9 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
         order = sorted(range(len(result)), key=lambda i: str(result[i].get("content") or "").startswith("<memory_recall>"))
         for i in order:
             message = result[i]
-            if (i == current_user or message.get("tool_calls") or message.get("role") == "tool"
-                    or (message.get("role") == "assistant" and
-                        str(message.get("content") or "").lstrip().startswith("[[SKILL_CALL]]"))):
+            if i in protected_frame:
                 continue
-            content = str(message.get("content") or "")
-            historical = message.get("role") in {"user", "assistant"} or (
-                message.get("role") == "system" and content.startswith(
-                    ("<historical_assistant_message>", "<memory_recall>")))
-            if historical:
+            if optional_history(i, message):
                 discard.append(i)
                 message["content"] = ""
                 if cost() - 16 * len(discard) <= limit:
@@ -185,13 +232,27 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
         removed = len(discard)
         result = [message for i, message in enumerate(result) if i not in discard]
     after = counter.messages(result) + schema_cost
+    # Keep the original over_budget/limit fields for diagnostic consumers. They
+    # describe the cleanup target; only hard_window_exceeded prohibits sending.
+    roles = {role: counter.messages([m for m in result if m.get("role") == role])
+             for role in ("system", "user", "assistant", "tool")}
+    current_input = next((m for m in reversed(result) if m.get("role") == "user"), None)
+    hard_exceeded = hard_limit is not None and after > hard_limit
     trace = {"limit": limit, "counting_method": counter.method, "tokenizer_error": counter.tokenizer_error,
              "configured_input_limit": configured_limit, "model_context_window": window,
+             "soft_target": configured_limit, "soft_target_exceeded": after > configured_limit,
+             "hard_input_limit": hard_limit, "hard_window_exceeded": hard_exceeded,
+             "count_is_upper_bound": counter.encoder is None,
              "output_reserve": output_reserve, "framing_reserve": 256 if window else None,
              "input_units_before": before, "input_units": after, "schema_units": schema_cost,
+             "message_units_by_role": roles,
+             "current_input_units": counter.messages([current_input]) if current_input else 0,
+             "bounded_frame_preserved": preserved_frame,
              "tool_excerpts": len(trimmed), "history_removed": removed, "over_budget": after > limit}
     diagnostic("request", trace)
-    if after > limit:
-        raise ContextBudgetExceeded("模型请求必需内容超过输入预算（包含工具声明和回执；计数方式="
-                                    + counter.method + "）；未发送请求")
+    if hard_exceeded:
+        raise ContextBudgetExceeded(
+            f"模型请求超过显式模型输入窗口（请求计数={after}，输入上限={hard_limit}，"
+            f"工具声明={schema_cost}，输出预留={output_reserve}，计数方式={counter.method}）；未发送请求",
+            diagnostic=trace)
     return result

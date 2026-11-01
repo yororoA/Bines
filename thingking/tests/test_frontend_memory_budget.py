@@ -190,6 +190,73 @@ class MemoryBudgetTests(unittest.TestCase):
         self.assertIn("TARGET739", str(request))
         self.assertGreater(journal.memory_diagnostics["presentation"]["recall_shown"], 0)
 
+    def test_unreachable_soft_target_keeps_prebudgeted_memory_and_discards_raw_history(self):
+        self.add_message("mars mission TARGET739", 100)
+        for i in range(8):
+            self.add_message("context " + "x" * 1000, 101 + i)
+        context = self.service.build_context(self.env.to_dict(), "mars mission")
+        journal = MemoryJournal(MemoryOutbox(Path(self.tmp.name) / "preserve.db"), self.env.to_dict(), "preserve")
+        with tool_context(ToolContext(journal=journal)):
+            frame = build_conversation_messages(context)
+            self.assertLessEqual(ContextTokenCounter().messages(frame), 32768)
+            self.assertIn("TARGET739", str(frame))
+            messages = [*frame, {"role": "user", "content": "UNBOUNDED_RAW " + "x" * 100000},
+                        {"role": "user", "content": "current mars question"}]
+            tools = [{"type": "function", "function": {"name": "fixture", "description": "x" * 35000}}]
+            with patch.dict(os.environ, {"BINES_MODEL_CONTEXT_TOKENS": ""}):
+                request = bound_request(messages, tools=tools)
+            self.assertEqual(request, [*frame, messages[-1]])
+            trace = journal.memory_diagnostics["request"][-1]
+            self.assertTrue(trace["bounded_frame_preserved"])
+            self.assertTrue(trace["soft_target_exceeded"])
+            self.assertFalse(trace["hard_window_exceeded"])
+            self.assertEqual(trace["history_removed"], 1)
+
+    def test_explicit_hard_window_can_reduce_a_prebudgeted_frame(self):
+        self.add_message("mars mission TARGET739", 100)
+        for i in range(20):
+            self.add_message("context " + "x" * 1500, 101 + i)
+        context = self.service.build_context(self.env.to_dict(), "mars mission")
+        journal = MemoryJournal(MemoryOutbox(Path(self.tmp.name) / "hard-frame.db"), self.env.to_dict(), "hard-frame")
+        counter = ContextTokenCounter()
+        with tool_context(ToolContext(journal=journal)):
+            frame = build_conversation_messages(context)
+            tools = [{"type": "function", "function": {"name": "fixture", "description": "x" * 35000}}]
+            current = {"role": "user", "content": "mars mission TARGET739"}
+            required = context["context_budget"]["fixed_tokens"] + counter.messages([current]) + counter.count({"tools": tools}) + 16
+            hard_input_limit = required + 4000
+            original = [*frame, current]
+            self.assertGreater(counter.messages(original) + counter.count({"tools": tools}) + 16, hard_input_limit)
+            with patch.dict(os.environ, {"BINES_MODEL_CONTEXT_TOKENS": str(hard_input_limit + 1024 + 256)}):
+                request = bound_request(original, tools=tools, max_output_tokens=1024)
+            self.assertLessEqual(counter.messages(request) + counter.count({"tools": tools}) + 16, hard_input_limit)
+            self.assertIn("TARGET739", str(request))
+            self.assertIn(current, request)
+            trace = journal.memory_diagnostics["request"][-1]
+            self.assertFalse(trace["bounded_frame_preserved"])
+            self.assertFalse(trace["hard_window_exceeded"])
+
+    def test_desktop_skill_rules_keep_the_bounded_frame_discoverable(self):
+        from tools import TOOLS_REGISTRY
+        from skill_runner import SkillRunner
+        self.add_message("mars mission TARGET739", 100)
+        context = self.service.build_context(self.env.to_dict(), "mars mission")
+        journal = MemoryJournal(MemoryOutbox(Path(self.tmp.name) / "desktop-frame.db"), self.env.to_dict(), "desktop")
+        root = Path(__file__).resolve().parents[2]
+        runner = SkillRunner(TOOLS_REGISTRY, skills_dir=root / "skills",
+                             enabled_actions_path=root / "server/skill_actions.json")
+        with tool_context(ToolContext(journal=journal)), patch.dict(os.environ, {"BINES_MODEL_CONTEXT_TOKENS": ""}):
+            frame = build_conversation_messages(context)
+            self.assertIn("TARGET739", str(frame))
+            model = model_with_responses(response("完成"))
+            self.assertEqual(model.run_skill_protocol([*frame, {"role": "user", "content": "mars mission"}],
+                                                      runner, source="MANUAL")[0], "完成")
+            sent = model.client.chat.completions.create.call_args.kwargs["messages"]
+            self.assertIn("TARGET739", str(sent))
+            self.assertIn(frame[0], sent)
+            self.assertIn(runner.instructions_for_source("MANUAL"), [m["content"] for m in sent])
+            self.assertTrue(journal.memory_diagnostics["request"][-1]["bounded_frame_preserved"])
+
     def test_long_current_qq_input_is_reserved_once_during_request_rebuild(self):
         from common.clock import with_current_time
         self.add_message("needle TARGET739", 100)
@@ -256,6 +323,7 @@ class MemoryBudgetTests(unittest.TestCase):
 class RequestBudgetTests(unittest.TestCase):
     def setUp(self):
         env = patch.dict(os.environ, {"BINES_CONTEXT_MAX_TOKENS": "4096", "BINES_CONTEXT_TOKENIZER_PATH": "",
+                                     "BINES_MODEL_CONTEXT_TOKENS": "",
                                      "BINES_WEBSITE_AUTO_OBSERVE": "false"})
         env.start()
         self.addCleanup(env.stop)
@@ -285,11 +353,14 @@ class RequestBudgetTests(unittest.TestCase):
 
     def test_required_input_and_schemas_fail_before_model_call(self):
         model = model_with_responses(response("unused"))
-        with self.assertRaises(ContextBudgetExceeded):
-            model.complete_text([{"role": "user", "content": "x" * 5000}])
+        with patch.dict(os.environ, {"BINES_MODEL_CONTEXT_TOKENS": "5000"}):
+            with self.assertRaises(ContextBudgetExceeded) as raised:
+                model.complete_text([{"role": "user", "content": "x" * 5000}])
+            self.assertEqual(raised.exception.code, "input_budget_exceeded")
+            self.assertTrue(raised.exception.diagnostic["hard_window_exceeded"])
+            with self.assertRaises(ContextBudgetExceeded):
+                bound_request([{"role": "user", "content": "x"}], tools=[{"description": "x" * 5000}])
         model.client.chat.completions.create.assert_not_called()
-        with self.assertRaises(ContextBudgetExceeded):
-            bound_request([{"role": "user", "content": "x"}], tools=[{"description": "x" * 5000}])
 
     def test_output_retry_rechecks_explicit_model_window(self):
         model = model_with_responses(response(finish_reason="length"), response("must not be requested"))
@@ -330,8 +401,12 @@ class RequestBudgetTests(unittest.TestCase):
         messages = [{"role": "assistant", "content": "", "reasoning_content": "x" * 5000,
                      "tool_calls": [{"id": "one", "function": {"arguments": "{}"}}]},
                     {"role": "tool", "tool_call_id": "one", "content": "result"}]
-        with self.assertRaises(ContextBudgetExceeded):
-            bound_request(messages)
+        # The original soft target remains compatible; an explicit model
+        # window still accounts for reasoning/call metadata before sending.
+        self.assertEqual(bound_request(messages), messages)
+        with patch.dict(os.environ, {"BINES_MODEL_CONTEXT_TOKENS": "5000"}):
+            with self.assertRaises(ContextBudgetExceeded):
+                bound_request(messages)
 
     def test_desktop_client_uses_same_budget(self):
         from agents import MainAgent
