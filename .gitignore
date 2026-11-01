@@ -22,6 +22,7 @@ venv/
 .tools/buildx/
 .tools/install.lock
 .tools/python/
+.tools/native/
 .tools/installer/
 .tools/downloads/
 .tools/memory_export/

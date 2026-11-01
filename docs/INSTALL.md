@@ -68,11 +68,13 @@ Windows 上 pip/uv 默认把数 GB 缓存写到 `%LOCALAPPDATA%` 和 `%TEMP%`。
 
 ## 系统依赖
 
-完整环境需要 Python wheel 之外的系统库。默认只安装 Python 依赖，系统缺失项会单独列出；`--system` 会使用已安装的 Homebrew、apt 或 winget，安装器不自动安装这些包管理器。
+完整环境需要 Python wheel 之外的系统库。安装器管理 Python 依赖，并在 macOS 听觉环境缺少可编译的 PortAudio 时自动准备项目内版本；其他系统缺失项会单独列出。`--system` 会使用已安装的 Homebrew、apt 或 winget，安装器不自动安装这些包管理器。
+
+macOS 安装 hearing 时先检查 PortAudio 头文件与链接库；已有可用版本会复用，否则下载并校验 PortAudio 19.7.0 官方源码，在 `.tools/native/portaudio-19.7.0-<架构>` 编译安装，再构建 PyAudio。此过程不需要 Homebrew 或管理员权限，但需要 Xcode Command Line Tools。CMake 和 Ninja 放在 hearing 虚拟环境中，支持 Xcode 路径含空格；后续安装会复用已验证的库。遇到 `portaudio.h file not found`，更新代码后运行 `python install.py --only hearing` 即可重试。
 
 Docker Desktop 单独处理：macOS 和 Windows 缺少 Docker 时默认自动安装。macOS 从 Docker 官方地址下载约 600 MB 的对应架构 DMG，校验应用签名后弹出一次系统管理员授权，安装器不会代替用户接受 Docker 协议；Docker Desktop 随后自动打开，首次需在其窗口阅读并接受协议。Windows 通过 winget 安装到 `C:\Program Files\Docker`，镜像与 WSL 磁盘也在 C 盘，介意时加 `--skip-docker` 使用已有 Docker 或外部 NapCat。自动安装失败不会中断 Python 依赖，可重新运行续传，或使用 `--skip-docker`。Linux 不自动修改系统软件仓库。
 
-- macOS：先安装 Xcode Command Line Tools（`xcode-select --install`），并通过 Homebrew 准备 `ffmpeg portaudio pkg-config tesseract tesseract-lang cmake libsamplerate`。也可使用 `--system` 安装这些 Homebrew 包。
+- macOS：先安装 Xcode Command Line Tools（`xcode-select --install`）。PortAudio 可由安装器自动准备；桌面声音播放、OCR 等功能仍需 FFmpeg（含 `ffplay`）、Tesseract 及 `chi_sim/eng` 语言包。已有 Homebrew 时可用 `--system` 安装 `ffmpeg portaudio pkg-config tesseract tesseract-lang cmake libsamplerate`。
 - Debian/Ubuntu：准备 `build-essential pkg-config cmake portaudio19-dev libsamplerate0-dev libsndfile1 ffmpeg tesseract-ocr tesseract-ocr-chi-sim libgl1 libxcb-cursor0`。`--system` 在交互终端使用 sudo，仅系统包安装提权，Python 环境仍由当前用户创建。
 - Windows：InsightFace 等扩展需要 Visual Studio Build Tools 的 C++ 工作负载及 Windows SDK；FFmpeg 必须包含 `ffplay`。`--system` 可通过 winget 安装 FFmpeg 和 Tesseract。安装后的新 PATH 可能需要重新打开终端，中文 OCR 需 `chi_sim` 语言包。
 
@@ -85,7 +87,7 @@ Apple Silicon、Windows/Linux x86_64 是完整安装的主要目标；Intel macO
 - 检测到非虚拟环境目录、损坏环境或不兼容 Python 时，该组停止并报告原因，需要用户先备份并移走旧目录。
 - 不并发修改同一组环境；每组结束执行 `pip check` 与核心模块导入核验。QQ 组额外核验记忆网关、人格、提示词和摘要模块，确保轻量入口不会提前加载 Chroma、Torch 或桌面驱动。不会打开摄像头/麦克风或发 QQ 消息。
 - `.env` 不存在时从 `.env.example` 创建；仅补齐不存在的 `BINES_PROFILE`、`HEARING_ASR_DEVICE` 和 `SINGING_PYTHON`，保留已有凭据、显式空值和用户配置。
-- 输出仅展示步骤、进度和成功/失败；pip 和编译器详细日志放在系统临时目录，失败时显示具体日志路径。部分失败时退出码为 1，已成功的环境保留。
+- 输出仅展示步骤、进度和成功/失败；pip 和编译器详细日志放在 `.tools/cache/logs/install-*`（或指定缓存目录下的 `logs`），失败时显示具体日志路径。部分失败时退出码为 1，已成功的环境保留。
 - Python 包镜像用 `--index-url` 指定。安装器忽略个人 pip 安装目标配置，避免 `--user`、`--target` 等将包写到虚拟环境之外；网络代理仍遵循进程环境。
 - Python 安装包下载与 pip 下载使用独立地址：Python 默认使用南京大学的 `python-build-standalone` GitHub Release 镜像，普通包默认使用清华 PyPI；不使用内部软件源。`--index-url` 不会改变 Python 下载源，也不会替换 Windows/Linux 的 PyTorch 官方 CPU/CUDA 索引。可用环境变量 `BINES_PYTHON_MIRROR`、`BINES_PYPI_INDEX_URL` 或同名命令参数覆盖。下载连接限时 15 秒、网络读取限时 45 秒，最多重试一次，总等待默认不超过 180 秒。
 

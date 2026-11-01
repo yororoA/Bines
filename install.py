@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ctypes.util
 import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from contextlib import contextmanager
@@ -24,6 +26,10 @@ DEFAULT_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 DEFAULT_PYTHON_MIRROR = (
     "https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone"
 )
+# Official release archive; checksum also published by Homebrew's portaudio formula.
+PORTAUDIO_VERSION = "19.7.0"
+PORTAUDIO_URL = "https://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz"
+PORTAUDIO_SHA256 = "47efbf42c77c19a05d22e627d42873e991ec0c1357219c0d74ce6a2948cb2def"
 DOCKER_DESKTOP_MAC_URLS = {
     "arm64": "https://desktop.docker.com/mac/main/arm64/Docker.dmg",
     "aarch64": "https://desktop.docker.com/mac/main/arm64/Docker.dmg",
@@ -157,6 +163,7 @@ class Installer:
         self.device = self.select_device(options.device)
         self.python = None
         self.docker_build_error = None
+        self.portaudio_prefix = None
 
     @staticmethod
     def select_device(requested):
@@ -437,15 +444,171 @@ class Installer:
             print("  Python 依赖将继续安装；之后可重新运行，或使用 --skip-docker 跳过。",
                   flush=True)
 
-    def native_build_env(self):
+    def managed_portaudio_prefix(self):
+        machine = platform.machine().lower().replace("aarch64", "arm64")
+        return (self.root / ".tools" / "native" / f"portaudio-{PORTAUDIO_VERSION}-{machine}").resolve()
+
+    def portaudio_prefixes(self):
+        return (self.managed_portaudio_prefix(), Path("/opt/homebrew/opt/portaudio"),
+                Path("/usr/local/opt/portaudio"), Path("/opt/homebrew"),
+                Path("/usr/local"), Path("/opt/local"), Path("/usr"))
+
+    def native_build_env(self, prefix=None):
         env = dict(self.env)
-        if sys.platform == "darwin":
-            # PyAudio's sdist needs Homebrew's PortAudio headers and linker path.
-            for prefix in (Path("/opt/homebrew"), Path("/usr/local")):
-                if (prefix / "include" / "portaudio.h").exists():
-                    env["CFLAGS"] = env.get("CFLAGS", "") + f" -I{prefix}/include"
-                    env["LDFLAGS"] = env.get("LDFLAGS", "") + f" -L{prefix}/lib"
+        prefix = prefix or self.portaudio_prefix
+        if prefix is None and sys.platform == "darwin":
+            prefix = next((p for p in self.portaudio_prefixes()
+                           if (p / "include" / "portaudio.h").is_file()), None)
+        if prefix is not None:
+            include, lib = Path(prefix) / "include", Path(prefix) / "lib"
+            for key in ("CFLAGS", "CPPFLAGS"):
+                env[key] = (env.get(key, "") + " " + shlex.quote(f"-I{include}")).strip()
+            env["LDFLAGS"] = (env.get("LDFLAGS", "") + " " + shlex.quote(f"-L{lib}")
+                              + " " + shlex.quote(f"-Wl,-rpath,{lib}")).strip()
+            env["PKG_CONFIG_PATH"] = str(lib / "pkgconfig") + (
+                os.pathsep + env["PKG_CONFIG_PATH"] if env.get("PKG_CONFIG_PATH") else "")
         return env
+
+    def portaudio_probe(self, env):
+        """Compile/link only: never initialize PortAudio or open an audio device."""
+        compiler = shlex.split(env.get("CC", "cc"))
+        if not compiler or not shutil.which(compiler[0]):
+            hint = "xcode-select --install" if sys.platform == "darwin" else "安装 C 编译器（如 build-essential）"
+            raise InstallError(f"hearing 缺少 C 编译器；请先执行 {hint}，再重试 --only hearing")
+        with tempfile.TemporaryDirectory(prefix="portaudio-probe-", dir=self.cache_root / "tmp") as directory:
+            source = Path(directory) / "probe.c"
+            includes = "#include <portaudio.h>\n"
+            if sys.platform == "darwin":
+                includes += "#include <pa_mac_core.h>\n"
+            source.write_text(includes + "int main(void) { return Pa_GetVersion() < 0; }\n", encoding="utf-8")
+            command = (compiler + shlex.split(env.get("CPPFLAGS", "")) + shlex.split(env.get("CFLAGS", ""))
+                       + [source, "-o", Path(directory) / "probe"]
+                       + shlex.split(env.get("LDFLAGS", "")) + ["-lportaudio"])
+            try:
+                self.run(command, "检查 PortAudio 头文件和链接库", env=env, timeout=60)
+            except InstallError:
+                return False
+        return True
+
+    @staticmethod
+    def extract_portaudio(archive_path, destination):
+        destination = Path(destination).resolve()
+        with tarfile.open(archive_path, "r:gz") as archive:
+            members = archive.getmembers()
+            if sum(member.size for member in members) > 64 * 1024 * 1024:
+                raise InstallError("PortAudio 源码解包大小超出限制")
+            for member in members:
+                target = (destination / member.name).resolve()
+                if (not target.is_relative_to(destination) or Path(member.name).is_absolute()
+                        or not (member.isfile() or member.isdir())):
+                    raise InstallError("PortAudio 源码包含不安全的归档路径或链接")
+                member.mode &= 0o777
+            # Path/link checks above also support Python versions predating tarfile's filter API.
+            filters = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            archive.extractall(destination, members=members, **filters)
+
+    def portaudio_archive(self):
+        directory = self.cache_root / "downloads"
+        directory.mkdir(parents=True, exist_ok=True)
+        archive = directory / Path(urlsplit(PORTAUDIO_URL).path).name
+
+        def verified(path):
+            if not path.is_file():
+                return False
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest() == PORTAUDIO_SHA256
+
+        if verified(archive):
+            print("  复用已校验的 PortAudio 源码", flush=True)
+            return archive
+        partial = archive.with_suffix(".part")
+        curl = shutil.which("curl")
+        if not curl:
+            raise InstallError("下载 PortAudio 需要 curl；请安装 curl 后重试 --only hearing")
+        try:
+            self.run([curl, "--fail", "--location", "--retry", "2", "--connect-timeout", "15",
+                      "--max-time", "180", "--max-filesize", str(16 * 1024 * 1024),
+                      "--output", partial, PORTAUDIO_URL], "下载 PortAudio 官方源码", timeout=600)
+            if not verified(partial):
+                raise InstallError("PortAudio 官方源码 SHA256 校验失败；未执行源码，请重试 --only hearing")
+            partial.replace(archive)
+        finally:
+            partial.unlink(missing_ok=True)
+        return archive
+
+    def build_managed_portaudio(self, python):
+        """Build a private CoreAudio library without Homebrew, sudo or system writes."""
+        prefix = self.managed_portaudio_prefix()
+        cmake = Path(python).parent / "cmake"
+        ninja = Path(python).parent / "ninja"
+        if not cmake.is_file() or not ninja.is_file():
+            raise InstallError("hearing 缺少项目内 cmake/ninja；请重试 --only hearing 以准备构建工具")
+        archive = self.portaudio_archive()
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        # Stage on the destination filesystem so promotion and rollback remain atomic.
+        with tempfile.TemporaryDirectory(prefix=".portaudio-build-", dir=prefix.parent) as directory:
+            work = Path(directory)
+            self.extract_portaudio(archive, work / "source")
+            source, build, stage = work / "source" / "portaudio", work / "build", work / "stage"
+            # Apple's make shim can expand Xcode paths with spaces without quoting
+            # recursive make commands. Use our venv's Ninja, independent of PATH.
+            self.run([cmake, "-S", source, "-B", build, "-G", "Ninja",
+                      f"-DCMAKE_MAKE_PROGRAM={ninja}",
+                      "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+                      f"-DCMAKE_INSTALL_PREFIX={prefix}", "-DPA_BUILD_SHARED=ON", "-DPA_BUILD_STATIC=OFF",
+                      "-DPA_BUILD_EXAMPLES=OFF", "-DPA_BUILD_TESTS=OFF", "-DPA_USE_COREAUDIO=ON"],
+                     "配置项目 PortAudio", timeout=180)
+            self.run([cmake, "--build", build, "--parallel", str(min(os.cpu_count() or 1, 4))],
+                     "编译项目 PortAudio", timeout=600)
+            self.run([cmake, "--install", build], "安装项目 PortAudio",
+                     env={**self.env, "DESTDIR": str(stage)}, timeout=120)
+            staged = stage / str(prefix).lstrip("/")
+            # PyAudio uses CoreAudio's public extension header as well as portaudio.h.
+            shutil.copy2(source / "include" / "pa_mac_core.h", staged / "include" / "pa_mac_core.h")
+            backup = work / "previous"
+            had_previous = prefix.exists()
+            try:
+                if had_previous:
+                    prefix.rename(backup)
+                staged.rename(prefix)
+                build_env = self.native_build_env(prefix)
+                if not self.portaudio_probe(build_env):
+                    raise InstallError("项目 PortAudio 编译后仍不可链接；请检查上方日志并重试 --only hearing")
+            except BaseException:
+                if prefix.exists() and (backup.exists() or not had_previous):
+                    shutil.rmtree(prefix)
+                if backup.exists():
+                    backup.rename(prefix)
+                raise
+        self.portaudio_prefix = prefix
+        print(f"  PortAudio 已就绪：{prefix}", flush=True)
+        return build_env
+
+    def prepare_portaudio(self, python):
+        if os.name == "nt":
+            return dict(self.env)  # Supported Windows PyAudio wheels contain PortAudio.
+        for prefix in self.portaudio_prefixes():
+            if not (prefix / "include" / "portaudio.h").is_file():
+                continue
+            build_env = self.native_build_env(prefix)
+            if self.portaudio_probe(build_env):
+                self.portaudio_prefix = prefix
+                print(f"  复用 PortAudio：{prefix}", flush=True)
+                return build_env
+        build_env = dict(self.env)
+        if self.portaudio_probe(build_env):
+            self.portaudio_prefix = None
+            # Preserve the environment that passed; a failed prefix may still have
+            # headers and must not be rediscovered before pip compiles PyAudio.
+            return build_env
+        if sys.platform == "darwin":
+            print("  未检测到可编译的 PortAudio，准备项目内依赖（不需要 Homebrew）", flush=True)
+            return self.build_managed_portaudio(python)
+        raise InstallError("hearing 缺少 PortAudio 开发头文件/链接库；Debian/Ubuntu 请安装 portaudio19-dev，"
+                           "Fedora 请安装 portaudio-devel，然后重试 --only hearing")
 
     def prepare_venv(self, name):
         python = environment_python(name, self.root)
@@ -475,9 +638,13 @@ class Installer:
             extra += ["-c", str(self.root / "requirements" / "ml-constraints.txt")]
         if name in {"visual", "hearing", "singing"}:
             # InsightFace/diffq/webrtcvad source builds need local headers/Cython.
-            self.pip(python, ["numpy==1.26.4", "Cython>=0.29.36,<3", "cmake>=3.26,<4", "pybind11>=2.11,<3"],
-                     "准备扩展编译依赖")
+            build_tools = ["numpy==1.26.4", "Cython>=0.29.36,<3", "cmake>=3.26,<4", "pybind11>=2.11,<3"]
+            if name == "hearing" and sys.platform == "darwin":
+                build_tools.append("ninja>=1.11,<2")
+            self.pip(python, build_tools, "准备扩展编译依赖")
             extra += ["--no-build-isolation"]
+        if name == "hearing":
+            build_env = self.prepare_portaudio(python)
         if name in ML_ENVIRONMENTS:
             torch_packages = ["torch==2.7.1", "torchaudio==2.7.1", "torchvision==0.22.1"]
             torch_extra = ["-c", str(self.root / "requirements" / "ml-constraints.txt")]
@@ -599,8 +766,9 @@ class Installer:
                 result = subprocess.run([executable, "--list-langs"], capture_output=True, text=True, timeout=10)
                 if "chi_sim" not in result.stdout:
                     notices.append("Tesseract 缺少 chi_sim 中文语言包")
-        if "hearing" in self.selected and os.name != "nt" and not ctypes.util.find_library("portaudio"):
-            notices.append("PortAudio 未检测到：PyAudio 编译/录音需要系统 PortAudio")
+        if ("hearing" in self.selected and os.name != "nt" and self.results.get("hearing") != "ok"
+                and not self.portaudio_prefix and not ctypes.util.find_library("portaudio")):
+            notices.append("PortAudio 未就绪：重试 --only hearing；macOS 会自动构建项目内 PortAudio")
         if "singing" in self.selected:
             from common.env import read_env
             values = read_env(self.root / ".env")
