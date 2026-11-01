@@ -44,6 +44,137 @@ class PolicyTests(unittest.TestCase):
         return {**intention(kind), "id": "candidate", "based_on_user": human_ref(self.user),
                 "timestamp": self.now, "contact_allowed": True}
 
+    def test_live_conversation_does_not_drain_social_drive(self):
+        self.policy.state.drives["connection"] = 0.6
+        for step in range(1, 21):
+            self.policy.tick(self.now + step, {
+                **self.user, "id": step + 1, "ts": self.now + step,
+            }, available=False)
+        self.assertGreaterEqual(self.policy.state.drives["connection"], 0.6)
+
+    def test_independent_thought_runs_between_turns_without_idle_wait(self):
+        config = ProactiveConfig(startup_grace=0)
+        policy = ProactivePolicy(self.now, config, {"user_ref": "1"})
+        user = {**self.user, "ts": self.now}
+        self.assertTrue(policy.tick(self.now, user, last_activity=self.now))
+        self.assertIn("curiosity", policy.state.last_gate["allowed_kinds"])
+        self.assertNotIn("connection", policy.state.last_gate["allowed_kinds"])
+        self.assertFalse(policy.tick(self.now, user, available=False))
+
+    def test_recent_conversation_gets_followup_after_reply_without_two_minute_idle(self):
+        policy = ProactivePolicy(self.now, ProactiveConfig(startup_grace=0))
+        user = {**self.user, "ts": self.now-40}
+        reply_at = self.now-20
+        permissions = policy.contact_permissions(self.now, user, last_reply_at=reply_at)
+        self.assertTrue(permissions["owner_contact_allowed"])
+        self.assertEqual(permissions["contact_mode"], "followup")
+        self.assertIn("connection", policy.eligible_kinds(self.now, user, last_reply_at=reply_at))
+        self.assertFalse(policy.contact_permissions(self.now-1, user, last_reply_at=reply_at)["owner_contact_allowed"])
+
+    def test_reply_reopens_followup_but_no_reply_still_blocks_repeat(self):
+        policy = ProactivePolicy(self.now, ProactiveConfig(startup_grace=0))
+        user = {**self.user, "ts": self.now-40}
+        policy.reserve(self.candidate())
+        policy.resolve(self.now, delivered=True)
+        self.assertNotIn("connection", policy.eligible_kinds(self.now+21, user))
+        reply = {**user, "id": 2, "ts": self.now+5}
+        self.assertIn("connection", policy.eligible_kinds(self.now+25, reply))
+        policy.state.uncertain_contact_ref = human_ref(reply)
+        self.assertNotIn("connection", policy.eligible_kinds(self.now+26, reply))
+
+    def test_new_message_reopens_long_model_wait_without_evaluation_storm(self):
+        policy = ProactivePolicy(self.now, ProactiveConfig(startup_grace=0), {"user_ref": "1"})
+        policy.defer(self.now, 3600)
+        policy.tick(self.now+1, {**self.user, "id": 2, "ts": self.now+1})
+        self.assertEqual(policy.state.next_decision, self.now+60)
+        policy.tick(self.now+2, {**self.user, "id": 3, "ts": self.now+2})
+        self.assertEqual(policy.state.next_decision, self.now+60)
+        restored = ProactivePolicy(self.now+3, policy.config, policy.dump())
+        self.assertEqual(restored.state.last_review_at, self.now)
+
+    def test_reply_completion_reopens_early_model_wait_once(self):
+        policy = ProactivePolicy(self.now, ProactiveConfig(startup_grace=0), {"user_ref": "1"})
+        user = {**self.user, "ts": self.now}
+        reply_at = self.now + 15
+        policy.defer(self.now + 1, 180)
+        self.assertFalse(policy.tick(self.now+34, user, last_reply_at=reply_at, followup_after_reply=True))
+        self.assertTrue(policy.tick(self.now+35, user, last_reply_at=reply_at, followup_after_reply=True))
+        self.assertEqual(policy.state.followup_review_ref, human_ref(user))
+        policy.defer(self.now+35, 180)
+        restored = ProactivePolicy(self.now+36, policy.config, policy.dump())
+        self.assertFalse(restored.tick(self.now+36, user, last_reply_at=reply_at, followup_after_reply=True))
+        self.assertEqual(restored.state.next_decision, self.now+215)
+
+    def test_busy_reply_does_not_consume_followup_review(self):
+        policy = ProactivePolicy(self.now, ProactiveConfig(startup_grace=0), {"user_ref": "1"})
+        user = {**self.user, "ts": self.now}
+        policy.defer(self.now, 180)
+        self.assertFalse(policy.tick(self.now+30, user, available=False, last_reply_at=self.now,
+                                     followup_after_reply=True))
+        self.assertEqual(policy.state.followup_review_ref, "")
+        self.assertFalse(policy.tick(self.now+40, user, last_reply_at=self.now+30, followup_after_reply=True))
+        self.assertTrue(policy.tick(self.now+50, user, last_reply_at=self.now+30, followup_after_reply=True))
+
+    def test_followup_review_reopens_only_for_new_answer_and_respects_active_activity(self):
+        policy = ProactivePolicy(self.now, ProactiveConfig(startup_grace=0), {"user_ref": "1"})
+        user = {**self.user, "ts": self.now}
+        self.assertTrue(policy.tick(self.now+20, user, last_reply_at=self.now, followup_after_reply=True))
+        policy.reserve(self.candidate())
+        policy.resolve(self.now+21, delivered=True)
+        policy.defer(self.now+21, 180)
+        self.assertFalse(policy.tick(self.now+42, user, last_reply_at=self.now+21, followup_after_reply=True))
+        reply = {**user, "id": 2, "ts": self.now+45}
+        self.assertFalse(policy.tick(self.now+45, reply, available=False, followup_after_reply=True))
+        self.assertTrue(policy.tick(self.now+75, reply, last_reply_at=self.now+55, followup_after_reply=True))
+        policy.defer(self.now+75, 180)
+        next_reply = {**reply, "id": 3, "ts": self.now+80}
+        policy.state.activity = {"mode": "continue", "next_at": self.now+200}
+        self.assertFalse(policy.tick(self.now+80, next_reply, followup_after_reply=True))
+        self.assertFalse(policy.tick(self.now+120, next_reply, last_reply_at=self.now+100,
+                                     followup_after_reply=True))
+        self.assertEqual(policy.state.followup_review_ref, human_ref(reply))
+
+    def test_ready_followup_does_not_override_quiet_rest_or_boundary(self):
+        for content, now, life in (
+            ("我先忙", self.now, {}),
+            ("晚安", self.now, {}),
+            ("先聊着", stamp(2), {}),
+            ("先聊着", self.now, {"phase": "resting"}),
+        ):
+            with self.subTest(content=content, life=life):
+                policy = ProactivePolicy(now, ProactiveConfig(startup_grace=0), {"user_ref": "1"})
+                policy.defer(now, 180)
+                self.assertFalse(policy.tick(now+30, {**self.user, "ts": now, "content": content},
+                                             last_reply_at=now, life=life, followup_after_reply=True))
+                self.assertEqual(policy.state.followup_review_ref, "")
+
+    def test_unconfirmed_reply_adapter_keeps_model_wait_and_does_not_consume_review(self):
+        policy = ProactivePolicy(self.now, ProactiveConfig(startup_grace=0), {"user_ref": "1"})
+        user = {**self.user, "ts": self.now}
+        policy.defer(self.now, 180)
+        # Desktop does not yet provide an actual reply-completion timestamp.
+        self.assertFalse(policy.tick(self.now+20, user, last_reply_at=self.now))
+        self.assertEqual(policy.state.followup_review_ref, "")
+        self.assertFalse(policy.tick(self.now+60, user, last_reply_at=self.now))
+        self.assertEqual(policy.state.followup_review_ref, "")
+
+    def test_followup_still_respects_boundaries_and_quiet_hours(self):
+        policy = ProactivePolicy(self.now, ProactiveConfig(startup_grace=0))
+        for text in ("我先忙", "晚安", "不要打扰", "拜拜"):
+            user = {**self.user, "content": text, "ts": self.now-21}
+            self.assertNotIn("connection", policy.eligible_kinds(
+                self.now+20, user, last_reply_at=self.now-1))
+        user = {**self.user, "ts": stamp(2)-21}
+        self.assertNotIn("connection", policy.eligible_kinds(stamp(2), user))
+        self.assertIn("curiosity", policy.eligible_kinds(stamp(2), user))
+
+    def test_followup_configuration_is_validated(self):
+        for values in ({"BINES_PROACTIVE_FOLLOWUP_DELAY": "-1"},
+                       {"BINES_PROACTIVE_FOLLOWUP_WINDOW": "nan"},
+                       {"BINES_PROACTIVE_FOLLOWUP_DELAY": "900"}):
+            with patch.dict(os.environ, values), self.assertRaises(ValueError):
+                ProactiveConfig.from_env()
+
     def test_unset_limits_allow_activity_after_large_persisted_counts(self):
         with patch.dict(os.environ):
             os.environ.pop("BINES_PROACTIVE_DAILY_LIMIT", None)
@@ -371,6 +502,49 @@ class QQTests(unittest.TestCase):
         QQThinking(self.store, self.client).process_proactive(ev, Mock())
         self.assertFalse(self.api.calls)
 
+    def test_followup_two_bubbles_preserve_order_without_extra_final_reply(self):
+        from chatBot.messages import readable
+        from tools.napcat_tool import napcat_send
+        ev = self.prepare()
+        ev["proactive"]["contact_mode"] = "followup"
+        with self.store.connection() as db:
+            db.execute("UPDATE proactive_runs SET candidate=? WHERE id=?",
+                       (json.dumps(ev["proactive"]), ev["event_id"]))
+            db.execute("UPDATE events SET raw=? WHERE id=?", (json.dumps(ev), ev["event_id"]))
+        bot = QQThinking(self.store, self.client)
+        def execute(runner):
+            napcat_send("那个鼓点一直在我脑袋里转")
+            napcat_send("你最喜欢哪一段呀")
+        with patch("tools.napcat_tool.GatewayClient", return_value=self.client):
+            bot.process_proactive(ev, self.model(execute, text="那个鼓点一直在我脑袋里转 你最喜欢哪一段呀"))
+        self.assertEqual([readable(params["message"]) for action, params in self.api.calls],
+                         ["那个鼓点一直在我脑袋里转", "你最喜欢哪一段呀"])
+        bot.process_proactive(ev, Mock())
+        self.assertEqual(len(self.api.calls), 2)
+
+    def test_new_inbound_between_followup_bubbles_cancels_second_and_keeps_first_receipt(self):
+        from chatBot.messages import readable
+        from tools.napcat_tool import napcat_send
+        ev = self.prepare()
+        ev["proactive"]["contact_mode"] = "followup"
+        with self.store.connection() as db:
+            db.execute("UPDATE proactive_runs SET candidate=? WHERE id=?",
+                       (json.dumps(ev["proactive"]), ev["event_id"]))
+            db.execute("UPDATE events SET raw=? WHERE id=?", (json.dumps(ev), ev["event_id"]))
+        bot = QQThinking(self.store, self.client)
+        def execute(runner):
+            napcat_send("那个鼓点一直在我脑袋里转")
+            self.insert(event("1", msg_id=512, text="先等一下"))
+            napcat_send("这条不应继续发送")
+        with patch("tools.napcat_tool.GatewayClient", return_value=self.client):
+            with self.assertRaisesRegex(RuntimeError, "incoming_message"):
+                bot.process_proactive(ev, self.model(execute))
+        self.assertEqual([readable(params["message"]) for action, params in self.api.calls],
+                         ["那个鼓点一直在我脑袋里转"])
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM operations WHERE status='ok'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages WHERE role='assistant'").fetchone()[0], 1)
+
     def test_gateway_allows_native_napcat_intent_and_cancels_later_write(self):
         ev = self.prepare("initiative")
         identity = self.store.identity(ev)
@@ -477,6 +651,87 @@ class QQTests(unittest.TestCase):
         with self.store.connection() as db:
             self.assertEqual(db.execute("SELECT status FROM proactive_runs").fetchone()[0], "skipped")
         self.assertEqual(len(scheduler.policies), 1)
+
+    def test_scheduler_followup_queues_after_reply_and_reaches_execution(self):
+        now = time.time()
+        original = event("1", msg_id=510, time=now-30, text="这段音乐真有意思")
+        self.insert(original)
+        identity = self.store.identity(original)
+        with self.store.connection() as db:
+            db.execute("UPDATE events SET status='done'")
+            user = dict(db.execute("SELECT * FROM messages WHERE role='user'").fetchone())
+            db.execute("""INSERT INTO messages
+                (scope,conversation,actor,name,role,content,raw,external_id,ts)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (identity.scope, identity.conversation, "99", "Bines", "assistant",
+                 "那个节奏我也喜欢", "{}", "reply:510", now-20))
+        self.memory_hub.sync()
+        clock = [now]
+        decide = Mock(return_value=intention())
+        scheduler = QQProactive(
+            self.store, Mock(), self.client, clock=lambda: clock[0],
+            config=ProactiveConfig(startup_grace=0, quiet_start=0, quiet_end=0),
+            decide=decide, appraise=Mock(return_value=None),
+        )
+        scheduler.memory.activity_snapshot.return_value = {"last_owner_activity": {"ts": user["ts"]}}
+        scheduler.memory.build_context.return_value = {"working": [], "recalled": []}
+        scheduler.policies[identity.conversation] = ProactivePolicy(
+            now, scheduler.config, {"user_ref": human_ref(user)},
+        )
+        scheduler.tick()
+        self.assertIn("connection", decide.call_args.kwargs["allowed_kinds"])
+        self.assertEqual(decide.call_args.args[0]["contact_mode"], "followup")
+        with self.store.connection() as db:
+            ev = json.loads(db.execute("SELECT raw FROM events WHERE id LIKE 'proactive:%'").fetchone()[0])
+        self.assertEqual(guard(self.store, ev, now, config=scheduler.config), "")
+        bot = QQThinking(self.store, self.client)
+        bot.process_proactive(ev, self.model(text="我还挺好奇它后面会怎么变奏"))
+        self.assertEqual(len(self.api.calls), 1)
+        with self.store.connection() as db:
+            db.execute("UPDATE events SET status='done'")
+        clock[0] = now+61
+        scheduler.tick()
+        self.assertNotIn("connection", decide.call_args.kwargs["allowed_kinds"])
+        self.assertFalse(scheduler.policies[identity.conversation].contact_permissions(
+            clock[0], user)["owner_contact_allowed"])
+
+    def test_scheduler_rechecks_after_early_wait_and_does_not_repeat_on_restart(self):
+        now = time.time()
+        original = event("1", msg_id=511, time=now, text="想接着聊这段音乐")
+        self.insert(original)
+        identity = self.store.identity(original)
+        with self.store.connection() as db:
+            db.execute("UPDATE events SET status='done'")
+            user = dict(db.execute("SELECT * FROM messages WHERE role='user'").fetchone())
+        clock = [now]
+        decide = Mock(return_value=None)
+        memory = Mock()
+        memory.activity_snapshot.return_value = {"last_owner_activity": {"ts": user["ts"]}}
+        memory.build_context.return_value = {"working": [], "recalled": []}
+        config = ProactiveConfig(startup_grace=0, quiet_start=0, quiet_end=0)
+        scheduler = QQProactive(self.store, memory, self.client, clock=lambda: clock[0],
+                               config=config, decide=decide, appraise=Mock(return_value=None))
+        scheduler.policies[identity.conversation] = ProactivePolicy(
+            now, config, {"user_ref": human_ref(user)})
+        scheduler.tick()  # Early independent thought cannot yet contact the owner.
+        self.assertNotIn("connection", decide.call_args.kwargs["allowed_kinds"])
+        policy = scheduler.policies[identity.conversation]
+        policy.defer(now, 180)
+        self.store.add(identity, "assistant", "那个节奏我也喜欢", external_id="reply:511")
+        with self.store.connection() as db:
+            db.execute("UPDATE messages SET ts=? WHERE external_id='reply:511'", (now+15,))
+        clock[0] = now+34
+        scheduler.tick()
+        self.assertEqual(decide.call_count, 1)
+        clock[0] = now+35
+        scheduler.tick()
+        self.assertEqual(decide.call_count, 2)
+        self.assertIn("connection", decide.call_args.kwargs["allowed_kinds"])
+        restarted = QQProactive(self.store, memory, self.client, clock=lambda: clock[0],
+                               config=config, decide=decide, appraise=Mock(return_value=None))
+        clock[0] += 1
+        restarted.tick()
+        self.assertEqual(decide.call_count, 2)
 
     def test_owner_private_cooldown_does_not_block_public_or_other_private_targets(self):
         ev = self.prepare("initiative")

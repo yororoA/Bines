@@ -60,3 +60,19 @@ class WillActivityTests(unittest.TestCase):
         service.record_turn(local_env(self.fx.clock()), "现在先别操作")
         self.assertEqual(bored_event_rejection(candidate, service.activity_snapshot(), now+1, config=config),
                          "new_user_message")
+
+    def test_desktop_followup_respects_reply_gap_without_idle_requirement(self):
+        now = self.fx.clock()
+        user = {"id": 1, "ts": now-30, "content": "接着聊音乐"}
+        snapshot = {"last_user": user, "last_owner_activity": {"ts": now-30},
+                    "messages": [user, {"role": "assistant", "ts": now-20}]}
+        candidate = {"id": "followup", "kind": "connection", "topic": "音乐",
+                     "intent": "接着聊刚才的节奏", "reason": "对刚才的音乐好奇",
+                     "based_on_user": "1", "activity_at": now-30, "timestamp": now,
+                     "contact_mode": "followup", "reply_at": now-20}
+        config = ProactiveConfig(quiet_start=0, quiet_end=0)
+        self.assertEqual(bored_event_rejection(candidate, snapshot, now, config=config), "")
+        snapshot["messages"][-1]["ts"] = now-19
+        self.assertEqual(bored_event_rejection(candidate, snapshot, now, config=config), "not_idle")
+        candidate.update(kind="curiosity")
+        self.assertEqual(bored_event_rejection(candidate, snapshot, now, config=config), "")

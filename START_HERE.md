@@ -65,6 +65,10 @@ python -m chatBot.migrate_memory
 
 主人私聊与桌面共享记忆；其他私聊独立；群聊只能读取当前群公开记录，个人状态按群和用户分别保存。默认只回复私聊、群内 @机器人和引用机器人消息；`BINES_QQ_GROUP_REPLY=all` 可启用群内全部消息回复。通知、撤回和请求保留原事件，不自动审批。
 
+自主意愿默认每分钟获得一次取舍机会，独立思考不要求对话闲置；正在处理的真人消息仍优先。最近 15 分钟的主人对话可在回复结束 20 秒后自然接续，普通回复中也允许表达自己的感受、好奇点或相关新话题。是否开口由模型根据具体内容决定；未回复的主动消息仍有两小时冷却，免打扰、忙碌和安静时段仍有效。可通过 `.env.example` 中的 `BINES_PROACTIVE_FOLLOWUP_DELAY`、`BINES_PROACTIVE_FOLLOWUP_WINDOW` 和 `BINES_PROACTIVE_DECISION_INTERVAL` 调整节奏。
+
+网站浏览器保留各平台的登录目录，启动时连接同一目录下仍存活的 Chrome for Testing。仅有旧 `DevToolsActivePort` 文件、对应进程已经退出时，可正常重新打开；真实窗口无响应时暂停操作，避免重复开窗。浏览器桥就绪仅表示通信可用，具体页面打开和读取结果以网站工具回执为准。
+
 `python napcat.py status|logs|down|update` 管理容器；`down` 保留数据。媒体宿主目录 `deploy/napcat/data/media` 在容器中为 `/bines-media`。完整能力使用 `napcat_discover` + `napcat_call`，支持所有运行中 NapCat action；`napcat_events` 查看请求原始 flag，`napcat_operation` 查询发送回执。结果不确定的写操作不自动重发。
 
 全部 API 暴露检查：本机与显式绑定主人（含群聊）的技能提示词包含 NapCatDocs 4.18.38 的 **178 个 API 索引**；`napcat_discover()` 返回完整目录，指定 `action` 返回参数和响应 schema。项目附带完整官方文档，即使缺少 WebUI token 也可以查询。`napcat_catalog()` 返回文档数量、当前身份允许数量、连接状态和运行时目录差异；`runtime_supported=null` 表示未确认，不能当作 QQ 已支持。配置 WebUI token 后自动合并运行时新增接口。普通 QQ 会话继续限制为当前会话的 14 个 API。主人在群聊可操作完整 QQ 账号能力，但记忆只读取本群，网站与外部 MCP 仍只允许本机和主人私聊。

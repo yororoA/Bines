@@ -36,9 +36,50 @@ class ExistingPageReader:
         with self.http.open(url, timeout=2) as response:
             return json.load(response)
 
+    def _profile_pids(self, platform):
+        """A leftover DevToolsActivePort file is not evidence of a live browser."""
+        profile = (self.profile_root / platform).resolve()
+        try:
+            if os.name == "posix":
+                result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
+                                        text=True, timeout=3, check=False)
+                rows = [line.strip().split(None, 1) for line in result.stdout.splitlines()]
+            else:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                     "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                data = json.loads(result.stdout or "[]")
+                rows = [[str(item["ProcessId"]), item.get("CommandLine") or ""]
+                        for item in (data if isinstance(data, list) else [data])]
+            if result.returncode:
+                raise OSError("process discovery failed")
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            raise ExistingBrowserUnavailable("无法确认 Bines 浏览器进程；暂停启动以免重复打开窗口",
+                                             stage="process_discovery") from exc
+        pids = []
+        for row in rows:
+            if len(row) != 2:
+                continue
+            pid, command = row
+            if "--type=" in command or not re.match(
+                r'^.+?(?:/Contents/MacOS/Google Chrome for Testing|/chrome|\\chrome\.exe)"?(?: --|$)',
+                command, re.I,
+            ):
+                continue
+            match = re.search(r'--user-data-dir=(?:"([^"]+)"|(.+?)(?= --|$))', command)
+            if match and Path(match.group(1) or match.group(2)).resolve() == profile:
+                pids.append(pid)
+        return pids
+
     def _ports(self, platform):
         """Find only Chrome instances using this exact Bines profile."""
         profile = (self.profile_root / platform).resolve()
+        pids = self._profile_pids(platform)
+        if not pids:
+            return []
         candidates = []
         try:
             port = int((profile / "DevToolsActivePort").read_text().splitlines()[0])
@@ -46,24 +87,14 @@ class ExistingPageReader:
         except (OSError, ValueError, IndexError):
             pass
         if os.name == "posix":
-            rows = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
-                                  text=True, timeout=3, check=False).stdout
-            for row in rows.splitlines():
-                fields = row.strip().split(None, 1)
-                if len(fields) != 2:
+            for pid in pids:
+                try:
+                    output = subprocess.run(
+                        ["lsof", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"],
+                        capture_output=True, text=True, timeout=3, check=False,
+                    ).stdout
+                except (OSError, subprocess.SubprocessError):
                     continue
-                pid, command = fields
-                if "--type=" in command or not re.match(
-                    r"^.+?(?:/Contents/MacOS/Google Chrome for Testing|/chrome)(?: --|$)", command,
-                ):
-                    continue
-                match = re.search(r"--user-data-dir=(.+?)(?: --|$)", command)
-                if not match or Path(match.group(1)).resolve() != profile:
-                    continue
-                output = subprocess.run(
-                    ["lsof", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"],
-                    capture_output=True, text=True, timeout=3, check=False,
-                ).stdout
                 candidates.extend(int(port) for port in re.findall(r"^n(?:localhost|127\.0\.0\.1|\[::1\]):(\d+)$", output, re.M))
         return list(dict.fromkeys(port for port in candidates if 1 <= port <= 65535))
 

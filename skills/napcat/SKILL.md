@@ -19,6 +19,7 @@ QQ空间可用 `napcat_discover(action="send_qzone_msg")` 查看真实参数，�
 - 指定收件人：传 `user_id`；指定群：传 `group_id`，二者只能选一个。普通 QQ 用户仅当前会话，本机与主人在私聊、群聊中可按请求指定其他目标。群发时读取好友或群列表，自主选取目标并调用多次发送接口。
 - 多选合并转发：`napcat_forward(message_ids=["101","102"])`。从上下文或历史读取真实 message_id，不编造 ID；列表顺序就是转发顺序。此操作发一条合并转发消息。原生接口为 `send_group_forward_msg` / `send_private_forward_msg`，`messages` 是多个 `{"type":"node","data":{"id":"101"}}`。普通用户不能改写节点发送人或夹带另一个会话的内容。
 - 自主选择图文同条或分开发送；同条消息使用 `message=[{"type":"text","data":{"text":"这张图片"}},{"type":"image","data":{"file":"图片来源"}}]`，分开发送使用多次调用。消息段顺序、引用、艾特、换行和消息数量均由你决定，系统按原参数执行，不自动拆分、聚合或添加艾特。
+- QQ 长回复按完整意思和自然停顿分条说，通常每条一两句短句；描述、感受、提问不要全挤进一个长气泡。每条分别调用 `napcat_send` 或原生发送接口；同一个 `message` 数组中的多个 `text` 段仍在一个气泡内。保持词句完整，不重复已发送内容，不为分条增加废话。
 - 自定义图片表情：`{"type":"image","data":{"file":"图片来源","sub_type":1,"summary":"[表情]"}}`；普通图片 `sub_type=0`。支持的 GIF 也走图片段；不能用 `face` 代替自定义图片。
 - 机器人 QQ 账号收藏的表情：`napcat_custom_faces` 返回索引、描述和真实图片 URL，可以把选定 URL 直接组合到原生消息段中。也可用 `napcat_send_custom_face(index=0, text="正文")`。需要继续说话时再调用发送接口；已发送的内容不要在最终文本重复。
 - QQ 自带表情：`{"type":"face","data":{"id":"表情编号"}}`。商城表情：`{"type":"mface","data":{"emoji_package_id":123,"emoji_id":"实际ID","key":"实际key","summary":"[表情]"}}`，参数必须来自有效表情信息，不能编造。

@@ -477,6 +477,46 @@ class WebsiteWatchTests(unittest.TestCase):
 
 
 class AgentBrowserTests(unittest.TestCase):
+    def test_stale_port_file_does_not_block_open_or_attach_to_reused_port(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "bilibili").mkdir()
+            (root / "bilibili" / "DevToolsActivePort").write_text("51999\n/devtools/browser/old")
+            browser = AgentBrowser(["test"], profile_root=root)
+            with patch.object(browser.page_reader, "_profile_pids", return_value=[]), patch.object(
+                browser.page_reader, "_json",
+            ) as probe:
+                argv = browser._argv(platform_config("bilibili"), ["open", "https://www.bilibili.com/"])
+            self.assertIn("--profile", argv)
+            self.assertNotIn("--cdp", argv)
+            probe.assert_not_called()
+            self.assertFalse(browser.runtime_failures)
+
+    def test_live_profile_without_debugging_port_cannot_launch_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "bilibili").mkdir()
+            browser = AgentBrowser(["test"], profile_root=root)
+            with patch.object(browser.page_reader, "_ports", return_value=[]), patch.object(
+                browser.page_reader, "_profile_pids", return_value=["123"],
+            ):
+                with self.assertRaises(BrowserCommandError):
+                    browser._argv(platform_config("bilibili"), ["open", "https://www.bilibili.com/"])
+            self.assertFalse(browser.connection_modes)
+
+    def test_failed_process_discovery_does_not_assume_browser_is_absent(self):
+        from common.website_cdp import ExistingBrowserUnavailable
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "bilibili").mkdir()
+            browser = AgentBrowser(["test"], profile_root=root)
+            with patch.object(browser.page_reader, "_profile_pids", side_effect=ExistingBrowserUnavailable(
+                "process scan failed", stage="process_discovery",
+            )):
+                with self.assertRaises(BrowserCommandError):
+                    browser._argv(platform_config("bilibili"), ["open", "https://www.bilibili.com/"])
+            self.assertEqual(browser.runtime_failures["bilibili"]["reason"], "process_discovery")
+
     def test_playwright_numeric_tabs_keep_the_public_tn_contract(self):
         calls = []
 

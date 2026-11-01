@@ -597,7 +597,14 @@ class AgentBrowser:
             args[1] = str(args[1])[1:]
         profile = self.profile_root / platform.key
         if platform.key not in self.connection_modes:
-            ports = self.page_reader._ports(platform.key) if profile.is_dir() else []
+            from common.website_cdp import ExistingBrowserUnavailable
+            try:
+                ports = self.page_reader._ports(platform.key) if profile.is_dir() else []
+                live_without_port = (profile.is_dir() and not ports
+                                     and bool(self.page_reader._profile_pids(platform.key)))
+            except ExistingBrowserUnavailable as exc:
+                self.failure(platform, "attach", exc.stage)
+                raise BrowserCommandError(str(exc)) from exc
             port = None
             for candidate in ports:
                 try:
@@ -607,7 +614,7 @@ class AgentBrowser:
                         break
                 except (OSError, TypeError, ValueError):
                     continue
-            if ports and port is None:
+            if live_without_port or ports and port is None:
                 self.failure(platform, "attach", "existing_browser_unresponsive")
                 raise BrowserCommandError("现有 Bines 浏览器没有响应；不会自动打开替代窗口")
             # Keep this mode for the session. A broken attachment must not fall

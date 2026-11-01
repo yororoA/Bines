@@ -24,6 +24,27 @@ class ExistingReaderTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_process_discovery_matches_exact_profile_and_ignores_renderer(self):
+        profile = self.root / "bilibili"
+        chrome = "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+        rows = "\n".join([
+            f"11 {chrome} --user-data-dir={profile} --remote-debugging-port=0",
+            f'12 {chrome} --user-data-dir="{profile}" --remote-debugging-port=0',
+            f"13 {chrome} --user-data-dir={profile}-other --remote-debugging-port=0",
+            f"14 {chrome} --type=renderer --user-data-dir={profile}",
+        ])
+        with patch("common.website_cdp.subprocess.run", return_value=subprocess.CompletedProcess(
+            [], 0, stdout=rows,
+        )):
+            self.assertEqual(self.reader._profile_pids("bilibili"), ["11", "12"])
+
+    def test_failed_process_scan_is_not_treated_as_empty(self):
+        with patch("common.website_cdp.subprocess.run", return_value=subprocess.CompletedProcess(
+            [], 1, stdout="",
+        )):
+            with self.assertRaises(ExistingBrowserUnavailable):
+                self.reader._ports("bilibili")
+
     def page(self, target, *, visible=True, focused=True, url="https://www.bilibili.com/", document_id=1000):
         return {"id": target, "type": "page", "url": url,
                 "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/" + target,
@@ -255,11 +276,12 @@ class BrowserLaunchFailureTests(unittest.TestCase):
                 runtime, "ensure_browser_node", return_value="/test/node",
             ), patch.object(runtime, "ensure_chrome_for_testing", return_value="/test/chrome"), patch.object(
                 runtime, "close_stale_bines_sessions",
-            ), patch.object(runtime.subprocess, "Popen", return_value=process) as launch, patch.object(
+            ) as close_sessions, patch.object(runtime.subprocess, "Popen", return_value=process) as launch, patch.object(
                 runtime, "build_opener", return_value=opener,
             ):
                 try:
                     self.assertTrue(bridge._start())
+                    close_sessions.assert_not_called()
                     args = launch.call_args.kwargs["env"]["AGENT_BROWSER_ARGS"].split(",")
                     for required in ("--remote-debugging-port=0", "--disable-background-timer-throttling",
                                      "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding"):

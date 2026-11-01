@@ -332,7 +332,8 @@ class WebsiteBridgeProcess:
             "PATH": str(Path(node).parent) + os.pathsep + os.environ.get("PATH", ""),
         }
         browser_env.pop("AGENT_BROWSER_ENGINE", None)
-        close_stale_bines_sessions(command, browser_env)
+        # Preserve live windows. AgentBrowser attaches to the exact profile;
+        # stale DevTools files are ignored only after confirming no process owns it.
         self.token, self.port = secrets.token_hex(32), _free_port()
         logs = ROOT / "logs"
         logs.mkdir(parents=True, exist_ok=True)

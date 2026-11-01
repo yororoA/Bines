@@ -7,7 +7,7 @@ import uuid
 
 from common.proactive import (
     ProactiveConfig, ProactivePolicy, appraise_history, capability_summary, compact_life,
-    draft_decision, human_ref, owner_contact,
+    candidate_idle, draft_decision, human_ref, owner_contact,
 )
 
 log = logging.getLogger("bines.qq.proactive")
@@ -85,9 +85,13 @@ def guard(store, event, now=None, *, config=None, central_activity=0):
     # A desktop or group interaction after this candidate also cancels it.
     if max(owner_activity(store), central_activity) > float(candidate.get("activity_at") or 0):
         return "owner_active_elsewhere"
-    idle = (0 if candidate.get("activity") else
-            config.min_idle if candidate.get("kind") == "connection" else config.thinking_idle)
-    if now - max(float(user["ts"]), central_activity) < idle:
+    idle = candidate_idle(candidate, config)
+    with store.connection() as db:
+        last = db.execute("SELECT MAX(ts) FROM messages WHERE conversation=? AND recalled=0 AND ts<=?",
+                          (identity.conversation, candidate["timestamp"])).fetchone()[0]
+    # Do not let this quantum's own sends cancel subsequent tools/messages.
+    reply_at = float(candidate.get("reply_at") or 0) if active else float(last or 0)
+    if now - max(float(user["ts"]), central_activity, reply_at) < idle:
         return "not_idle"
     return ""
 
@@ -264,9 +268,11 @@ class QQProactive:
                     (conversation,),
                 ).fetchone() is not None
                 last = db.execute("SELECT MAX(ts) ts FROM messages WHERE conversation=?", (conversation,)).fetchone()
+            conversation_activity = max(activity, float(last["ts"] or 0))
             ready = policy.tick(
                 now, user, available=connected and not busy,
-                last_activity=(activity if policy.state.activity else max(activity, float(last["ts"] or 0))),
+                last_activity=activity, last_reply_at=conversation_activity,
+                followup_after_reply=not busy,
                 relationship_score=(snapshot.get("state") or {}).get("relationship_score", 0),
                 life=snapshot.get("life") or {},
             )
@@ -288,7 +294,7 @@ class QQProactive:
                 "life": compact_life(memory_context.get("life") or snapshot.get("life")),
                 "recent_outcomes": policy.state.recent_outcomes,
                 "planning_only": policy.state.planning_only,
-                **policy.contact_permissions(now, user, activity),
+                **policy.contact_permissions(now, user, activity, last_reply_at=conversation_activity),
             }
             if self.capabilities is None:
                 self.capabilities = capability_summary("QQ")
@@ -299,7 +305,7 @@ class QQProactive:
                 appraisal = self.appraise(materials, policy.state, now)
                 policy.appraise(appraisal, human_ref(user), now)
                 self.save(conversation, policy)
-            kinds = policy.eligible_kinds(now, user, activity)
+            kinds = policy.eligible_kinds(now, user, activity, last_reply_at=conversation_activity)
             saved_activity = policy.state.activity
             continuing = saved_activity.get("mode") in {"continue", "review"}
             if continuing:
@@ -317,8 +323,8 @@ class QQProactive:
                 continue
             event_id = "proactive:" + uuid.uuid4().hex
             candidate = {**decision, "id": event_id, "based_on_user": human_ref(user),
-                         "activity_at": activity, "timestamp": self.clock(),
-                         **policy.contact_permissions(now, user, activity),
+                         "activity_at": activity, "reply_at": conversation_activity, "timestamp": self.clock(),
+                         **policy.contact_permissions(now, user, activity, last_reply_at=conversation_activity),
                          "planning_only": policy.state.planning_only,
                          "activity": dict(saved_activity) if continuing else {},
                          "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),

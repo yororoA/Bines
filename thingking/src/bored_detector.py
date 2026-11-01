@@ -102,10 +102,10 @@ def main():
                 owner = snapshot.get("last_owner_activity") or {}
                 available = is_user_online(PRESENCE_STATE_PATH)
                 last_local = max((m.get("ts") or 0 for m in snapshot.get("messages") or []), default=0)
+                conversation_activity = max(float(owner.get("ts") or 0), last_local)
                 ready = policy.tick(
                     now, snapshot.get("last_user"), available=available,
-                    last_activity=(float(owner.get("ts") or 0) if policy.state.activity
-                                   else max(float(owner.get("ts") or 0), last_local)),
+                    last_activity=float(owner.get("ts") or 0), last_reply_at=conversation_activity,
                     relationship_score=(snapshot.get("state") or {}).get("relationship_score", 0),
                     life=snapshot.get("life") or {},
                 )
@@ -126,13 +126,15 @@ def main():
                              "available_skills": capabilities, "recent_outcomes": policy.state.recent_outcomes,
                              "planning_only": policy.state.planning_only,
                              **policy.contact_permissions(now, snapshot.get("last_user"),
-                                                          float(owner.get("ts") or 0))}
+                                                          float(owner.get("ts") or 0),
+                                                          last_reply_at=conversation_activity)}
                 if (policy.appraisal_due(policy.state.user_ref, now)
                         and (not continuing or bool(policy.state.emotion_at))):
                     appraisal = appraise_history(materials, policy.state, now)
                     policy.appraise(appraisal, policy.state.user_ref, now)
                     save()
-                kinds = policy.eligible_kinds(now, snapshot.get("last_user"), float(owner.get("ts") or 0))
+                kinds = policy.eligible_kinds(now, snapshot.get("last_user"), float(owner.get("ts") or 0),
+                                              last_reply_at=conversation_activity)
                 active = policy.state.activity
                 continuing = active.get("mode") in {"continue", "review"}
                 decision = ({"kind": active["kind"], "topic": active["topic"],
@@ -157,7 +159,9 @@ def main():
                 candidate = {**decision, "id": uuid.uuid4().hex, "type": "bored",
                              "timestamp": time.time(), "based_on_user": policy.state.user_ref,
                              "activity_at": float(owner.get("ts") or 0),
-                             **policy.contact_permissions(now, snapshot.get("last_user"), float(owner.get("ts") or 0)),
+                             "reply_at": conversation_activity,
+                             **policy.contact_permissions(now, snapshot.get("last_user"), float(owner.get("ts") or 0),
+                                                          last_reply_at=conversation_activity),
                              "planning_only": policy.state.planning_only,
                              "activity": dict(active) if continuing else {},
                              "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),
