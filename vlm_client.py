@@ -2,9 +2,48 @@ import time
 import base64
 import binascii
 import json
+import hashlib
+import threading
+from collections import OrderedDict
 from typing import Iterable, Optional, Sequence, Union
 
 import requests
+
+_DESCRIPTIONS = OrderedDict()
+_DESCRIPTION_LOCK = threading.Lock()
+
+
+def _description_key(images, prompt, labels, model, endpoint, detail, max_tokens, reuse_key):
+    # URLs may change content or expire. Live cameras/screens/video never opt in.
+    if not reuse_key or any(not image.startswith("data:") for image in images):
+        return None
+    return hashlib.sha256(json.dumps(
+        [images, prompt, labels, model, endpoint, detail, max_tokens, reuse_key],
+        ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def _cached_description(key, value=None):
+    if not key:
+        return None
+    with _DESCRIPTION_LOCK:
+        stamp = time.monotonic()
+        for old in list(_DESCRIPTIONS):
+            if _DESCRIPTIONS[old][0] < stamp - 120:
+                del _DESCRIPTIONS[old]
+        if value is not None:
+            _DESCRIPTIONS[key] = (stamp, value)
+        if key not in _DESCRIPTIONS:
+            return None
+        _DESCRIPTIONS.move_to_end(key)
+        while len(_DESCRIPTIONS) > 128:
+            _DESCRIPTIONS.popitem(last=False)
+        return _DESCRIPTIONS[key][1]
+
+
+class _VisionHTTPError(requests.RequestException):
+    def __init__(self, status):
+        self.status = status
+        super().__init__(f"DeepSeek HTTP {status}")
 
 
 def normalize_image(image: str) -> str:
@@ -57,6 +96,7 @@ def call_vision(
     error_message_prefix: str = "[VLM 异常]",
     max_tokens: Optional[int] = None,
     retries: int = 1,
+    reuse_key: Optional[str] = None,
 ) -> str:
     """DeepSeek Flash vision; one credential for QQ, desktop, camera and video."""
     from config import (
@@ -105,30 +145,40 @@ def call_vision(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    # reuse_key is supplied only by a trusted caller after rechecking current
+    # source visibility. No credentials, image bytes or descriptions go to disk.
+    cache_key = _description_key(normalized, prompt, labels, model, api_url,
+                                 DEEPSEEK_VISION_DETAIL, max_tokens, reuse_key)
+    cached = _cached_description(cache_key)
+    if cached is not None:
+        return cached
+
+    def request(**_):
+        with requests.post(api_url, headers=headers, json=payload, timeout=timeout,
+                           proxies=proxies, allow_redirects=False) as resp:
+            if resp.status_code != 200:
+                raise _VisionHTTPError(resp.status_code)
+            return resp.json()
 
     attempts = min(3, max(1, int(retries)))
     last_error = ""
     for attempt in range(attempts):
         try:
-            with requests.post(
-                api_url,
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-                proxies=proxies,
-                allow_redirects=False,
-            ) as resp:
-                if resp.status_code != 200:
-                    last_error = f"DeepSeek HTTP {resp.status_code}"
-                    if resp.status_code not in {408, 429} and resp.status_code < 500:
-                        break
-                else:
-                    choice = (resp.json().get("choices") or [{}])[0]
-                    out = choice.get("message", {}).get("content", "")
-                    out = out.strip() if isinstance(out, str) else ""
-                    if choice.get("finish_reason") == "length" and not out:
-                        return f"{request_failed_prefix} token 预算不足，未得到图片描述]"
-                    return out or empty_message
+            from common.model_usage import measured_request, model_usage_kind
+            with model_usage_kind("vision"):
+                data = measured_request(request, **payload)
+            choice = (data.get("choices") or [{}])[0]
+            out = choice.get("message", {}).get("content", "")
+            out = out.strip() if isinstance(out, str) else ""
+            if choice.get("finish_reason") == "length":
+                return f"{request_failed_prefix} token 预算不足，未得到完整图片描述]"
+            if out and choice.get("finish_reason") == "stop":
+                _cached_description(cache_key, out)
+            return out or empty_message
+        except _VisionHTTPError as exc:
+            last_error = f"DeepSeek HTTP {exc.status}"
+            if exc.status not in {408, 429} and exc.status < 500:
+                break
         except (requests.RequestException, ValueError) as exc:
             # Never include raw transport errors that may contain signed image URLs.
             last_error = f"DeepSeek {type(exc).__name__}"

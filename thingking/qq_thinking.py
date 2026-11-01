@@ -350,7 +350,7 @@ class QQThinking:
                 )
             conversation.extend([
                 {"role": "system", "content": prompt},
-                {"role": "system", "content": prompt_builder.conversation_style_guard(memory_context)},
+                # build_conversation_messages already holds this turn's sampled voice.
                 {"role": "user", "content": f"请回复 QQ:{identity.user} 本轮消息：\n{request}"},
             ])
             outcomes = []

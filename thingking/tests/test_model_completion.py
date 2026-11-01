@@ -2,7 +2,7 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from helpers import MemoryFixture, local_env
 from memory.worker import MemoryWorker
@@ -33,6 +33,26 @@ def model_with_responses(*responses):
 
 
 class ModelCompletionTest(unittest.TestCase):
+    def test_text_tool_continuation_uses_actual_bounded_request(self):
+        model = model_with_responses(response("工具指令"), response("已完成"))
+        runner = Mock()
+        runner.instructions_for_source.return_value = "工具规则"
+        runner.parse_model_command.side_effect = [{"skill": "read", "action": "read", "args": {}}, None]
+        runner.execute.return_value = "真实结果"
+        messages = [{"role": "system", "content": "人设"},
+                    {"role": "user", "content": "需要裁剪的旧历史"},
+                    {"role": "user", "content": "读资料"}]
+        with patch("thinking_model_helper.bound_request",
+                   side_effect=lambda items, **_: [m for m in items if m.get("content") != "需要裁剪的旧历史"]):
+            text, _, _ = model.run_skill_protocol(messages, runner, source="local")
+        self.assertEqual(text, "已完成")
+        requests = model.client.chat.completions.create.call_args_list
+        first, second = [call.kwargs["messages"] for call in requests]
+        self.assertEqual(second[:len(first)], first)
+        self.assertNotIn("需要裁剪的旧历史", str(second))
+        self.assertIn("真实结果", str(second))
+        runner.execute.assert_called_once()
+
     def test_native_truncation_retries_current_request_without_replaying_previous_tool(self):
         call = SimpleNamespace(id="read:1", function=SimpleNamespace(name="browser_search", arguments="{}"),
                                model_dump=lambda **kwargs: {"id": "read:1", "type": "function",
@@ -63,7 +83,8 @@ class ModelCompletionTest(unittest.TestCase):
         for request in requests:
             sent = request.kwargs["messages"]
             self.assertEqual(sum(m.get("content") == voice for m in sent), 1)
-            self.assertEqual(sent[-1], {"role": "system", "content": voice})
+            self.assertLess(next(i for i, m in enumerate(sent) if m.get("content") == voice),
+                            next(i for i, m in enumerate(sent) if m.get("role") == "user"))
             self.assertIn({"role": "user", "content": "读资料"}, sent)
         continuation = requests[1].kwargs["messages"]
         receipt_index = next(i for i, m in enumerate(continuation) if m.get("tool_call_id") == "read:1")
@@ -71,7 +92,8 @@ class ModelCompletionTest(unittest.TestCase):
             "role": "tool", "tool_call_id": "read:1", "content": "真实搜索结果",
         })
         self.assertEqual(continuation[receipt_index - 1]["reasoning_content"], "读资料")
-        self.assertLess(receipt_index, len(continuation) - 1)
+        initial = requests[0].kwargs["messages"]
+        self.assertEqual(continuation[:len(initial)], initial)
         self.assertEqual(sum(m.get("content") == voice for m in messages), 2)
 
     def test_reasoning_only_truncation_retries_original_request_in_json_mode(self):

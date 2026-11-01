@@ -173,6 +173,8 @@ def run_main_agent_rounds(
             break
 
         raw_response = "".join(full_response)
+        if holder.get("submitted_messages") is not None:
+            messages[:] = holder["submitted_messages"]
         if not normal_mode and not directive_mode:
             # Short response was a prefix of the marker, but never completed it.
             normal_mode = True

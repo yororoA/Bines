@@ -577,11 +577,13 @@ def inspect_decision(text, *, recent_intents=None, now=0):
 def _complete(system, data, model=None, max_tokens=4096):
     from thinking_model_helper import ThinkingModelHelper
     from common.clock import clock_message
-    return (model or ThinkingModelHelper()).complete_text(
-        [clock_message(data.get("now")), {"role": "system", "content": system},
-         {"role": "user", "content": json.dumps(data, ensure_ascii=False)}],
-        temperature=0.7, max_tokens=max_tokens, response_format={"type": "json_object"},
-    )
+    from common.model_usage import model_usage_kind
+    with model_usage_kind("autonomous.deliberation"):
+        return (model or ThinkingModelHelper()).complete_text(
+            [{"role": "system", "content": system}, clock_message(data.get("now")),
+             {"role": "user", "content": json.dumps(data, ensure_ascii=False)}],
+            temperature=0.7, max_tokens=max_tokens, response_format={"type": "json_object"},
+        )
 
 
 def appraise_history(context, state, now, *, model=None):

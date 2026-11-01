@@ -539,17 +539,20 @@ def build_conversation_messages(context: Dict[str, Any], *, budget_limit=None,
     scene = scene_for(envelope)
     system_sections = [
         persona_profile.character_prompt(),
-        _scene_policy(envelope, scene),
         # The final voice guard already carries this turn's relationship.
         # Repeating it here gives the tone more weight than the conversation.
         "--- 行为准则 ---\n" + "\n".join(f"{i}. {rule}" for i, rule in enumerate(_OPERATING_RULES, 1)),
     ]
     first = {"role": "system", "content": "\n\n".join(s for s in system_sections if s)}
-    clock = clock_message()
+    # One turn snapshot also survives request-budget rebuilding.
+    if "_clock_message" not in context:
+        context["_clock_message"] = clock_message()
+    clock = context["_clock_message"]
+    scene_message = {"role": "system", "content": _scene_policy(envelope, scene)}
     last = {"role": "system", "content": conversation_style_guard(context)}
     counter = ContextTokenCounter()
     limit = context_limit() if budget_limit is None else max(0, int(budget_limit))
-    fixed = counter.messages([first, clock, last])
+    fixed = counter.messages([first, scene_message, clock, last])
     # Some gateway envelopes carry identity only. recall_query still includes
     # the current request (and may conservatively include referent context).
     current = str(envelope.get("content") or context.get("recall_query") or "")
@@ -562,19 +565,18 @@ def build_conversation_messages(context: Dict[str, Any], *, budget_limit=None,
     profile = _profile_block(bounded, scene, record=False)
     if profile:
         leading.append(profile)
-    base_first = first
     if leading:
-        first = {**first, "content": first["content"] + "\n\n" + "\n\n".join(leading)}
+        variable.append({"role": "system", "content": "\n\n".join(leading)})
     recall = _memory_recall_block(bounded, record=False)
     if recall:
         variable.append({"role": "system", "content": recall})
-    variable.extend(_working_messages(bounded, scene))
+    history = _working_messages(bounded, scene)
     # Per-item accounting intentionally over-reserves repeated headers. The
     # assembled cost is still checked before recording any presented evidence.
-    total = counter.messages([first, clock, *variable, last])
-    if total + reserve > limit and (variable or leading):
+    total = counter.messages([first, *history, scene_message, *variable, clock, last])
+    if total + reserve > limit and (variable or history):
         variable = []
-        first = base_first
+        history = []
         bounded = {**bounded, "working": [], "profile": [], "recalled": [], "bridge": None, "other_channels": []}
         total = fixed
     _profile_block(bounded, scene)
@@ -594,7 +596,7 @@ def build_conversation_messages(context: Dict[str, Any], *, budget_limit=None,
         "profile_shown": len(bounded.get("profile") or []),
         "node_ids": [item.get("node_id") or item.get("id") for item in
                      [*(bounded.get("recalled") or []), *(bounded.get("profile") or [])]]})
-    messages = [first, clock, *variable, last]
+    messages = [first, *history, scene_message, *variable, clock, last]
     journal = _runtime_journal()
     if journal and hasattr(journal, "register_prompt_frame"):
         journal.register_prompt_frame(context, messages)

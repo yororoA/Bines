@@ -217,6 +217,7 @@ class StreamReliabilityTests(unittest.TestCase):
     def test_desktop_request_injects_fresh_website_observation_without_mutating_input(self):
         agent = MainAgent.__new__(MainAgent)
         agent.client = Mock()
+        agent.client.chat.completions.create.return_value = iter([])
         messages = [{"role": "user", "content": "看看网页"}]
         observation = {"role": "system", "content": "fresh observed page"}
         with patch("agents.with_website_observations", side_effect=lambda rows: [*rows, observation]) as observe:

@@ -61,7 +61,7 @@ class ClockTests(unittest.TestCase):
         self.assertIn("current_time", clock["content"])
         self.assertNotIn("当前真实时间", prompt_builder._state_block({"current_time": "1999年1月1日"}))
 
-    def test_refresh_removes_old_clock_without_mutating_tool_reasoning(self):
+    def test_refresh_appends_clock_without_mutating_tool_reasoning(self):
         messages = [clock_message(TS - 86400), {"role": "user", "content": "开始"},
                     {"role": "assistant", "content": "", "reasoning_content": "推理",
                      "tool_calls": [{"id": "call"}]},
@@ -69,9 +69,10 @@ class ClockTests(unittest.TestCase):
         original = deepcopy(messages)
         refreshed = with_current_time(messages, TS)
         self.assertEqual(messages, original)
-        self.assertEqual(sum(m["content"].startswith(CLOCK_MARKER) for m in refreshed), 1)
-        self.assertEqual(refreshed[1:], original[1:])
-        self.assertIn("2026年10月23日", refreshed[0]["content"])
+        self.assertEqual(sum(m["content"].startswith(CLOCK_MARKER) for m in refreshed), 2)
+        self.assertEqual(refreshed[:-1], original)
+        self.assertIn("2026年10月23日", refreshed[-1]["content"])
+        self.assertEqual(with_current_time(refreshed, TS), refreshed)
 
     def test_time_gap_and_date_retrieval_use_same_calendar(self):
         from message_flow_utils import build_time_gap_instruction
@@ -123,12 +124,14 @@ class ModelClockTests(unittest.TestCase):
             execute=Mock(return_value="零点三十"),
         )
         messages = [clock_message(TS - 86400), {"role": "user", "content": "现在几点"}]
-        with patch("common.clock.time.time", side_effect=[TS, TS + 120]):
+        with patch("common.clock.clock_message", side_effect=[clock_message(TS), clock_message(TS + 120)]):
             result, _, _ = model.run_skill_protocol(messages, runner, source="QQ")
         self.assertIn("三十二", result)
         requests = create.call_args_list
-        self.assertIn("00:30:00", requests[0].kwargs["messages"][0]["content"])
-        self.assertIn("00:32:00", requests[1].kwargs["messages"][0]["content"])
+        first, second = [request.kwargs["messages"] for request in requests]
+        self.assertIn("00:30:00", first[-1]["content"])
+        self.assertIn("00:32:00", second[-1]["content"])
+        self.assertEqual(second[:len(first)], first)
         assistant = next(m for m in requests[1].kwargs["messages"] if m.get("tool_calls"))
         self.assertEqual(assistant["reasoning_content"], "完整保留推理")
         self.assertEqual(sum(m["role"] == "user" for m in requests[1].kwargs["messages"]), 1)
@@ -141,7 +144,7 @@ class ModelClockTests(unittest.TestCase):
         messages = [clock_message(TS - 86400), {"role": "user", "content": "现在几点"}]
         with patch("common.clock.time.time", return_value=TS):
             agent._post_chat_completion({"messages": messages, "model": "test"})
-        self.assertIn("00:30:00", create.call_args.kwargs["messages"][0]["content"])
+        self.assertIn("00:30:00", create.call_args.kwargs["messages"][-1]["content"])
         self.assertEqual(messages[0], clock_message(TS - 86400))
 
     def test_proactive_decision_has_human_readable_scheduler_time(self):
@@ -149,7 +152,8 @@ class ModelClockTests(unittest.TestCase):
         model = SimpleNamespace(complete_text=Mock(return_value="{}"))
         _complete("评估自主意愿", {"now": TS}, model=model)
         messages = model.complete_text.call_args.args[0]
-        self.assertIn("2026年10月23日 星期五 00:30:00", messages[0]["content"])
+        self.assertEqual(messages[0]["content"], "评估自主意愿")
+        self.assertIn("2026年10月23日 星期五 00:30:00", messages[1]["content"])
         self.assertEqual(json.loads(messages[-1]["content"])["now"], TS)
 
     def test_memory_completion_keeps_its_historical_materials(self):

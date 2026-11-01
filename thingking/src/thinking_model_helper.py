@@ -58,7 +58,7 @@ class ThinkingModelHelper:
     def complete_text(self, messages: List[Dict[str, Any]], *, temperature=0.4, max_tokens=2048,
                       response_format: Dict[str, str] | None = None, retry_tokens: int | None = None,
                       thinking: str | None = None, timeout: float | None = None,
-                      max_retries: int | None = None) -> str:
+                      max_retries: int | None = None, _on_request=None) -> str:
         # Thinking and final text share the output budget. Retry the original
         # request once with more room; never use reasoning or truncated text.
         client = self.client
@@ -81,6 +81,8 @@ class ThinkingModelHelper:
             if not response.choices:
                 raise ModelCompletionError(f"model {self.model} returned no choices")
             _confirm_memory_request(request_messages)
+            if _on_request:
+                _on_request([dict(message) for message in request_messages])
             choice = response.choices[0]
             text = (choice.message.content or "").strip()
             finish_reason = getattr(choice, "finish_reason", None)
@@ -128,8 +130,13 @@ class ThinkingModelHelper:
         history: List[Dict[str, str]] = []
         final_text = ""
         for index in range(max_iterations):
-            final_text = self.complete_text(with_current_time(with_website_observations(conversation)),
-                                            temperature=temperature, max_tokens=max_tokens)
+            conversation = with_current_time(with_website_observations(conversation))
+            submitted = []
+            final_text = self.complete_text(conversation,
+                                            temperature=temperature, max_tokens=max_tokens,
+                                            _on_request=lambda sent: submitted.append(sent))
+            if submitted:
+                conversation = submitted[-1]
             try:
                 command = skill_runner.parse_model_command(final_text)
             except SkillProtocolError as exc:
@@ -166,28 +173,27 @@ class ThinkingModelHelper:
         # scoped context define how the assistant speaks and what it remembers.
         conversation.insert(0, {"role": "system", "content": rules})
         tools = skill_runner.function_tools(source, allowed_skills)
-        # Keep the turn's already-sampled voice after tool results, which otherwise
-        # become the last instructions before each newly generated message.
-        voice = next((message["content"] for message in reversed(messages)
-                      if message.get("role") == "system"
-                      and message.get("content", "").startswith("--- 本轮角色口吻")), "")
+        # The sampled voice remains in the turn frame. Moving it after each
+        # receipt rewrites a previously submitted prefix.
         history = []
         retry_budget = _retry_budget(max_tokens, max(8192, max_tokens * 4))
         for _ in range(max_iterations):
-            request_messages = [*conversation, *([{"role": "system", "content": voice}] if voice else [])]
-            request_messages = with_current_time(with_website_observations(request_messages))
+            request_messages = with_current_time(with_website_observations(conversation))
             request_base = request_messages
             budget = max_tokens
             for attempt in range(2):
                 request_messages = bound_request(request_base, tools=tools, max_output_tokens=budget)
-                if voice:
-                    # Keep the original prompt frame intact until budgeting has
-                    # found/rebuilt it. Send only the final copy of its voice
-                    # guard, after the current input and any tool receipts.
-                    request_messages = [
-                        item for item in request_messages
-                        if not (item.get("role") == "system" and item.get("content") == voice)
-                    ] + [{"role": "system", "content": voice}]
+                # Legacy callers may supply the same voice guard twice.
+                # Keep the first guard (the registered frame boundary), never
+                # stretch that frame across later scoped runtime instructions.
+                voices = {}
+                for i, m in enumerate(request_messages):
+                    if (m.get("role") == "system"
+                            and str(m.get("content") or "").startswith("--- 本轮角色口吻")):
+                        voices.setdefault(m["content"], i)
+                request_messages = [m for i, m in enumerate(request_messages)
+                                    if not (m.get("role") == "system" and isinstance(m.get("content"), str)
+                                            and m["content"] in voices and voices[m["content"]] != i)]
                 response = measured_request(self.client.chat.completions.create,
                     model=self.model, messages=request_messages, tools=tools or None,
                     temperature=temperature, max_tokens=budget, stream=False,
@@ -203,6 +209,7 @@ class ThinkingModelHelper:
                 if attempt or budget >= retry_budget:
                     raise ModelCompletionError("QQ 工具响应被截断，未执行本次返回的工具")
                 budget = retry_budget
+            conversation = [dict(item) for item in request_messages]
             message = response.choices[0].message
             calls = message.tool_calls or []
             if not calls:

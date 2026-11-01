@@ -87,7 +87,7 @@ class MemoryClient:
 
     # ---------- consolidation ----------
     def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
-        return self.call("claim_job", **({"kinds": list(kinds)} if kinds else {}))
+        return self.call("claim_job", batch_experiences=True, **({"kinds": list(kinds)} if kinds else {}))
 
     def complete_association(self, job_id: int, links: List[Dict[str, Any]], prior: float = .5, **claim) -> Dict[str, Any]:
         return self.call("complete_association", job_id=job_id, links=links, prior=prior, **claim)

@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import math
+import sqlite3
 import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
@@ -121,6 +122,9 @@ class MemoryService:
             source_ref TEXT PRIMARY KEY, memory_id TEXT NOT NULL, scope TEXT NOT NULL,
             record TEXT NOT NULL, revision INTEGER NOT NULL, recorded_at REAL NOT NULL
         )""")
+        self.repo.conn.execute("""CREATE TABLE IF NOT EXISTS prompt_history_segments (
+            conversation_id TEXT NOT NULL, scope TEXT NOT NULL, start_ts REAL NOT NULL,
+            start_id INTEGER NOT NULL, PRIMARY KEY(conversation_id,scope))""")
         self.dependencies.ensure_tracking()
         self.life = LifeLedger(repo, clock)
         from .provenance import ProvenanceStore
@@ -219,7 +223,8 @@ class MemoryService:
                           and (not record.get("result") or record["status"] in {"completed", "sent"}
                                and bool(record.get("source_message_refs"))))
             audit_only = turn_audit or action in {"search_memory", "cite_memory", "correct_memory", "get_time", "update_status", "napcat_discover",
-                                    "napcat_catalog", "mcp_discover"}
+                                    "napcat_catalog", "mcp_discover", "activity_continue", "activity_finish",
+                                    "activity_pause"}
             meta = {"experience_ref": source_ref, "experience_revision": revision,
                     "source_experience_refs": [source_ref], "turn_id": record.get("turn_id"),
                     "autonomous": bool(record.get("autonomous")), "action": action,
@@ -469,7 +474,7 @@ class MemoryService:
     def build_context(self, envelope: Dict[str, Any], query: str = "") -> Dict[str, Any]:
         env = self.resolve(envelope)
         scopes = scope_policy.recall_scopes(env.scope)
-        working = self.repo.recent_messages(env.conversation_id, self.settings.working_window)
+        working = self._working_segment(env)
         window_start = working[0]["ts"] if working else None
         bridge = self.repo.latest_episode_before(env.conversation_id, window_start)
         if bridge and self.retention.direct(bridge, "memory") is False:
@@ -532,6 +537,33 @@ class MemoryService:
             "life": self.life.snapshot(env.scope),
             "last_user_ts": last_user["ts"] if last_user else None,
         }
+
+    def _working_segment(self, env):
+        """Keep a bounded anchor; re-read live source rows on every request.
+
+        No prompt/evidence/authority cache: retractions, edits and identity
+        migrations take effect immediately. Compaction still uses the existing
+        bridge and recall pipeline when this segment rotates.
+        """
+        window, extra = self.settings.working_window, self.settings.working_segment_extra
+        if not extra:
+            return self.repo.recent_messages(env.conversation_id, window)
+        with self.repo.transaction():
+            rows = self.repo.conn.execute("""SELECT * FROM messages
+                WHERE conversation_id=? AND scope=?
+                AND LOWER(origin) NOT IN ('archived','recalled','withdrawn','deleted','retracted')
+                ORDER BY ts DESC,id DESC LIMIT ?""",
+                (env.conversation_id, env.scope, window + extra + 1)).fetchall()
+            rows = [dict(row) for row in reversed(rows)]
+            anchor = self.repo.conn.execute("SELECT start_ts,start_id FROM prompt_history_segments "
+                "WHERE conversation_id=? AND scope=?", (env.conversation_id, env.scope)).fetchone()
+            selected = [row for row in rows if anchor and (row["ts"], row["id"]) >= tuple(anchor)]
+            if not selected or len(selected) > window + extra:
+                selected = rows[-window:]
+                if selected:
+                    self.repo.conn.execute("INSERT OR REPLACE INTO prompt_history_segments VALUES(?,?,?,?)",
+                        (env.conversation_id, env.scope, selected[0]["ts"], selected[0]["id"]))
+            return selected
 
     @staticmethod
     def _recall_query(query: str, working: Sequence[Dict[str, Any]]) -> str:
@@ -833,7 +865,8 @@ class MemoryService:
                 self.diary_queue.defer(dirty)
         return created
 
-    def claim_job(self, kinds: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
+    def claim_job(self, kinds: Optional[Sequence[str]] = None, *,
+                  batch_experiences=False) -> Optional[Dict[str, Any]]:
         now = self.clock()
         self.maintenance.tick()
         self.dependencies.sync(limit=256)
@@ -858,6 +891,9 @@ class MemoryService:
                 return None
             with self.repo.transaction():
                 materials = self._job_materials(job)
+                if materials and batch_experiences and job["kind"] == "summarize_experience":
+                    from .experience_batch import collect
+                    materials = collect(self, job, materials)
             if materials is False:
                 self.repo.conn.execute("UPDATE jobs SET status='pending',lease_until=NULL WHERE id=?", (job["id"],))
                 deferred.append(job["id"])
@@ -991,11 +1027,8 @@ class MemoryService:
             job["payload"] = payload
             record = json.loads(row["record"])
             record["fact_corrections"] = self.corrections.inherited_facts(node) if node else []
-            from .experience import text
-            raw = text(record.get("result", ""))
-            # Bound model context; the independently indexed full evidence remains intact.
-            record["result"] = raw if len(raw) <= 18000 else raw[:12000] + "\n[中段省略]\n" + raw[-6000:]
-            return {"scope": row["scope"], "record": record}
+            from .experience import summary_projection
+            return {"scope": row["scope"], "record": summary_projection(record)}
         if job["kind"] == JOB_STATE:
             message = self.repo.get_message(int(job["payload"]["message_id"]))
             if not message or not consolidation_candidate(message["role"], message["content"], message["origin"]):
@@ -1353,7 +1386,10 @@ class MemoryService:
                 raise ValueError("模型调用缺少有效任务领取凭据")
             if event.get("status") == "started" and not self._running_job(job_id, job["kind"], expected_attempt):
                 raise ValueError("模型调用所属任务租约已失效")
-            result = self.model_costs.record(job, expected_attempt, event, self.settings.job_max_model_calls)
+            result = self.model_costs.record(job, expected_attempt, event, self.settings.job_max_model_calls,
+                                            daily_limits=True)
+            if result["status"] == "deferred":
+                self.defer_job(job_id, result["retry_at"], expected_attempt=expected_attempt)
             if result["status"] == "budget_exhausted":
                 self.repo.update_job_payload(job["id"], {**job["payload"], "terminal_reason": "model_call_budget"})
                 self.repo.conn.execute("UPDATE jobs SET status='failed',lease_until=NULL,updated_at=?, "
@@ -1361,6 +1397,18 @@ class MemoryService:
         if result["status"] == "budget_exhausted":
             raise ValueError("model call budget exhausted")
         return result
+
+    def defer_job(self, job_id, available_at, expected_attempt):
+        """Budget deferral is scheduling, not a generation failure."""
+        with self.repo.transaction():
+            job = self.repo.get_job(int(job_id))
+            if not job or not self._running_job(job_id, job["kind"], expected_attempt):
+                return {"status": "ignored"}
+            until = max(self.clock() + 1, min(float(available_at), self.clock() + 86401))
+            self.repo.conn.execute("""UPDATE jobs SET status='pending',lease_until=NULL,available_at=?,
+                updated_at=?,last_error='background daily budget deferred' WHERE id=?""",
+                (until, self.clock(), job_id))
+        return {"status": "deferred", "retry_at": until}
 
     @staticmethod
     def _clamp_importance(value: Any) -> float:
@@ -1470,6 +1518,13 @@ class MemoryService:
             "backfill_cursor": self.repo.conn.execute("SELECT value FROM meta WHERE key='diary_backfill_cursor'").fetchone()[0],
         }
         stats["model_costs"] = self.model_costs.stats()
+        from common.model_usage import usage_report
+        try:
+            import os
+            stats["model_usage_24h"] = usage_report(
+                os.environ.get("BINES_MODEL_USAGE_PATH") or self.settings.data_dir / "model_usage.db")
+        except (OSError, sqlite3.Error):
+            stats["model_usage_24h"] = None
         stats["association_decisions"] = self.repo.conn.execute(
             "SELECT COUNT(*) FROM association_decisions").fetchone()[0]
         stats["unresolved_associations"] = self.repo.conn.execute(

@@ -154,7 +154,8 @@ class MemoryMergeIntegration(unittest.TestCase):
         result = self.memory.complete_summary(claimed["job"]["id"], "包含撤回内容", [], [], 5)
         self.assertEqual(result["status"], "ignored")
         with tool_context(contexts[-1]):
-            self.assertIn("[消息已撤回]", str(self.memory.build_context({})["working"]))
+            working = self.memory.build_context({})["working"]
+            self.assertEqual([m["content"] for m in working], ["消息2", "消息3", "消息4"])
 
     def test_legacy_state_and_memories_import_once(self):
         self.store.update_state(LOCAL_IDENTITY, {"important_thing": "旧约定"})

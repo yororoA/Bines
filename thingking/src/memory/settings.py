@@ -27,6 +27,7 @@ class MemorySettings:
     owner_qq_ids: FrozenSet[str] = field(default_factory=frozenset)
     owner_name: str = "管理员"
     working_window: int = 30
+    working_segment_extra: int = 10
     summarize_trigger: int = 40
     summarize_chunk: int = 30
     summarize_idle_seconds: int = 1800
@@ -91,6 +92,7 @@ def load_settings() -> MemorySettings:
         data_dir=data_dir,
         owner_qq_ids=_owner_qq_ids_from_env(),
         owner_name=os.environ.get("BINES_OWNER_NAME", "管理员"),
+        working_segment_extra=max(0, min(30, int(os.environ.get("BINES_MEMORY_HISTORY_SEGMENT_EXTRA", "10")))),
         job_max_lease_recoveries=max(0, min(20, int(os.environ.get("BINES_MEMORY_MAX_LEASE_RECOVERIES", "3")))),
         job_max_model_calls=max(1, min(1000, int(os.environ.get("BINES_MEMORY_MAX_MODEL_CALLS", "32")))),
         job_recovery_cycles=max(0, min(4, int(os.environ.get("BINES_MEMORY_RECOVERY_CYCLES", "2")))),

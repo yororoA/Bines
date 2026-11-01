@@ -37,3 +37,39 @@ def normalize(record):
                                     "empty", "completed", "sent", "interrupted"}:
         raise ValueError("未知的经历状态")
     return result
+
+
+def summary_projection(record):
+    """Select autobiographical evidence; retain the full receipt in experiences.
+
+    An allowlist at runtime-envelope boundaries prevents diagnostics, recalled
+    citation inventories and old candidate snapshots from becoming new memories.
+    Tool result bodies remain evidence, including unknown/new tool fields.
+    """
+    def excerpt(value, limit):
+        raw = text(value)
+        if len(raw) <= limit:
+            return value
+        return raw[:limit * 2 // 3] + "\n[节选；完整内容见原始回执]\n" + raw[-limit // 3:]
+
+    projected = {key: record[key] for key in (
+        "category", "action", "skill", "status", "autonomous", "started_at", "finished_at",
+        "duration_seconds", "turn_id", "source_message_refs", "fact_corrections",
+        "memory_corrections", "correction_results",
+    ) if key in record}
+    projected["args"] = excerpt(record.get("args") or {}, 1800)
+    projected["result"] = excerpt(record.get("result") or "", 9000)
+    candidate = record.get("candidate") or {}
+    projected["intent"] = {key: candidate[key] for key in ("topic", "intent", "reason") if key in candidate}
+    activity = record.get("activity") or {}
+    projected["activity"] = {key: activity[key] for key in (
+        "id", "sequence", "mode", "intent", "note", "topic", "reason", "decision_source", "decision",
+    ) if key in activity}
+    # Observations have their own raw receipts. A compact checkpoint still keeps
+    # useful observations when older producers did not journal individual tools.
+    if activity.get("observations"):
+        projected["activity"]["observations"] = [
+            {key: excerpt(item[key], 1600) for key in ("action", "status", "result") if key in item}
+            for item in activity["observations"][-4:] if isinstance(item, dict)
+        ]
+    return projected

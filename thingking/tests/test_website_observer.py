@@ -346,7 +346,12 @@ class PerceptionTests(unittest.TestCase):
         requests = model.client.chat.completions.create.call_args_list
         self.assertIn("正在展示海鸟", str(requests[0].kwargs["messages"]))
         self.assertIn("新的视频", str(requests[1].kwargs["messages"]))
-        self.assertNotIn("正在展示海鸟", str(requests[1].kwargs["messages"]))
+        initial = requests[0].kwargs["messages"]
+        continuation = requests[1].kwargs["messages"]
+        self.assertEqual(continuation[:len(initial)], initial)
+        observations = [m for m in continuation if "<website_observations>\n" in str(m.get("content"))]
+        self.assertIn("新的视频", observations[-1]["content"])
+        self.assertIn("以最新采样为准", observations[-1]["content"])
         self.assertIn("打开成功回执", str(requests[1].kwargs["messages"]))
 
     def test_local_text_protocol_receives_automatic_observation(self):

@@ -16,6 +16,7 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 from common.memory_journal import outcome_status, tool_failure
+from common.model_usage import measured_request
 
 try:
     import pyautogui
@@ -1466,7 +1467,7 @@ def _find_most_similar_playlist_name(target_name, playlist_names):
 如果目标名称是"完全不相关的名称"，列表中没有任何相似的，则返回"None"。
 """
         
-        response = get_deepseek_client().chat.completions.create(
+        response = measured_request(get_deepseek_client().chat.completions.create,
             model=DEEPSEEK_MODEL,
             messages=[
                 {

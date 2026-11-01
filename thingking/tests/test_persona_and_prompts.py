@@ -183,11 +183,13 @@ class PromptBuilderTest(unittest.TestCase):
         weights = collapse.call_args.args[0]
         self.assertAlmostEqual(weights["亲近"], 0.3375)
         self.assertAlmostEqual(weights["非常亲密"], 0.6625)
-        self.assertIn("与当前对话者的关系：亲近", messages[0]["content"])
+        dynamic = "\n".join(m["content"] for m in messages[1:])
+        self.assertIn("与当前对话者的关系：亲近", dynamic)
+        self.assertNotIn("与当前对话者的关系", messages[0]["content"])
         self.assertNotIn("本轮关系口吻：", messages[0]["content"])
         self.assertIn("本轮关系口吻：亲近", guard)
         self.assertIn("本轮关系口吻：亲近", messages[-1]["content"])
-        self.assertIn("亲近 33.75%", messages[0]["content"])
+        self.assertIn("亲近 33.75%", dynamic)
         self.assertEqual(context["state"]["relationship_turn_level"], "亲近")
         self.assertEqual(stored_state["relationship_level"], "非常亲密")
         self.assertEqual(self.fx.service.get_state(OWNER_SCOPE)["data"], stored_state)
@@ -258,7 +260,7 @@ class PromptBuilderTest(unittest.TestCase):
     def test_empty_context_falls_back_to_isolated_scene(self):
         env = qq_private_env(OWNER_QQ)
         messages = prompt_builder.build_conversation_messages(prompt_builder.empty_context(env))
-        self.assertIn("正在私聊你", messages[0]["content"])
+        self.assertIn("正在私聊你", "\n".join(m["content"] for m in messages[1:]))
 
     def test_normal_recall_uses_summary_and_original_words_are_opt_in(self):
         context = {

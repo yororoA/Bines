@@ -108,7 +108,8 @@ class RequestBudgetCompatibilityTests(unittest.TestCase):
             self.assertEqual(len(traces), 3)
             self.assertTrue(all(t["count_is_upper_bound"] for t in traces))
             self.assertTrue(all(t["hard_input_limit"] is None and not t["hard_window_exceeded"] for t in traces))
-            self.assertTrue(all(t["history_removed"] > 0 for t in traces))
+            self.assertGreater(traces[0]["history_removed"], 0)
+            # Subsequent requests extend the bounded first request.
             if owner:
                 self.assertTrue(all(t["soft_target_exceeded"] and t["over_budget"] for t in traces))
             for trace in traces:

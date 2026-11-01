@@ -30,7 +30,7 @@ def clock_message(timestamp=None):
         "role": "system",
         "content": (
             f"{CLOCK_MARKER}\n{format_time(timestamp)}\n"
-            "这是本次模型请求时的真实时钟，今天、昨天、明天及早晚均以这个时区和日期为准。"
+            "这是系统采样时的真实时钟；同轮有多次采样时，以最后一条为准。今天、昨天、明天及早晚均以这个时区和日期为准。"
             "历史消息、日记、网页日期、旧工具回执和状态中的 current_time 都只代表当时，不能作为现在。"
             "无需猜测当前时间；需要确认精确时间或经过较长操作后再报时，调用 get_time 刷新。"
             "这个时区不代表所有 QQ 对话者的所在地，未明确时不要推断对方的当地时间。"
@@ -39,10 +39,12 @@ def clock_message(timestamp=None):
 
 
 def with_current_time(messages, timestamp=None):
-    """Refresh the clock without altering dialogue, tool calls or reasoning."""
-    result = [dict(message) for message in messages
-              if not (message.get("role") == "system"
-                      and str(message.get("content") or "").startswith(CLOCK_MARKER))]
-    # Keep the fresh user boundary and tool results in their original order.
-    result.insert(0, clock_message(timestamp))
+    """Append a trusted clock sample; never rewrite an already-sent prefix."""
+    result = [dict(message) for message in messages]
+    sample = clock_message(timestamp)
+    previous = next((message for message in reversed(result)
+                     if message.get("role") == "system"
+                     and str(message.get("content") or "").startswith(CLOCK_MARKER)), None)
+    if previous != sample:
+        result.append(sample)
     return result

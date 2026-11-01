@@ -276,11 +276,15 @@ class Integration(unittest.TestCase):
                 class Model:
                     def run_skill_protocol(inner, conversation, runner, **kwargs):
                         self.assertEqual(conversation[-1]["role"], "user")
-                        guard = conversation[-2]["content"]
+                        guards = [m["content"] for m in conversation
+                                  if str(m.get("content", "")).startswith("--- 本轮角色口吻")]
+                        self.assertEqual(len(guards), 1)
+                        guard = guards[0]
                         self.assertIn("QQ 回复格式", guard)
                         if expected:
                             self.assertIn(f"本轮关系口吻：{expected}", guard)
-                            self.assertIn(f"与当前对话者的关系：{expected}", conversation[0]["content"])
+                            self.assertIn(f"与当前对话者的关系：{expected}", str(conversation))
+                            self.assertNotIn("与当前对话者的关系：", conversation[0]["content"])
                         else:
                             self.assertNotIn("本轮关系口吻：非常亲密", guard)
                         return "谢谢呀", [], []
@@ -516,17 +520,19 @@ class Integration(unittest.TestCase):
         self.assertEqual(requests[0]["temperature"], REPLY_TEMPERATURE)
         self.assertEqual(requests[1]["temperature"], REPLY_TEMPERATURE)
         self.assertNotIn("[[SKILL_CALL]]", requests[0]["messages"][0]["content"])
-        self.assertTrue(requests[0]["messages"][-1]["content"].startswith("--- 本轮角色口吻"))
+        initial = requests[0]["messages"]
+        voice = next(m for m in initial if m.get("content", "").startswith("--- 本轮角色口吻"))
         continuation = requests[1]["messages"]
-        self.assertTrue(continuation[-1]["content"].startswith("--- 本轮角色口吻"))
-        self.assertEqual(continuation[-1], requests[0]["messages"][-1])
+        self.assertEqual(continuation[:len(initial)], initial)
         for request in requests:
-            self.assertEqual(sum(message["content"] == continuation[-1]["content"]
+            self.assertEqual(sum(message["content"] == voice["content"]
                                  for message in request["messages"]), 1)
-        self.assertEqual(continuation[-5]["reasoning_content"], "先按不同用途组合消息")
-        self.assertEqual([message["tool_call_id"] for message in continuation[-4:-1]],
+        assistant = next(m for m in continuation if m.get("tool_calls"))
+        self.assertEqual(assistant["reasoning_content"], "先按不同用途组合消息")
+        receipts = [m for m in continuation if m.get("role") == "tool"]
+        self.assertEqual([message["tool_call_id"] for message in receipts],
                          ["native-0", "native-1", "native-2"])
-        for message in continuation[-4:-1]:
+        for message in receipts:
             self.assertEqual(json.loads(message["content"])["status"], "ok")
         self.assertNotIn("另一群的通知", str(self.store.context(self.store.identity(original))))
         self.assertIn("另一群的通知", str(self.store.context(Identity("99", "1", "20", owner=True))))

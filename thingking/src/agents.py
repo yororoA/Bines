@@ -9,6 +9,7 @@ from config import DEEPSEEK_MODEL
 from common.deepseek_client import get_deepseek_client
 from common.clock import with_current_time
 from common.website_perception import with_website_observations
+from common.model_usage import measured_request
 from thinking_model_helper import ThinkingModelHelper
 from skill_runner import SkillRunner
 
@@ -69,14 +70,16 @@ class MainAgent:
                                              response_format=request.get("response_format"),
                                              max_output_tokens=request.get("max_tokens", 0))
         payload["messages"] = request["messages"]
-        response = self.client.chat.completions.create(**request, stream=stream)
+        response = measured_request(self.client.chat.completions.create, **request, stream=stream)
         if not stream and getattr(response, "choices", None):
             from thinking_model_helper import _confirm_memory_request
             _confirm_memory_request(request["messages"])
         return response
 
     def _ensure_system_prompt(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [{"role": "system", "content": self.get_system_prompt()}] + _clean_legacy_messages(messages)
+        rules = {"role": "system", "content": self.get_system_prompt()}
+        cleaned = _clean_legacy_messages(messages)
+        return cleaned if cleaned and cleaned[0] == rules else [rules, *cleaned]
 
     def run_one_turn_streaming_text_only(self, messages: List[Dict], interrupt_check=None):
         holder: Dict[str, Any] = {}
