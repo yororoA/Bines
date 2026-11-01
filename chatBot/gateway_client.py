@@ -1,6 +1,7 @@
 """Skills and MCP share the gateway, never another OneBot socket."""
 import json
 import uuid
+from http.client import IncompleteRead
 from urllib.request import Request, build_opener, ProxyHandler
 from urllib.error import HTTPError, URLError
 from chatBot.config import GATEWAY_URL, gateway_token
@@ -28,8 +29,9 @@ class GatewayClient:
             with exc:
                 error = json.load(exc).get("error", "gateway error")
             raise RuntimeError(error) from None
-        except (URLError, TimeoutError):
-            # An HTTP timeout after dispatch can also be a successful QQ write.
+        except (URLError, TimeoutError, ConnectionError, IncompleteRead):
+            # A timeout, reset/RemoteDisconnected, or truncated acknowledgement
+            # after dispatch can also be a successful QQ write. Never replay it.
             return {"status": "uncertain", "msg": "网关断开或超时；写操作不能自动重发"}
 
     def raw_api(self, action, params=None, timeout=30, operation_id=None):

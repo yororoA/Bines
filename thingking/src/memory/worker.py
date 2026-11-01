@@ -9,8 +9,9 @@ import time
 from common.model_usage import BackgroundBudgetDeferred, capture_model_usage
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.error import HTTPError, URLError
 
-from .client import MemoryClient
+from .client import MemoryClient, MemoryUnavailable
 from .models import OWNER_SCOPE, ROLE_ASSISTANT, ROLE_OBSERVED, ZONE
 
 logger = logging.getLogger("bines.memory.worker")
@@ -192,6 +193,9 @@ class MemoryWorker:
         self._thread: Optional[threading.Thread] = None
         self.association_concurrency = max(1, min(8, int(association_concurrency)))
         self._threads: List[threading.Thread] = []
+        self._transport_log_lock = threading.Lock()
+        self._transport_last_warning = float("-inf")
+        self._transport_suppressed = 0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -216,14 +220,48 @@ class MemoryWorker:
         self._stop.set()
 
     def _loop(self, kinds=None) -> None:
+        failures = 0
         while not self._stop.is_set():
             try:
                 worked = self.run_once(kinds)
-            except Exception:
-                logger.exception("memory worker iteration failed")
-                worked = False
+            except Exception as exc:
+                if self._stop.is_set():
+                    break
+                failures = min(failures + 1, 6)
+                # Error recovery is independent of a fast/zero idle poll setting.
+                # Event.wait keeps the bounded backoff interruptible on shutdown.
+                delay = min(30.0, max(1.0, self.idle_seconds) * 2 ** (failures - 1))
+                if self._transport_error(exc):
+                    self._warn_transport(exc, delay)
+                else:
+                    logger.exception("memory worker iteration failed; retry in %.1fs", delay)
+                self._stop.wait(delay)
+                continue
+            failures = 0
             if not worked:
                 self._stop.wait(self.idle_seconds)
+
+    @staticmethod
+    def _transport_error(exc):
+        # HTTP error responses still carry application failures; do not hide
+        # their traceback as an ordinary lost connection.
+        return (not isinstance(exc, HTTPError)
+                and isinstance(exc, (MemoryUnavailable, ConnectionError, TimeoutError, URLError)))
+
+    def _warn_transport(self, exc, delay):
+        # All five default lanes can lose the same restarting gateway together.
+        # Emit one concise warning per window, without URLs or response content.
+        now = time.monotonic()
+        with self._transport_log_lock:
+            if now - self._transport_last_warning < 30.0:
+                self._transport_suppressed += 1
+                return
+            suppressed = self._transport_suppressed
+            self._transport_suppressed = 0
+            self._transport_last_warning = now
+        logger.warning("memory worker 记忆服务连接暂时不可用（%s）；%.1f 秒后重新领取任务；"
+                       "已领取任务保留租约，合并重复告警=%d",
+                       type(exc).__name__, delay, suppressed)
 
     def run_once(self, kinds=None) -> bool:
         if kinds is None and self.state_complete_text:
@@ -274,6 +312,11 @@ class MemoryWorker:
                     self.client.defer_job(**params)
             return False
         except Exception as exc:
+            if self._transport_error(exc):
+                # A completion/deferral may already have committed. Do not
+                # resend it or turn an unknown outcome into a failed job; let
+                # the server's fenced lease recovery determine what remains.
+                raise
             logger.warning("memory job %s (%s) failed: %s", job["id"], job["kind"], exc)
             self.client.fail_job(job["id"], f"{type(exc).__name__}: {exc}", **self._attempt(job))
             for member in (materials.get("batch_jobs") or [])[1:]:
