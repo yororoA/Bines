@@ -64,6 +64,9 @@ class FakeAPI:
 class Integration(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        usage_env = patch.dict(os.environ, {"BINES_MODEL_USAGE_PATH": str(Path(self.temp.name) / "model_usage.db")})
+        usage_env.start()
+        self.addCleanup(usage_env.stop)
         self.store = MemoryStore(Path(self.temp.name) / "memory.db", owners={"1"})
         self.api = FakeAPI()
         self.service = CapabilityService(self.api, self.store)

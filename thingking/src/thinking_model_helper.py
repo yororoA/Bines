@@ -58,7 +58,7 @@ class ThinkingModelHelper:
     def complete_text(self, messages: List[Dict[str, Any]], *, temperature=0.4, max_tokens=2048,
                       response_format: Dict[str, str] | None = None, retry_tokens: int | None = None,
                       thinking: str | None = None, timeout: float | None = None,
-                      max_retries: int | None = None, _on_request=None) -> str:
+                      max_retries: int | None = None, _on_request=None, _before_request=None) -> str:
         # Thinking and final text share the output budget. Retry the original
         # request once with more room; never use reasoning or truncated text.
         client = self.client
@@ -68,6 +68,8 @@ class ThinkingModelHelper:
         retry_budget = _retry_budget(max_tokens, retry_tokens)
         for attempt in range(2):
             request_messages = bound_request(messages, response_format=response_format, max_output_tokens=max_tokens)
+            if _before_request is not None:
+                _before_request()
             response = measured_request(client.chat.completions.create,
                 model=self.model,
                 messages=request_messages,
@@ -134,7 +136,8 @@ class ThinkingModelHelper:
             submitted = []
             final_text = self.complete_text(conversation,
                                             temperature=temperature, max_tokens=max_tokens,
-                                            _on_request=lambda sent: submitted.append(sent))
+                                            _on_request=lambda sent: submitted.append(sent),
+                                            _before_request=getattr(skill_runner, "before_model_request", None))
             if submitted:
                 conversation = submitted[-1]
             try:
@@ -194,6 +197,9 @@ class ThinkingModelHelper:
                 request_messages = [m for i, m in enumerate(request_messages)
                                     if not (m.get("role") == "system" and isinstance(m.get("content"), str)
                                             and m["content"] in voices and voices[m["content"]] != i)]
+                before_request = getattr(skill_runner, "before_model_request", None)
+                if before_request is not None:
+                    before_request()
                 response = measured_request(self.client.chat.completions.create,
                     model=self.model, messages=request_messages, tools=tools or None,
                     temperature=temperature, max_tokens=budget, stream=False,

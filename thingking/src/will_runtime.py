@@ -68,7 +68,7 @@ def desktop_idle_seconds():
 
 
 class WillSkillRunner:
-    """Delegate to the installed runner, checking cancellation before every actual action."""
+    """Guard an activity's model requests and actual actions at quantum boundaries."""
     def __init__(self, runner, candidate, check, *, desktop=False, ordinary=False):
         self.runner, self.candidate, self.check = runner, candidate, check
         self.desktop = desktop
@@ -87,6 +87,24 @@ class WillSkillRunner:
         if self.candidate.get("planning_only"):
             return [tool for tool in tools if tool.get("function", {}).get("name") in PLANNING_ACTIONS]
         return tools
+
+    def before_model_request(self):
+        """Yield before a new request; this cannot interrupt a request in flight."""
+        from tools.context import CURRENT_CONTEXT
+        context = CURRENT_CONTEXT.get()
+        if context.activity.get("mode") in {"continue", "finish", "pause", "review"}:
+            raise ActivityYield()
+        # Cancellation takes precedence over scheduling another activity quantum.
+        reason = self.check()
+        if reason:
+            raise RuntimeError(f"自主行动已取消：{reason}")
+        # Unlike execute(), no successful action is required: malformed model
+        # arguments and refused tools must not bypass the batch's time boundary.
+        if time.monotonic() - self.started >= self.config.quantum_seconds:
+            context.activity.update(mode="review", note="执行权已让出，下一轮由你自主选择方向",
+                                    delay_seconds=context.activity.get("delay_seconds", 2),
+                                    decision_source="runtime")
+            raise ActivityYield()
 
     def execute(self, command, **kwargs):
         from tools.context import CURRENT_CONTEXT
