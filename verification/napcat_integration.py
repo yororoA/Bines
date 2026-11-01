@@ -1198,13 +1198,14 @@ class DockerLifecycle(unittest.TestCase):
         with patch.object(docker, "run", return_value=ok) as run, \
                 patch.object(docker, "cleanup_containers"), \
                 patch.object(docker, "cleanup_images"), \
-                patch.object(docker, "cleanup_build_cache"):
+                patch.object(docker, "cleanup_build_cache") as cleanup_cache:
             docker.down(previously_running={"napcat"})
             self.assertEqual([call.args[:2] for call in run.call_args_list], [("full", "stop"), ("full", "rm")])
             for call in run.call_args_list:
                 self.assertNotIn("napcat", call.args)
                 self.assertIn("chatbot", call.args)
                 self.assertIn("memory-server", call.args)
+            cleanup_cache.assert_called_once_with(prune=False)
 
     def test_cleanup_is_scoped_to_bines_and_keeps_tagged_images_and_volumes(self):
         import docker_launcher as docker
@@ -1217,10 +1218,12 @@ class DockerLifecycle(unittest.TestCase):
             calls = [call.args for call in command.call_args_list]
             self.assertIn(("container", "prune", "--force", "--filter", "label=com.docker.compose.project=bines"), calls)
             self.assertIn(("image", "prune", "--force", "--filter", "label=com.docker.compose.project=bines"), calls)
-            self.assertIn(("buildx", "rm", "--force", "bines"), calls)
+            self.assertIn(("buildx", "prune", "--builder", "bines", "--force", "--max-used-space", "4GB"), calls)
+            self.assertIn(("buildx", "stop", "bines"), calls)
+            self.assertFalse(any(args[:2] == ("buildx", "rm") for args in calls))
             self.assertFalse(any("volume" in args or "system" in args for args in calls))
 
-    def test_failed_build_releases_its_cache(self):
+    def test_failed_build_maintains_its_private_cache(self):
         import docker_launcher as docker
         from unittest.mock import patch
         failed = subprocess.CompletedProcess([], 1, "", "构建失败")

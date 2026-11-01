@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Dict, List, Set
@@ -250,6 +251,7 @@ _SHARED_SOURCES = (
     "*.py", "common/**/*.py", "tools/**/*.py",
     "thingking/*.py", "thingking/src/**/*.py", "thingking/scripts/*.py", "thingking/persona/*.yaml",
     "skills/**/*.md", "server/skill_actions.json", ".dockerignore",
+    "deploy/docker/install_apt.py",
 )
 IMAGE_SOURCES = {
     "bines-launcher:local": _SHARED_SOURCES + (
@@ -297,6 +299,7 @@ def source_hashes(env=None) -> Dict[str, str]:
         ("BINES_UID", str(os.getuid() if hasattr(os, "getuid") else 1000)),
         ("BINES_GID", str(os.getgid() if hasattr(os, "getgid") else 1000)),
         ("BINES_PYTHON_IMAGE", "docker.m.daocloud.io/library/python:3.12-slim"),
+        ("BINES_APT_MIRROR", "https://mirrors.tuna.tsinghua.edu.cn"),
     ):
         common.update((key + "=" + env.get(key, default)).encode() + b"\0")
     hashes = {}
@@ -374,17 +377,48 @@ def ensure_builder() -> None:
         raise DockerError("名为 bines 的构建器不是独立构建器，无法安全清理其缓存")
 
 
-def cleanup_build_cache() -> None:
+def _cleanup_preserving_failure(cleanup, failure) -> None:
+    """Report secondary maintenance errors without replacing a failed build."""
+    try:
+        cleanup()
+    except Exception as exc:
+        if failure is None:
+            raise
+        note = "附加构建清理失败（保留原始错误）：" + _safe_output(str(exc))
+        if isinstance(failure, DockerError):
+            failure.details += "\n" + note
+        try:
+            print(note, file=sys.stderr, flush=True)
+        except OSError:
+            pass  # A closed diagnostic stream must not replace the build error.
+
+
+def cleanup_build_cache(*, prune=True) -> None:
     driver = _builder_driver()
     if driver is None:
         return
     if driver != "docker-container":
         raise DockerError("跳过共享构建器 bines 的缓存清理")
-    # 删除专用构建器及其状态卷，已停止的构建器也能释放；不保留空缓存卷。
-    _check_result(
-        _docker("buildx", "rm", "--force", BUILDER_NAME, timeout=180),
-        "释放 Bines 构建缓存失败",
-    )
+    # Removing the builder discarded unchanged apt/pip layers on every run.
+    # Keep a bounded private cache; stopping the builder releases its process.
+    # Shutdown only stops it, so it need not boot just to prune the same cache.
+    failure = None
+    try:
+        if prune:
+            result = _docker("buildx", "prune", "--builder", BUILDER_NAME, "--force",
+                             "--max-used-space", "4GB", timeout=180)
+            if result.returncode and "unknown flag: --max-used-space" in (
+                    (result.stderr or "") + "\n" + (result.stdout or "")):
+                # Older Buildx releases use --keep-storage for this target.
+                result = _docker("buildx", "prune", "--builder", BUILDER_NAME, "--force",
+                                 "--keep-storage", "4GB", timeout=180)
+            _check_result(result, "回收 Bines 构建缓存失败")
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        _cleanup_preserving_failure(lambda: _check_result(
+            _docker("buildx", "stop", BUILDER_NAME, timeout=60), "停止 Bines 构建器失败"), failure)
 
 
 def cleanup_containers() -> None:
@@ -408,10 +442,14 @@ def up(profile: str) -> None:
     if stale:
         print("源码有更新，正在构建：" + ", ".join(stale), flush=True)
         ensure_builder()
+        failure = None
         try:
             _check_result(run_build(profile, *stale), "Docker 构建失败")
+        except BaseException as exc:
+            failure = exc
+            raise
         finally:
-            cleanup_build_cache()
+            _cleanup_preserving_failure(cleanup_build_cache, failure)
     _check_result(run(profile, "up", "-d", "--no-build"), "Docker 启动失败")
     cleanup_images()
 
@@ -439,7 +477,7 @@ def _down(previously_running) -> None:
             _check_result(run("full", "rm", "--force", *services), "Docker 容器清理失败")
     cleanup_containers()
     cleanup_images()
-    cleanup_build_cache()
+    cleanup_build_cache(prune=False)
 
 
 def _images_ready(profile: str) -> bool:

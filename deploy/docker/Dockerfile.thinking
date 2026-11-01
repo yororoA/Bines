@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE}
 ARG BINES_UID=1000
 ARG BINES_GID=1000
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
 
 ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -12,16 +12,14 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
-RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/* \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+COPY deploy/docker/install_apt.py /usr/local/bin/bines-install-apt.py
+RUN python /usr/local/bin/bines-install-apt.py --mirror "${APT_MIRROR}" \
         ca-certificates \
         tzdata \
         libglib2.0-0 \
         libgomp1 \
         libsndfile1 \
-        ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+        ffmpeg
 
 WORKDIR /app
 

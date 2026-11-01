@@ -139,7 +139,7 @@ def main():
     parser.add_argument("--external-napcat", action="store_true", help="连接现有 NapCat，不管理 Docker")
     parser.add_argument("--host", action="store_true", help="强制使用本机 venv，不启动 Docker 链路")
     parser.add_argument("--docker-down", action="store_true",
-                        help="停止并删除 Bines 容器，清理旧镜像与专用构建缓存，保留记忆和当前镜像")
+                        help="停止并删除 Bines 容器，清理旧镜像并停止构建器，保留记忆、当前镜像和构建缓存")
     options = parser.parse_args()
     os.environ["BINES_PROFILE"] = options.profile
     os.environ["_BINES_LAUNCH_PROFILE"] = options.profile
@@ -151,7 +151,7 @@ def main():
         try:
             docker_launcher.ensure_engine()
             docker_launcher.down()
-            print("Bines 容器、日志和可回收缓存已清理，记忆与当前镜像已保留。", flush=True)
+            print("Bines 容器与容器日志已清理，构建器已停止；记忆、当前镜像和构建缓存已保留。", flush=True)
             return 0
         except Exception as exc:
             print(f"Docker 清理失败：{exc}", file=sys.stderr, flush=True)

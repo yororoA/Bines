@@ -36,7 +36,7 @@ class BuildProgress:
             label = f"（{step.group(1)}）" if step else ""
             if "pip install" in command:
                 activity = "安装 Python 依赖"
-            elif "apt-get" in command:
+            elif "apt-get" in command or command.startswith("RUN python /usr/local/bin/bines-install-apt.py"):
                 activity = "安装系统依赖"
             elif command.startswith("COPY"):
                 activity = "复制源码与配置"

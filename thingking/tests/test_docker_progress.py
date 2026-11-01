@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import os
 from pathlib import Path
@@ -78,6 +78,98 @@ class DockerProgressTests(unittest.TestCase):
 
 
 class DockerRebuildTests(unittest.TestCase):
+    def test_shutdown_keeps_cache_and_does_not_boot_builder_for_pruning(self):
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(docker_launcher, "_builder_driver", return_value="docker-container"), patch.object(
+            docker_launcher, "_docker", return_value=ok,
+        ) as command:
+            docker_launcher.cleanup_build_cache(prune=False)
+        command.assert_called_once_with("buildx", "stop", "bines", timeout=60)
+
+    def test_older_buildx_keeps_bounded_cache_instead_of_removing_builder(self):
+        unsupported = subprocess.CompletedProcess([], 1, "", "unknown flag: --max-used-space")
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(docker_launcher, "_builder_driver", return_value="docker-container"), patch.object(
+            docker_launcher, "_docker", side_effect=[unsupported, ok, ok],
+        ) as command:
+            docker_launcher.cleanup_build_cache()
+        calls = [call.args for call in command.call_args_list]
+        self.assertIn(("buildx", "prune", "--builder", "bines", "--force", "--keep-storage", "4GB"), calls)
+        self.assertEqual(calls[-1], ("buildx", "stop", "bines"))
+        self.assertFalse(any("rm" in args for args in calls))
+
+    def test_failed_prune_still_stops_builder_without_unbounded_fallback(self):
+        failed = subprocess.CompletedProcess([], 1, "", "cache read failed")
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(docker_launcher, "_builder_driver", return_value="docker-container"), patch.object(
+            docker_launcher, "_docker", side_effect=[failed, ok],
+        ) as command:
+            with self.assertRaisesRegex(docker_launcher.DockerError, "cache read failed"):
+                docker_launcher.cleanup_build_cache()
+        self.assertEqual(command.call_count, 2)
+        self.assertEqual(command.call_args.args, ("buildx", "stop", "bines"))
+
+    def test_prune_failure_survives_a_second_failure_while_stopping(self):
+        for failure in (subprocess.CompletedProcess([], 1, "", "cache read failed"),
+                        subprocess.TimeoutExpired(["buildx", "prune"], 180)):
+            with self.subTest(failure=type(failure).__name__):
+                output = StringIO()
+                with patch.object(docker_launcher, "_builder_driver", return_value="docker-container"), patch.object(
+                    docker_launcher, "_docker", side_effect=[failure, OSError("stop failed token=fixture-private")],
+                ) as command, redirect_stderr(output):
+                    with self.assertRaises((docker_launcher.DockerError, subprocess.TimeoutExpired)) as raised:
+                        docker_launcher.cleanup_build_cache()
+                if isinstance(failure, BaseException):
+                    self.assertIs(raised.exception, failure)
+                else:
+                    self.assertIn("cache read failed", str(raised.exception))
+                    self.assertIn("stop failed", raised.exception.details)
+                    self.assertNotIn("fixture-private", raised.exception.details)
+                self.assertEqual(command.call_args.args, ("buildx", "stop", "bines"))
+                self.assertEqual(command.call_count, 2)
+                self.assertIn("stop failed", output.getvalue())
+                self.assertNotIn("fixture-private", output.getvalue())
+
+    def test_failed_build_or_interrupt_is_not_replaced_by_cache_cleanup_error(self):
+        cases = (None, subprocess.TimeoutExpired(["build"], 3600), KeyboardInterrupt())
+        for failure in cases:
+            with self.subTest(failure=type(failure).__name__):
+                failed_result = subprocess.CompletedProcess([], 1, "pip download failed", "")
+                output = StringIO()
+                with patch.object(docker_launcher, "_stale_services", return_value=["chatbot"]), patch.object(
+                    docker_launcher, "ensure_builder",
+                ), patch.object(docker_launcher, "run_build", return_value=failed_result, side_effect=failure), patch.object(
+                    docker_launcher, "cleanup_build_cache", side_effect=docker_launcher.DockerError("cache cleanup failed"),
+                ) as cleanup, patch.object(docker_launcher, "run") as start, redirect_stdout(StringIO()), redirect_stderr(output):
+                    with self.assertRaises(BaseException) as raised:
+                        docker_launcher.up("chatbot")
+                if failure is not None:
+                    self.assertIs(raised.exception, failure)
+                else:
+                    self.assertIsInstance(raised.exception, docker_launcher.DockerError)
+                    self.assertIn("pip download failed", str(raised.exception))
+                    self.assertIn("cache cleanup failed", raised.exception.details)
+                cleanup.assert_called_once_with()
+                start.assert_not_called()
+                self.assertIn("cache cleanup failed", output.getvalue())
+
+    def test_cleanup_failure_without_a_primary_error_remains_visible(self):
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        stopped = subprocess.CompletedProcess([], 1, "", "could not stop builder")
+        with patch.object(docker_launcher, "_builder_driver", return_value="docker-container"), patch.object(
+            docker_launcher, "_docker", side_effect=[ok, stopped],
+        ):
+            with self.assertRaisesRegex(docker_launcher.DockerError, "could not stop builder"):
+                docker_launcher.cleanup_build_cache()
+
+    def test_shared_builder_is_never_pruned_or_stopped(self):
+        with patch.object(docker_launcher, "_builder_driver", return_value="docker"), patch.object(
+            docker_launcher, "_docker",
+        ) as command:
+            with self.assertRaises(docker_launcher.DockerError):
+                docker_launcher.cleanup_build_cache()
+        command.assert_not_called()
+
     def test_browser_and_installer_changes_do_not_rebuild_images_but_memory_changes_do(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -101,6 +193,23 @@ class DockerRebuildTests(unittest.TestCase):
                 memory_change = docker_launcher.source_hashes({})
                 self.assertNotEqual(memory_change["chatbot"], skill_change["chatbot"])
                 self.assertNotEqual(memory_change["memory-server"], skill_change["memory-server"])
+
+    def test_apt_script_and_mirror_changes_invalidate_both_image_hashes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            script = root / "deploy/docker/install_apt.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# initial apt installer\n")
+            with patch.object(docker_launcher, "ROOT", root):
+                baseline = docker_launcher.source_hashes({})
+                self.assertEqual(baseline, docker_launcher.source_hashes({
+                    "BINES_APT_MIRROR": "https://mirrors.tuna.tsinghua.edu.cn"}))
+                script.write_text("# bounded apt retry update\n")
+                script_change = docker_launcher.source_hashes({})
+                mirror_change = docker_launcher.source_hashes({"BINES_APT_MIRROR": "https://apt.fixture.invalid"})
+                for service in docker_launcher.BUILD_SERVICES:
+                    self.assertNotEqual(baseline[service], script_change[service])
+                    self.assertNotEqual(script_change[service], mirror_change[service])
 
     def test_launcher_uses_streaming_build_and_keeps_existing_cleanup(self):
         result = subprocess.CompletedProcess([], 0, stdout="", stderr="")
