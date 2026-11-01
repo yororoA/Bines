@@ -90,13 +90,16 @@ def _run_docker(options):
         print("正在检查 Docker 引擎…", flush=True)
         docker_launcher.ensure_engine()
         already_running = docker_launcher.running_services("full")
+        print("QQ 登录/扫码状态：另开终端运行 python napcat.py logs。", flush=True)
+        print("python napcat.py webui 打开 NapCat 管理页；管理页不显示 QQ 登录二维码。", flush=True)
         print("正在启动 Docker 链路…", flush=True)
         docker_launcher.up(options.profile)
         docker_launcher.wait_ready(options.profile)
-        print("Docker 链路已就绪：" + ", ".join(docker_launcher.REQUIRED_SERVICES[options.profile]), flush=True)
+        print("Docker 服务已就绪：" + ", ".join(docker_launcher.REQUIRED_SERVICES[options.profile]), flush=True)
+        print("QQ 连接/扫码情况请查看 NapCat 日志，服务就绪不代表 QQ 已登录。", flush=True)
         if options.profile == "chatbot":
-            print("NapCat 二维码：python napcat.py logs", flush=True)
-            print("Ctrl+C 删除本次启动的容器和日志，保留记忆与当前镜像。", flush=True)
+            print("接下来跟随服务日志；NapCat 输出的登录二维码会显示在这里。", flush=True)
+            print("Ctrl+C 删除本次启动的容器及其容器日志，保留记忆、当前镜像和已保存的启动诊断。", flush=True)
             if already_running:
                 print("启动前已运行的服务将保留：" + ", ".join(sorted(already_running)), flush=True)
             try:
@@ -109,7 +112,8 @@ def _run_docker(options):
         print("启动已取消。", flush=True)
         return 130
     except Exception as exc:
-        print(f"Docker 启动失败：{exc}", file=sys.stderr, flush=True)
+        print(docker_launcher.startup_failure_report(options.profile, exc,
+                  inspect_services=already_running is not None), file=sys.stderr, flush=True)
         return 1
     finally:
         if already_running is not None:
@@ -117,7 +121,7 @@ def _run_docker(options):
             try:
                 docker_launcher.down(previously_running=already_running)
             except Exception as exc:
-                print(f"Docker 清理失败：{exc}", file=sys.stderr, flush=True)
+                print(docker_launcher.format_failure(exc, "Docker 清理失败"), file=sys.stderr, flush=True)
                 return 1
 
 

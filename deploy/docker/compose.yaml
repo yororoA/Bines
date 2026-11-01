@@ -98,7 +98,7 @@ services:
     networks:
       - bines
     healthcheck:
-      test: ["CMD", "python", "-m", "common.healthcheck", "gateway"]
+      test: ["CMD", "python", "-m", "common.healthcheck", "gateway-ready"]
       interval: 15s
       timeout: 5s
       retries: 20
@@ -131,7 +131,7 @@ services:
     networks:
       - bines
     healthcheck:
-      test: ["CMD", "python", "-m", "common.healthcheck", "qq-thinking"]
+      test: ["CMD", "python", "-m", "common.healthcheck", "qq-thinking-ready"]
       interval: 15s
       timeout: 10s
       retries: 3

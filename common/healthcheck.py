@@ -55,7 +55,7 @@ def check(component):
         return MemoryClient("127.0.0.1", ZMQ_PORTS["RAG_SERVER_REQREP"], timeout_ms=3000).ping()
     if component == "memory-worker":
         return _marker_healthy(component)
-    if component in {"gateway", "qq-thinking"}:
+    if component in {"gateway", "qq-thinking", "gateway-ready", "qq-thinking-ready"}:
         from chatBot.gateway_client import GatewayClient
         from urllib.request import Request
         client = GatewayClient()
@@ -63,12 +63,24 @@ def check(component):
             "Content-Type": "application/json", "Authorization": f"Bearer {client.token}"})
         with client.opener.open(request, timeout=4) as response:
             result = json.load(response).get("result")
-        if not isinstance(result, dict) or result.get("memory") is not True or result.get("connected") is not True:
+        if not isinstance(result, dict) or result.get("memory") is not True:
+            return False
+        readiness = component.endswith("-ready")
+        service = component.removesuffix("-ready")
+        # Compose readiness describes our own process dependencies. NapCat may
+        # legitimately be waiting for a user to scan a login QR code; keep that
+        # separate from the original business-health probes below.
+        if not readiness and result.get("connected") is not True:
             return False
         transport = result.get("transport", {})
-        if transport and transport.get("event_consumer_alive") is not True:
+        if not isinstance(transport, dict) or ((readiness or transport)
+                and transport.get("event_consumer_alive") is not True):
             return False
-        return component == "gateway" or result.get("queue", {}).get("workers_live", 0) > 0
+        if service == "gateway":
+            return True
+        queue = result.get("queue", {})
+        workers = queue.get("workers_live", 0) if isinstance(queue, dict) else 0
+        return type(workers) is int and workers > 0
     if component == "admin":
         from config import HTTP_PORTS
         from common.local_auth import admin_token
@@ -82,7 +94,8 @@ def check(component):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("component", choices=("gateway", "memory", "qq-thinking", "memory-worker", "admin"))
+    parser.add_argument("component", choices=("gateway", "gateway-ready", "memory", "qq-thinking",
+                                              "qq-thinking-ready", "memory-worker", "admin"))
     args = parser.parse_args()
     try:
         healthy = check(args.component)

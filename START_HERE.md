@@ -27,7 +27,7 @@ python bines.py --host
 python bines.py --host --profile chatbot
 ```
 
-`python bines.py --profile chatbot` 会启动 NapCat、Memory Server、ChatBot、QQ Thinking、Memory Worker，只有源码内容或构建参数变化时才构建镜像。Ctrl+C 删除本次启动的容器及其日志，清理 Bines 旧镜像和专用构建缓存，保留记忆、登录数据、模型和当前镜像。首次登录二维码在容器日志中：
+`python bines.py --profile chatbot` 会启动 NapCat、Memory Server、ChatBot、QQ Thinking、Memory Worker，只有源码内容或构建参数变化时才构建镜像。Ctrl+C 删除本次启动的容器及其日志，清理 Bines 旧镜像和专用构建缓存，保留记忆、登录数据、模型和当前镜像。启动失败时，会先将失败服务的状态、退出码、健康检查和筛选后的错误日志保存到 `logs/docker-startup-*.log`，再清理容器；诊断文件仅当前用户可读写，并过滤常见凭据与普通对话输出。扫码提示会在等待依赖前显示，首次登录二维码在容器日志中：
 
 ```bash
 docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs -f napcat
@@ -88,7 +88,7 @@ NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网
 
 管理页直接从本机打开后自动取得 24 小时会话；跨站页面和未鉴权 API 请求会被拒绝。远程管理需显式配置 `BINES_ADMIN_ALLOWED_HOSTS` 并携带 `Authorization: Bearer <BINES_ADMIN_TOKEN>`。未设置凭据时会在记忆数据目录生成 `admin.token` 与 `memory-rpc.token`，无需手工复制到前端。Memory RPC 默认只监听本机；跨机器连接必须给服务与客户端配置相同的 `BINES_MEMORY_RPC_TOKEN`，修改凭据后一起重启相关进程。
 
-Docker 健康检查会验证记忆 RPC、NapCat 连接、QQ worker 心跳、后台记忆线程和管理 API。`python -m common.healthcheck <组件>` 可单独诊断，组件名为 `gateway`、`memory`、`qq-thinking`、`memory-worker`、`admin`；worker 探针应在对应容器内执行。
+Docker 启动探针验证记忆 RPC、网关事件消费线程、QQ worker 心跳、后台记忆线程和管理 API。网关与 QQ Thinking 分别使用 `gateway-ready`、`qq-thinking-ready`，允许等待 NapCat 扫码登录；服务就绪不代表 QQ 已连接。`python -m common.healthcheck <组件>` 可单独诊断，`gateway`、`qq-thinking` 额外要求 NapCat 已连接，其余组件为 `memory`、`memory-worker`、`admin`；worker 探针应在对应容器内执行。
 
 停止时在管理页点击“停止所有服务”，再关闭管理器。日志和服务状态都在管理页查看。
 

@@ -9,9 +9,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import threading
+import time
 from typing import Dict, List, Set
 
 ROOT = Path(__file__).resolve().parent
@@ -30,7 +32,138 @@ HEALTH_REQUIRED = {"chatbot", "memory-server", "rag-web", "napcat", "qq-thinking
 
 
 class DockerError(RuntimeError):
-    pass
+    def __init__(self, message, *, details=""):
+        super().__init__(message)
+        self.details = details or message
+
+
+def _safe_output(value) -> str:
+    """Clean terminal controls and common credentials, without reading secrets."""
+    text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or "")
+    text = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", text)
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text).replace("\r", "\n")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"(?im)^(\s*(?:Authorization|Cookie|Set-Cookie)\s*:\s*).*$", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(https?://)[^/@\s]+:[^/@\s]+@", r"\1[REDACTED]@", text)
+    key = r"[\w.-]*(?:token|password|passwd|secret|api[_-]?key|access[_-]?key|authorization|cookie|signature)[\w.-]*"
+    value_pattern = r'''(?:\[REDACTED\]|"[^"\n]*"|'[^'\n]*'|[^\s,;}\]&]+)'''
+    text = re.sub(r'''(?i)(["']?''' + key + r'''["']?\s*[:=]\s*)''' + value_pattern,
+                  r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(--" + key + r"\s+)" + value_pattern, r"\1[REDACTED]", text)
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}", "[REDACTED]", text)
+    return "\n".join("[环境变量快照已省略]" if re.search(
+        r'''(?i)\b(?:env|environ|environment)["']?\s*[:=]\s*[\[{]''', line) or re.match(
+        r"^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=", line) else line for line in text.splitlines())
+
+
+def _error_excerpt(text):
+    lines = [line for line in text.splitlines() if line.strip()]
+    failures = [line for line in lines if re.search(
+        r"(?i)fail|error|fatal|exception|unhealthy|timed? ?out|denied|cannot|not found|失败|错误|超时", line)]
+    # Keep complete lines from both ends; never cut a container name or cause
+    # halfway through a word. The private diagnostic retains the full output.
+    return "\n".join(dict.fromkeys([*failures[:4], *failures[-20:], *lines[-8:]]))
+
+
+def format_failure(exc, label="Docker 启动失败"):
+    message = _safe_output(str(exc)).strip() or type(exc).__name__
+    return message if isinstance(exc, DockerError) or message.startswith(label) else f"{label}：{message}"
+
+
+def _json_rows(output):
+    try:
+        rows = json.loads(output)
+        return rows if isinstance(rows, list) else [rows]
+    except ValueError:
+        return [json.loads(line) for line in output.splitlines() if line.strip()]
+
+
+def _failure_log_lines(output):
+    """Only infrastructure failures, never ordinary service/chat log streams."""
+    selected = []
+    for raw in _safe_output(output).splitlines():
+        line = re.sub(r"^\S+\s+\|\s?", "", raw)
+        if re.search(r'''(?i)raw_message|\b(?:content|prompt|messages?|body|args|arguments|headers|payload|user_text)["']?\s*[:=]|'''
+                     r"收到.*消息|聊天|\[QQ(?:群|私聊|消息)|Received.*message", line):
+            continue
+        if (line.startswith("Traceback (most recent call last)") or re.match(r'^\s+File "[^"\n]+", line \d+', line)
+                or re.match(r"^\s*[\w.]+(?:Error|Exception):", line)
+                or re.match(r"^\s*(?:ERROR|CRITICAL|FATAL)(?:\s|:)", line)
+                or re.match(r"^\d{4}-\d\d-\d\d.*\b(?:ERROR|CRITICAL|FATAL)\b", line)
+                or re.match(r"^(?:memory|gateway|qq-thinking|memory-worker)[\w-]*: unhealthy\b", line)):
+            selected.append(line)
+    return list(dict.fromkeys(selected))[-40:]
+
+
+def _startup_diagnostics(profile):
+    result = run(profile, "ps", "--all", "--format", "json", timeout=15)
+    if result.returncode:
+        return "容器状态不可用：" + (_error_excerpt(_safe_output(result.stderr or result.stdout)) or f"退出码 {result.returncode}")
+    rows = _json_rows(result.stdout)
+    if not rows:
+        return "未找到当前项目容器，无法收集退出码、健康检查或服务日志（容器可能已被删除）。"
+    output, failed = [], []
+    for row in rows:
+        service = str(row.get("Service") or "")
+        if service not in {*REQUIRED_SERVICES[profile], "gateway-init"}:
+            continue
+        state, health = str(row.get("State") or "?"), str(row.get("Health") or "-")
+        output.append(f"{service}: state={state}, health={health}, exit={row.get('ExitCode', '?')}")
+        if health == "unhealthy" or state in {"dead", "restarting"} or (state == "exited" and str(row.get("ExitCode")) != "0"):
+            failed.append(row)
+    if not failed:
+        output.append("尚未发现明确失败的服务；未采集正常/等待中的服务日志。")
+    for row in failed:
+        service = row["Service"]
+        try:
+            name = str(row.get("ID") or row.get("Name") or "")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+                output.append(f"{service}: 容器标识缺失，无法读取退出状态与健康检查。")
+            else:
+                # State contains health results, not Config.Env or health command credentials.
+                result = _docker("inspect", "--format", "{{json .State}}", name, timeout=10)
+                if result.returncode:
+                    output.append(f"{service}: 容器状态已不可用（可能已被移除）。")
+                else:
+                    state = json.loads(result.stdout)
+                    output.append(f"{service}: exit={state.get('ExitCode', '?')}, oom_killed={state.get('OOMKilled', False)}, "
+                                  + "error=" + _safe_output(state.get("Error") or "-"))
+                    for entry in ((state.get("Health") or {}).get("Log") or [])[-3:]:
+                        detail = "\n".join(_failure_log_lines(entry.get("Output", "")))
+                        output.append(f"{service}: health_exit={entry.get('ExitCode', '?')}, "
+                                      f"time={entry.get('End') or entry.get('Start') or '?'}\n"
+                                      + (detail or "[健康输出无可安全展示的错误行]"))
+            logs = run(profile, "logs", "--tail", "80", "--no-color", service, timeout=10)
+            if logs.returncode:
+                output.append(f"{service}: 服务日志不可用（命令退出码 {logs.returncode}）。")
+                continue
+            lines = _failure_log_lines((logs.stdout or "") + "\n" + (logs.stderr or ""))
+            output.append(f"{service}: 最近 80 行日志中的错误/栈位置（普通输出已排除）\n"
+                          + ("\n".join(lines) or "[无可安全展示的错误行]"))
+        except Exception as exc:
+            output.append(f"{service}: 诊断不可用（{type(exc).__name__}），原始启动错误保留。")
+    return _safe_output("\n".join(output))
+
+
+def startup_failure_report(profile, exc, *, inspect_services=True):
+    """Persist safe diagnostics before the caller removes this startup's containers."""
+    summary = format_failure(exc)
+    try:
+        diagnostics = _startup_diagnostics(profile) if inspect_services else "尚未进入容器启动阶段，未读取服务日志。"
+    except Exception as diagnostic_error:
+        diagnostics = f"容器诊断不可用（{type(diagnostic_error).__name__}），原始错误保留。"
+    detail = _safe_output(getattr(exc, "details", str(exc)))
+    try:
+        directory = ROOT / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"docker-startup-{time.time_ns()}.log"
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as log:
+            log.write(summary + "\n\n完整命令错误输出（凭据已过滤）：\n" + detail + "\n\n" + diagnostics + "\n")
+        return summary + f"\n启动诊断（已过滤凭据与普通对话输出）：{path}\n" + diagnostics
+    except OSError as write_error:
+        return summary + f"\n诊断文件保存失败（{type(write_error).__name__}）。\n" + diagnostics
 
 
 def docker_executable() -> str | None:
@@ -194,8 +327,9 @@ def _docker(*args: str, timeout=120) -> subprocess.CompletedProcess:
 
 def _check_result(result, label):
     if result.returncode:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()[-8:]
-        raise DockerError(label + "：\n" + "\n".join(detail))
+        detail = "\n".join(_safe_output(value) for value in (result.stdout, result.stderr) if value)
+        summary = _error_excerpt(detail) or f"命令退出码 {result.returncode}，没有错误输出"
+        raise DockerError(label + "：\n" + summary, details=detail)
 
 
 def _stale_services() -> List[str]:

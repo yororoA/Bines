@@ -1226,7 +1226,7 @@ class DockerLifecycle(unittest.TestCase):
         failed = subprocess.CompletedProcess([], 1, "", "构建失败")
         with patch.object(docker, "_stale_services", return_value=["chatbot"]), \
                 patch.object(docker, "ensure_builder"), \
-                patch.object(docker, "run", return_value=failed), \
+                patch.object(docker, "run_build", return_value=failed), \
                 patch.object(docker, "cleanup_build_cache") as cleanup:
             with self.assertRaises(docker.DockerError):
                 docker.up("chatbot")
@@ -1244,6 +1244,7 @@ class DockerLifecycle(unittest.TestCase):
                     patch.object(docker, "running_services", return_value={"napcat"}), \
                     patch.object(docker, "up"), \
                     patch.object(docker, "wait_ready", side_effect=failure), \
+                    patch.object(docker, "startup_failure_report", side_effect=lambda profile, error, **_: docker.format_failure(error)), \
                     patch.object(docker, "down") as down:
                 self.assertEqual(start_modules._run_docker(SimpleNamespace(profile="chatbot")), code)
                 down.assert_called_once_with(previously_running={"napcat"})

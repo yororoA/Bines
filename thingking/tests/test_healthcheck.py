@@ -58,3 +58,32 @@ class BusinessProbeTest(unittest.TestCase):
         self.assertFalse(self.probe("qq-thinking", ready))
         ready["queue"]["workers_live"] = 1
         self.assertTrue(self.probe("qq-thinking", ready))
+
+    def test_login_wait_is_ready_but_not_business_healthy(self):
+        waiting = {"memory": True, "connected": False,
+                   "transport": {"event_consumer_alive": True}, "queue": {"workers_live": 1}}
+        for component in ("gateway", "qq-thinking"):
+            self.assertFalse(self.probe(component, waiting))
+            self.assertTrue(self.probe(component + "-ready", waiting))
+        self.assertIs(waiting["connected"], False)
+
+    def test_readiness_requires_live_local_dependencies(self):
+        waiting = {"memory": True, "connected": False, "transport": {"event_consumer_alive": True},
+                   "queue": {"workers_live": 1}}
+        for patch_result in ({"memory": False}, {"transport": {}}, {"transport": None},
+                             {"transport": {"event_consumer_alive": False}}):
+            for component in ("gateway-ready", "qq-thinking-ready"):
+                with self.subTest(component=component, result=patch_result):
+                    self.assertFalse(self.probe(component, {**waiting, **patch_result}))
+        for queue in ({}, {"workers_live": 0}, {"workers_live": "1"}, None):
+            self.assertTrue(self.probe("gateway-ready", {**waiting, "queue": queue}))
+            self.assertFalse(self.probe("qq-thinking-ready", {**waiting, "queue": queue}))
+
+    def test_compose_uses_readiness_without_changing_business_probe_names(self):
+        from pathlib import Path
+        import yaml
+        compose = yaml.safe_load((Path(__file__).resolve().parents[2] / "deploy/docker/compose.yaml").read_text())
+        self.assertEqual(compose["services"]["chatbot"]["healthcheck"]["test"][-1], "gateway-ready")
+        self.assertEqual(compose["services"]["qq-thinking"]["healthcheck"]["test"][-1], "qq-thinking-ready")
+        for service in ("qq-thinking", "memory-worker"):
+            self.assertEqual(compose["services"][service]["depends_on"]["chatbot"]["condition"], "service_healthy")
