@@ -15,8 +15,7 @@ from chatBot.gateway import GatewayServer
 from chatBot.memory_hub import MemoryHub
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+def _run(stop):
     # Docker named-volume initialization can lag one scheduling tick behind the
     # dependency; retry the writable check instead of crash-looping the gateway.
     deadline = time.monotonic() + 30
@@ -28,7 +27,8 @@ def main():
             if "unable to open database file" not in str(exc) or time.monotonic() >= deadline:
                 raise
             logging.warning("gateway.db 暂不可写，1 秒后重试：%s", exc)
-            time.sleep(1)
+            if stop.wait(1):
+                return
     client = NapCatClient()
     memory = MemoryHub(store)
     memory.start()
@@ -41,7 +41,7 @@ def main():
     mark_ready("ChatBot", {"port": server.server_port})
     logging.info("ChatBot gateway ready · port %s", server.server_port)
     try:
-        threading.Event().wait()
+        stop.wait()
     except KeyboardInterrupt:
         pass
     finally:
@@ -51,5 +51,11 @@ def main():
         memory.close()
 
 
+def main(*, force_exit=False):
+    from common.service_shutdown import run_service
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    return run_service(_run, name="ChatBot", force_exit=force_exit)
+
+
 if __name__ == "__main__":
-    main()
+    main(force_exit=True)

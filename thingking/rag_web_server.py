@@ -4,6 +4,7 @@ import sys
 import time
 
 from flask import Flask, Response, jsonify, request, send_from_directory
+from werkzeug.serving import WSGIRequestHandler, make_server
 
 THINKING_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(THINKING_DIR)
@@ -20,9 +21,6 @@ app = Flask(__name__, static_folder="rag_web_static", static_url_path="")
 app.config["JSON_AS_ASCII"] = False
 install_admin_guard(app, "memory", entrypoints=("/", "/constellation"))
 client = MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
-if not client.ping(timeout_ms=2000):
-    from chatBot.memory_hub import GatewayMemoryClient
-    client = GatewayMemoryClient()
 
 
 def _ok(result=None, **extra):
@@ -198,6 +196,33 @@ def export():
     )
 
 
-if __name__ == "__main__":
+class QuietHealthRequestHandler(WSGIRequestHandler):
+    def log_request(self, code="-", size="-"):
+        if self.command == "GET" and self.path == "/api/health" and str(code) == "200":
+            return
+        super().log_request(code, size)
+
+
+def _run(stop):
+    global client
+    if not client.ping(timeout_ms=2000):
+        from chatBot.memory_hub import GatewayMemoryClient
+        client = GatewayMemoryClient()
+    server = make_server(HTTP_HOST, HTTP_PORTS["RAG_MEMORY"], app, threaded=True,
+                         request_handler=QuietHealthRequestHandler)
+    server.timeout = 0.25
     print(f"记忆管理页面: http://{HTTP_HOST}:{HTTP_PORTS['RAG_MEMORY']}", flush=True)
-    app.run(host=HTTP_HOST, port=HTTP_PORTS["RAG_MEMORY"], debug=False, use_reloader=False)
+    try:
+        while not stop.is_set():
+            server.handle_request()
+    finally:
+        server.server_close()
+
+
+def main(*, force_exit=False):
+    from common.service_shutdown import run_service
+    return run_service(_run, name="RAG Web", force_exit=force_exit)
+
+
+if __name__ == "__main__":
+    main(force_exit=True)

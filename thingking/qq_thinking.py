@@ -41,7 +41,7 @@ def retryable_failure(exc):
 
 
 class QQThinking:
-    def __init__(self, store=None, client=None, model_factory=None, memory_client=None):
+    def __init__(self, store=None, client=None, model_factory=None, memory_client=None, *, stop_event=None):
         self.store = store or MemoryStore()
         self.client = client or GatewayClient()
         self.model_factory = model_factory
@@ -49,7 +49,7 @@ class QQThinking:
         self.outbox = MemoryOutbox(self.store.path)
         self._model_ready = set()
         self._model_lock = threading.Lock()
-        self.stop = threading.Event()
+        self.stop = stop_event if stop_event is not None else threading.Event()
         self.runner = SkillRunner(TOOLS_REGISTRY, skills_dir=ROOT / "skills",
                                   enabled_actions_path=ROOT / "server" / "skill_actions.json",
                                   qq_allowed_actions=QQ_ALLOWED_ACTIONS)
@@ -633,25 +633,31 @@ class QQThinking:
         from tools.dependencies import deps
         deps.register_memory_client(self.memory)
         # Summaries, facts and diaries are owned by the standalone Memory Worker.
-        threads = [threading.Thread(target=self.worker, name=f"qq-thinking-{index}") for index in range(WORKERS)]
+        threads = [threading.Thread(target=self.worker, name=f"qq-thinking-{index}", daemon=True) for index in range(WORKERS)]
         from chatBot.proactive import QQProactive, enabled
         if enabled():
             scheduler = QQProactive(self.store, self.memory, self.client)
-            threads.append(threading.Thread(target=scheduler.run, args=(self.stop,), name="qq-proactive"))
+            threads.append(threading.Thread(target=scheduler.run, args=(self.stop,), name="qq-proactive", daemon=True))
         for thread in threads:
             thread.start()
         log.info("QQ Thinking ready · %s workers", WORKERS)
         try:
-            while any(thread.is_alive() for thread in threads):
+            while not self.stop.is_set() and any(thread.is_alive() for thread in threads):
                 self.stop.wait(1)
         except KeyboardInterrupt:
             self.stop.set()
         finally:
             self.stop.set()
-            for thread in threads:
-                thread.join(timeout=5)
+            from common.service_shutdown import join_threads
+            join_threads(threads)
+
+
+def main(*, force_exit=False):
+    from common.service_shutdown import run_service
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    return run_service(lambda stop: QQThinking(stop_event=stop).run(),
+                       name="QQ Thinking", force_exit=force_exit)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    QQThinking().run()
+    main(force_exit=True)

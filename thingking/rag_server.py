@@ -30,11 +30,18 @@ def _notify_ready() -> None:
         print(f"[Memory Server] 就绪上报失败: {exc}", flush=True)
 
 
-if __name__ == "__main__":
+def main(*, force_exit=False):
+    from common.service_shutdown import run_service
     if sys.platform.startswith("win"):
         try:
             sys.stdout.reconfigure(encoding="utf-8")
         except (AttributeError, OSError):
             pass
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
-    serve(ZMQ_PORTS["RAG_SERVER_REQREP"], on_ready=_notify_ready)
+    return run_service(lambda stop: serve(ZMQ_PORTS["RAG_SERVER_REQREP"], on_ready=_notify_ready,
+                                          stop_event=stop),
+                       name="Memory Server", force_exit=force_exit)
+
+
+if __name__ == "__main__":
+    main(force_exit=True)
