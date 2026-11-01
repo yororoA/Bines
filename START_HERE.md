@@ -27,7 +27,7 @@ python bines.py --host
 python bines.py --host --profile chatbot
 ```
 
-`python bines.py --profile chatbot` 会启动 NapCat、Memory Server、ChatBot、QQ Thinking、Memory Worker，只有源码内容或构建参数变化时才构建镜像。Ctrl+C 删除本次启动的容器及其日志，清理 Bines 旧镜像和专用构建缓存，保留记忆、登录数据、模型和当前镜像。启动失败时，会先将失败服务的状态、退出码、健康检查和筛选后的错误日志保存到 `logs/docker-startup-*.log`，再清理容器；诊断文件仅当前用户可读写，并过滤常见凭据与普通对话输出。扫码提示会在等待依赖前显示，首次登录二维码在容器日志中：
+`python bines.py --profile chatbot` 会启动 NapCat、Memory Server、ChatBot、QQ Thinking、Memory Worker，只有源码内容或构建参数变化时才构建镜像。构建后按 4 GB 目标回收专用构建缓存并停止构建器，保留近期依赖层，避免每次改源码都重新下载 Torch；Ctrl+C 删除本次启动的容器及其日志，清理 Bines 旧镜像，保留记忆、登录数据、模型、当前镜像和构建缓存。启动失败时，会先将失败服务的状态、退出码、健康检查和筛选后的错误日志保存到 `logs/docker-startup-*.log`，再清理容器；诊断文件仅当前用户可读写，并过滤常见凭据与普通对话输出。扫码提示会在等待依赖前显示，首次登录二维码在容器日志中：
 
 ```bash
 docker compose --env-file deploy/napcat/.env -f deploy/docker/compose.yaml logs -f napcat

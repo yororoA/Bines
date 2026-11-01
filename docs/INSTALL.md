@@ -10,6 +10,8 @@ Windows 可用 `python install.py`，也可双击 `install.bat`；macOS 可双�
 
 安装结束后填写 `.env` 中的密钥和主人 QQ，再运行 `python bines.py`。默认自动构建并启动 Docker QQ 链路；完整模式再启动宿主机桌面模块。需要纯宿主机运行时加 `--host`。
 
+Docker 构建的系统包默认使用清华 HTTPS 源，下载有重试和超时；索引更新或包安装失败时，会改用 Debian 官方 HTTPS 源重试，并保留签名校验。两套源均失败会显示失败阶段及退出码或超时原因。可用 `BINES_APT_MIRROR=https://deb.debian.org` 直接选择官方源。构建完成后按 4 GB 目标回收专用缓存并停止构建器，保留近期依赖层；只改源码时可复用系统库与 Python 依赖。
+
 ## 安装范围与命令
 
 ```bash

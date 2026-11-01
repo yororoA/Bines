@@ -311,21 +311,22 @@ python bines.py                      # 完整模式：Docker QQ/记忆链路 + �
 python bines.py --profile chatbot    # 只跑 QQ：Docker 链路并跟随日志
 python bines.py --host               # 纯宿主机模式，不启动 Docker
 python bines.py --external-napcat    # 连接已有 NapCat，走宿主机模式
-python bines.py --docker-down        # 停止并清理 Bines 容器、旧镜像、专用构建缓存
+python bines.py --docker-down        # 清理 Bines 容器、旧镜像，停止构建器并保留依赖缓存
 ```
 
 - `chatbot` 模式启动 `napcat`、`memory-server`、`chatbot`、`qq-thinking`、`memory-worker`，QQ 记忆统一走 Memory Server 的向量 RAG。
 - `full` 模式额外启动 `rag-web`，并在容器健康后启动宿主机桌面模块；宿主机不再重复启动 ChatBot、QQ Thinking、Memory Worker、RAG Server 和 RAG Web。
 - `bines.py` 启动时自动设置 `BINES_UID`/`BINES_GID`、`BINES_PROFILE` 和 `--env-file deploy/napcat/.env`；源码内容、Dockerfile 和构建参数的哈希写入镜像标签。文件时间变化或重复启动不会触发重建。升级前的镜像没有哈希标签，会重建一次。
-- 构建使用 Bines 专用 Buildx 构建器，配置保存在项目 `.tools/docker/buildx`；构建完成或失败后删除该构建器及其缓存状态卷，当前运行所需镜像保留。修改源码后的下一次构建可能重新安装依赖；源码不变时直接复用镜像。
+- 构建使用 Bines 专用 Buildx 构建器，配置保存在项目 `.tools/docker/buildx`；构建完成或失败后按 4 GB 目标回收缓存并停止构建器，保留近期依赖层。仅修改源码时复用依赖缓存，源码不变时直接复用镜像；依赖、基础镜像或安装脚本改变时重建相应层。
 - Ctrl+C 删除本次新启动的容器及日志；即使启动前已有部分服务在运行，其余本次新启动服务也会清理。启动前已在运行的服务、当前镜像、记忆、登录态和模型挂载目录保留。清理期间忽略重复 Ctrl+C，防止删除中途被打断。
-- 自动清理仅处理 `bines` / `bines-napcat` 标签下的已停止容器、`bines` 标签的无标签旧镜像和专用构建器缓存，不执行全局 `docker system prune`，不删除应用数据卷。旧版默认构建器中的历史缓存不自动清理，因为它可能同时被其他项目使用。
+- 自动清理仅处理 `bines` / `bines-napcat` 标签下的已停止容器、`bines` 标签的无标签旧镜像。构建后按 4 GB 目标回收 Bines 专用构建器缓存并停止构建器，退出只停止构建器，保留近期依赖层；不执行全局 `docker system prune`，不删除应用数据卷。旧版默认构建器中的历史缓存不自动清理，因为它可能同时被其他项目使用。
 - 所有容器日志使用 Docker `local` 驱动，按每文件 10 MB、最多 3 个文件轮转；模型、记忆和动态状态文件不打包进镜像。
 - Windows 的 Docker/WSL 虚拟磁盘不会保证在容器删除后立即缩小；用 `docker system df` 检查 Docker 内部占用。已释放空间可供之后的容器复用，宿主磁盘回收由 Docker Desktop 的磁盘回收功能处理。
 - 首次使用前可运行 `python napcat.py init` 同步根 `.env` 中的 NapCat 令牌。
 - 首次登录或登录态失效时，二维码在 NapCat 容器日志中：`python napcat.py logs`。网页 `http://127.0.0.1:6099` 需要 WebUI token，不是扫码页，可用 `python napcat.py webui` 打开。
-- 首次构建 `thinking` 镜像会下载 PyTorch 与嵌入模型，耗时与镜像体积都明显大于 launcher；`chatbot` 与 `full` 都依赖它，可提前用 `python install.py --docker-full` 预构建，否则首次 `python bines.py` 会自动构建。
+- 首次构建 `thinking` 镜像会下载 PyTorch 等依赖，耗时与镜像体积都明显大于 launcher；`chatbot` 与 `full` 都依赖它，可提前用 `python install.py --docker-full` 预构建，否则首次 `python bines.py` 会自动构建。
 - 基础镜像默认走 `docker.m.daocloud.io/library/python:3.12-slim`，避开 Docker Hub 拉取超时；海外网络可在 `.env` 设 `BINES_PYTHON_IMAGE=python:3.12-slim`。
+- 系统包使用清华 HTTPS 源，索引更新或安装失败时自动回退 Debian 官方 HTTPS 源，重试和等待都有上限；`BINES_APT_MIRROR` 可设置首选源。所有路径都保留 APT 签名校验，镜像源与安装脚本的变化会触发重建。
 - Memory Server 启动时会加载嵌入模型并补建 Chroma 索引，第一次启动可能多等几分钟；之后索引增量更新。
 - 手动运维仍可使用 compose（调试用，日常启动请用 `bines.py`）：
 
