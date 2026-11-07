@@ -1386,29 +1386,7 @@ class MemoryService:
                 raise ValueError("模型调用缺少有效任务领取凭据")
             if event.get("status") == "started" and not self._running_job(job_id, job["kind"], expected_attempt):
                 raise ValueError("模型调用所属任务租约已失效")
-            result = self.model_costs.record(job, expected_attempt, event, self.settings.job_max_model_calls,
-                                            daily_limits=True)
-            if result["status"] == "deferred":
-                self.defer_job(job_id, result["retry_at"], expected_attempt=expected_attempt)
-            if result["status"] == "budget_exhausted":
-                self.repo.update_job_payload(job["id"], {**job["payload"], "terminal_reason": "model_call_budget"})
-                self.repo.conn.execute("UPDATE jobs SET status='failed',lease_until=NULL,updated_at=?, "
-                                       "last_error='model call budget exhausted' WHERE id=?", (self.clock(), job["id"]))
-        if result["status"] == "budget_exhausted":
-            raise ValueError("model call budget exhausted")
-        return result
-
-    def defer_job(self, job_id, available_at, expected_attempt):
-        """Budget deferral is scheduling, not a generation failure."""
-        with self.repo.transaction():
-            job = self.repo.get_job(int(job_id))
-            if not job or not self._running_job(job_id, job["kind"], expected_attempt):
-                return {"status": "ignored"}
-            until = max(self.clock() + 1, min(float(available_at), self.clock() + 86401))
-            self.repo.conn.execute("""UPDATE jobs SET status='pending',lease_until=NULL,available_at=?,
-                updated_at=?,last_error='background daily budget deferred' WHERE id=?""",
-                (until, self.clock(), job_id))
-        return {"status": "deferred", "retry_at": until}
+            return self.model_costs.record(job, expected_attempt, event)
 
     @staticmethod
     def _clamp_importance(value: Any) -> float:

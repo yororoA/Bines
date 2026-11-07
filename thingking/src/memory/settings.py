@@ -39,7 +39,6 @@ class MemorySettings:
     job_lease_seconds: int = 300
     job_max_attempts: int = 5
     job_max_lease_recoveries: int = 3
-    job_max_model_calls: int = 32
     job_recovery_cycles: int = 2
     job_recovery_seconds: int = 3600
     state_updates: bool = True
@@ -94,7 +93,6 @@ def load_settings() -> MemorySettings:
         owner_name=os.environ.get("BINES_OWNER_NAME", "管理员"),
         working_segment_extra=max(0, min(30, int(os.environ.get("BINES_MEMORY_HISTORY_SEGMENT_EXTRA", "10")))),
         job_max_lease_recoveries=max(0, min(20, int(os.environ.get("BINES_MEMORY_MAX_LEASE_RECOVERIES", "3")))),
-        job_max_model_calls=max(1, min(1000, int(os.environ.get("BINES_MEMORY_MAX_MODEL_CALLS", "32")))),
         job_recovery_cycles=max(0, min(4, int(os.environ.get("BINES_MEMORY_RECOVERY_CYCLES", "2")))),
         job_recovery_seconds=max(300, int(os.environ.get("BINES_MEMORY_RECOVERY_SECONDS", "3600"))),
         state_updates=os.environ.get("BINES_MEMORY_STATE_UPDATES", "true").strip().lower() in {"true", "1", "yes", "on"},

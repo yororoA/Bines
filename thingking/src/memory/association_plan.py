@@ -70,7 +70,7 @@ class AssociationPlanner:
     def prepare(self, job, node, candidates, query, chains):
         service, payload = self.service, job["payload"]
         # Persist decisions by node version, not by page-local aliases. A retry
-        # reuses the same page; advancing never resets the job's call budget.
+        # reuses the same page; advancing retains completed candidate versions.
         completed = payload.get("association_completed", {})
         candidates = [c for c in candidates if completed.get(c["id"]) != c["digest"]]
         page_size = max(1, service.settings.association_model_candidates)

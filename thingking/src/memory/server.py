@@ -35,7 +35,6 @@ RPC_METHODS = (
     "complete_state_update",
     "fail_job",
     "record_model_call",
-    "defer_job",
     "reconcile_index",
     "rebuild_index",
     "stats",

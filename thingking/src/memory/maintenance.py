@@ -2,8 +2,27 @@
 from __future__ import annotations
 
 import json
+import logging
 
 RECOVERABLE = ("associate", "repair_memory", "summarize", "diary", "summarize_experience", "audit_memory")
+logger = logging.getLogger("bines.memory.maintenance")
+
+
+def resume_quota_blocked_jobs(repo):
+    """Release retired quota gates; preserve progress and monotonic claim tokens."""
+    now = repo.clock()
+    with repo.transaction():
+        daily = repo.conn.execute("""UPDATE jobs SET available_at=?,lease_until=NULL,
+            updated_at=?,last_error=NULL WHERE status='pending'
+            AND last_error='background daily budget deferred'
+            AND json_extract(payload,'$.terminal_reason') IS NULL""", (now, now)).rowcount
+        calls = repo.conn.execute("""UPDATE jobs SET status='pending',available_at=?,lease_until=NULL,
+            updated_at=?,last_error=NULL,payload=json_remove(payload,'$.terminal_reason')
+            WHERE status='failed' AND last_error='model call budget exhausted'
+            AND json_extract(payload,'$.terminal_reason')='model_call_budget'""", (now, now)).rowcount
+    if daily or calls:
+        logger.info("resumed quota-blocked memory jobs: daily=%d, per_job=%d", daily, calls)
+    return {"daily": daily, "per_job": calls}
 
 
 class MemoryMaintenance:
@@ -13,6 +32,7 @@ class MemoryMaintenance:
         self.repo.conn.execute("""CREATE TABLE IF NOT EXISTS memory_recovery_events (
             job_id INTEGER NOT NULL, cycle INTEGER NOT NULL, recovered_at REAL NOT NULL,
             previous_error TEXT NOT NULL, PRIMARY KEY(job_id,cycle))""")
+        resume_quota_blocked_jobs(self.repo)
 
     def tick(self):
         now, settings = self.service.clock(), self.service.settings
@@ -60,7 +80,6 @@ class MemoryMaintenance:
             "recovery_cycles": self.service.settings.job_recovery_cycles,
             "cooldown_seconds": self.service.settings.job_recovery_seconds,
             "lease_recovery_limit": self.service.settings.job_max_lease_recoveries,
-            "model_call_limit": self.service.settings.job_max_model_calls,
             "budget_exhausted": self.repo.conn.execute("SELECT COUNT(*) FROM jobs WHERE status='failed' "
-                "AND json_extract(payload,'$.terminal_reason') IN ('lease_recovery_budget','model_call_budget')").fetchone()[0],
+                "AND json_extract(payload,'$.terminal_reason')='lease_recovery_budget'").fetchone()[0],
         }

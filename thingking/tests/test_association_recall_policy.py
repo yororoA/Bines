@@ -103,23 +103,28 @@ class RecallPolicyTest(unittest.TestCase):
         self.assertEqual(len(saved["payload"]["association_completed"]), 12)
         self.assertTrue(self.service.graph.get(source["id"])["ready"])
 
-    def test_page_advance_does_not_reset_total_model_call_budget(self):
-        self.service.settings = replace(self.settings, job_max_model_calls=1)
+    def test_page_advance_continues_after_many_model_calls(self):
         for i in range(8):
             self.node("needle target " + str(i))
         self.finish_existing()
         self.node("needle source")
         first = self.claim()
-        event = {"call_id": "a" * 32, "status": "started", "started_at": self.clock(), "model": "fake"}
-        self.service.record_model_call(first["job"]["id"], event, first["job"]["attempts"])
+        event = {"call_id": "a" * 32, "status": "started", "started_at": self.clock(), "model": "fake",
+                 "estimated_input_units": 10}
+        for index in range(32):
+            self.service.record_model_call(first["job"]["id"], {**event, "call_id": f"{index:032x}"},
+                                           first["job"]["attempts"])
         self.assertEqual(self.complete(first)["status"], "continuing_association")
         second = self.claim()
-        with self.assertRaisesRegex(ValueError, "budget"):
-            self.service.record_model_call(second["job"]["id"], {**event, "call_id": "b" * 32}, second["job"]["attempts"])
+        result = self.service.record_model_call(second["job"]["id"], {**event, "call_id": "b" * 32},
+                                                second["job"]["attempts"])
+        self.assertEqual(result["status"], "recorded")
+        self.assertEqual(self.complete(second)["status"], "done")
         saved = self.repo.get_job(first["job"]["id"])
-        self.assertEqual(saved["status"], "failed")
-        self.assertEqual(saved["payload"]["terminal_reason"], "model_call_budget")
-        self.assertEqual(len(saved["payload"]["association_completed"]), 6)
+        self.assertEqual(saved["status"], "done")
+        self.assertNotIn("terminal_reason", saved["payload"])
+        self.assertEqual(len(saved["payload"]["association_completed"]), 8)
+        self.assertEqual(self.service.model_costs.stats()[0]["calls"], 33)
 
     def test_reused_reason_updates_text_fts_and_version_together(self):
         target = self.node("围巾确认老礼物")

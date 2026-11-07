@@ -22,7 +22,7 @@ class StateIdentityTest(unittest.TestCase):
         self.addCleanup(lambda: self.repo.close())
         self.settings = MemorySettings(data_dir=Path(self.tmp.name), state_updates=True,
                                        associations_enabled=False, association_backfill_batch=0,
-                                       summarize_trigger=1000, job_max_model_calls=2,
+                                       summarize_trigger=1000,
                                        job_max_lease_recoveries=2)
         self.service = MemoryService(self.repo, LexicalIndex(self.repo), self.settings, self.clock)
         self.service.sync_identities()
@@ -236,7 +236,7 @@ class StateIdentityTest(unittest.TestCase):
                 self.assertNotIn("current_location", data)
                 self.assertNotIn("relationship_score", data)
 
-    def test_model_call_budget_prevents_the_provider_function_from_running(self):
+    def test_many_model_calls_reach_provider_and_remain_auditable(self):
         from common.model_usage import capture_model_usage, measured_request
         from types import SimpleNamespace
         self.record("测试")
@@ -248,11 +248,11 @@ class StateIdentityTest(unittest.TestCase):
         def sink(event):
             return self.service.record_model_call(job["id"], event, job["attempts"])
         with capture_model_usage(sink):
-            measured_request(provider, model="offline-fake")
-            measured_request(provider, model="offline-fake")
-            with self.assertRaisesRegex(ValueError, "budget"):
+            for _ in range(33):
                 measured_request(provider, model="offline-fake")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 33)
+        self.assertEqual(self.repo.get_job(job["id"])["status"], "running")
+        self.assertEqual(self.service.model_costs.stats()[0]["calls"], 33)
 
     def test_lease_recovery_budget_is_independent_of_generation_failures(self):
         self.record("测试")
@@ -268,9 +268,9 @@ class StateIdentityTest(unittest.TestCase):
         self.assertEqual(job["payload"]["terminal_reason"], "lease_recovery_budget")
         self.assertNotIn("generation_failures", job["payload"])
 
-    def test_model_budget_counts_started_unknown_and_stays_terminal_after_recovery(self):
+    def test_unknown_calls_are_counted_without_blocking_summary(self):
         mid = self.record("测试")
-        self.repo.enqueue_job("summarize", "owner", {"source_message_ids": [mid]}, "budget-summary", conversation_id="local")
+        self.repo.enqueue_job("summarize", "owner", {"source_message_ids": [mid]}, "usage-summary", conversation_id="local")
         claim = self.service.claim_job(["summarize"])
         job = claim["job"]
         def record(number):
@@ -278,14 +278,11 @@ class StateIdentityTest(unittest.TestCase):
                 "started_at": self.clock(), "model": "fake"}, job["attempts"])
         self.assertEqual(record(1)["status"], "recorded")
         self.assertEqual(record(1)["status"], "duplicate")
-        record(2)
-        with self.assertRaisesRegex(ValueError, "budget"):
-            record(3)
-        self.assertEqual(self.repo.get_job(job["id"])["status"], "failed")
-        self.clock.advance(7200)
-        self.service.maintenance.tick()
-        self.assertIsNone(self.service.claim_job(["summarize"]))
-        self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM memory_model_calls").fetchone()[0], 2)
+        for number in range(2, 34):
+            self.assertEqual(record(number)["status"], "recorded")
+        self.assertEqual(self.repo.get_job(job["id"])["status"], "running")
+        stats = self.service.model_costs.stats()[0]
+        self.assertEqual((stats["calls"], stats["unknown_usage_calls"]), (33, 33))
 
 
 if __name__ == "__main__":

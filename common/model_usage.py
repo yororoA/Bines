@@ -16,12 +16,6 @@ _KIND = ContextVar("model_usage_kind", default="")
 log = logging.getLogger("bines.model_usage")
 
 
-class BackgroundBudgetDeferred(RuntimeError):
-    def __init__(self, retry_at):
-        self.retry_at = retry_at
-        super().__init__("background daily budget deferred")
-
-
 @contextmanager
 def capture_model_usage(sink, *, kind=""):
     token = _SINK.set(sink)
@@ -52,7 +46,7 @@ def record_usage(event):
     """One cross-process ledger, separate from autobiographical memory.
 
     Only counts and task categories are persisted. The worker's job ledger is
-    a reservation/audit mirror with the same call_id, not additional usage.
+    an audit mirror with the same call_id, not additional usage.
     """
     path = usage_path()
     path.parent.mkdir(parents=True, exist_ok=True)

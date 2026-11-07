@@ -1,4 +1,4 @@
-"""Cost controls preserve raw evidence, scope boundaries and automatic recovery."""
+"""Efficient memory work preserves raw evidence, scope boundaries and recovery."""
 import json
 import os
 import unittest
@@ -136,48 +136,52 @@ class MemoryEfficiencyTests(unittest.TestCase):
         self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM experiences").fetchone()[0], 3)
         self.assertIsNone(self.service.claim_job(kinds=["summarize_experience"]))
 
-    def test_two_connections_cannot_spend_the_same_last_budget_slot(self):
+    def test_two_connections_record_calls_despite_legacy_daily_limits(self):
         self.record("one")
         self.record("two")
         jobs = [self.service.claim_job(kinds=["summarize_experience"])["job"] for _ in range(2)]
-        def reserve(index):
+        def record(index):
             repo = MemoryRepository(self.fx.settings.db_path, clock=self.fx.clock)
             try:
                 store = ModelCostStore(repo)
                 with repo.transaction():
                     return store.record(jobs[index], jobs[index]["attempts"], {
                         "call_id": str(index) * 32, "status": "started", "started_at": self.fx.clock(),
-                        "estimated_input_units": 100, "max_output_tokens": 20}, daily_limits=True)
+                        "estimated_input_units": 100, "max_output_tokens": 20})
             finally:
                 repo.close()
         with patch.dict(os.environ, {"BINES_MEMORY_MAINTENANCE_DAILY_CALLS": "1"}):
             with ThreadPoolExecutor(max_workers=2) as pool:
-                statuses = [item["status"] for item in pool.map(reserve, range(2))]
-        self.assertCountEqual(statuses, ["recorded", "deferred"])
-        self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM memory_budget_reservations").fetchone()[0], 1)
+                statuses = [item["status"] for item in pool.map(record, range(2))]
+        self.assertEqual(statuses, ["recorded", "recorded"])
+        self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM memory_model_calls").fetchone()[0], 2)
 
-    def test_worker_defers_every_batch_member_before_calling_provider(self):
+    def test_worker_completes_every_batch_member_despite_legacy_token_limit(self):
         from common.model_usage import measured_request
+        from test_model_completion import response
         self.record("one")
         self.record("two")
         self.fx.clock.advance(61)
         client = Mock()
         client.call.side_effect = lambda method, **params: getattr(self.service, method)(**params)
         client.claim_job.side_effect = lambda **kwargs: self.service.claim_job(batch_experiences=True, **kwargs)
-        provider = Mock()
+        provider = Mock(return_value=response(json.dumps({"summaries": [
+            {"source_ref": ref, "summary": f"观察 {ref} 的海鸟"} for ref in ("one", "two")
+        ]})))
         worker = MemoryWorker(client, lambda messages: measured_request(
-            provider, model="test", messages=messages, max_tokens=200), lambda: "")
+            provider, model="test", messages=messages, max_tokens=200).choices[0].message.content, lambda: "")
         with patch.dict(os.environ, {"BINES_MEMORY_MAINTENANCE_DAILY_TOKENS": "1"}):
-            self.assertFalse(worker.run_once(kinds=["summarize_experience"]))
-        provider.assert_not_called()
+            self.assertTrue(worker.run_once(kinds=["summarize_experience"]))
+        provider.assert_called_once()
         client.fail_job.assert_not_called()
         jobs = self.repo.conn.execute("SELECT status,payload,available_at FROM jobs "
                                       "WHERE kind='summarize_experience'").fetchall()
         self.assertEqual(len(jobs), 2)
-        self.assertTrue(all(row["status"] == "pending" and row["available_at"] > self.fx.clock()
+        self.assertTrue(all(row["status"] == "done"
                             and "generation_failures" not in json.loads(row["payload"]) for row in jobs))
+        self.assertEqual(self.service.model_costs.stats()[0]["calls"], 1)
 
-    def test_budget_reservation_survives_restart_and_defers_without_generation_failure(self):
+    def test_calls_continue_after_ledger_restart_despite_legacy_limits(self):
         self.record("one")
         job = self.service.claim_job(kinds=["summarize_experience"])["job"]
         event = {"call_id": "a" * 32, "model": "test", "status": "started",
@@ -186,20 +190,14 @@ class MemoryEfficiencyTests(unittest.TestCase):
             self.assertEqual(self.service.record_model_call(job["id"], event, job["attempts"])["status"], "recorded")
             self.service.model_costs = ModelCostStore(self.repo)
             result = self.service.record_model_call(job["id"], {**event, "call_id": "b" * 32}, job["attempts"])
-        self.assertEqual(result["status"], "deferred")
-        pending = self.repo.get_job(job["id"])
-        self.assertEqual(pending["status"], "pending")
-        self.assertNotIn("generation_failures", pending["payload"])
-        self.assertGreater(pending["available_at"], self.fx.clock())
-        self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM memory_model_calls").fetchone()[0], 1)
-        self.assertIsNone(self.repo.conn.execute("SELECT actual_tokens FROM memory_budget_reservations").fetchone()[0])
-        self.fx.clock.now = result["retry_at"] + 1
-        resumed = self.service.claim_job(kinds=["summarize_experience"])["job"]
-        with patch.dict(os.environ, {"BINES_MEMORY_MAINTENANCE_DAILY_CALLS": "1"}):
-            self.assertEqual(self.service.record_model_call(resumed["id"], {**event, "call_id": "c" * 32},
-                                                           resumed["attempts"])["status"], "recorded")
+        self.assertEqual(result["status"], "recorded")
+        running = self.repo.get_job(job["id"])
+        self.assertEqual(running["status"], "running")
+        self.assertEqual(running["attempts"], job["attempts"])
+        self.assertNotIn("generation_failures", running["payload"])
+        self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM memory_model_calls").fetchone()[0], 2)
 
-    def test_token_reservation_reconciles_actual_usage_without_adding_reasoning_twice(self):
+    def test_actual_usage_remains_recorded_without_adding_reasoning_twice(self):
         self.record("one")
         job = self.service.claim_job(kinds=["summarize_experience"])["job"]
         event = {"call_id": "a" * 32, "status": "started", "started_at": self.fx.clock(),
@@ -209,9 +207,10 @@ class MemoryEfficiencyTests(unittest.TestCase):
             self.service.record_model_call(job["id"], {**event, "status": "returned",
                 "usage": {"prompt_tokens": 50, "completion_tokens": 10, "reasoning_tokens": 8}}, job["attempts"])
             result = self.service.record_model_call(job["id"], {**event, "call_id": "b" * 32}, job["attempts"])
-        self.assertEqual(result["status"], "recorded")  # 60 actual + 130 reserved <= 200
-        self.assertEqual(self.repo.conn.execute("SELECT actual_tokens FROM memory_budget_reservations "
-                                               "WHERE call_id=?", ("a" * 32,)).fetchone()[0], 60)
+        self.assertEqual(result["status"], "recorded")
+        stats = self.service.model_costs.stats()[0]
+        self.assertEqual((stats["prompt_tokens"], stats["completion_tokens"], stats["reasoning_tokens"]), (50, 10, 8))
+        self.assertEqual(stats["unknown_usage_calls"], 1)
 
     def test_history_extends_then_rotates_and_reads_edits_live(self):
         env = self.service.resolve(local_env())

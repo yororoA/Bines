@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 import time
-from common.model_usage import BackgroundBudgetDeferred, capture_model_usage
+from common.model_usage import capture_model_usage
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -275,13 +275,9 @@ class MemoryWorker:
             def sink(event):
                 params = dict(job_id=job["id"], event=event, expected_attempt=job["attempts"])
                 if hasattr(self.client, "call"):
-                    result = self.client.call("record_model_call", **params)
+                    self.client.call("record_model_call", **params)
                 elif hasattr(self.client, "record_model_call"):
-                    result = self.client.record_model_call(**params)
-                else:
-                    result = None
-                if isinstance(result, dict) and result.get("status") == "deferred":
-                    raise BackgroundBudgetDeferred(result["retry_at"])
+                    self.client.record_model_call(**params)
         with capture_model_usage(sink, kind="memory." + job["kind"]):
             return self._run_claimed(job, materials)
 
@@ -303,17 +299,9 @@ class MemoryWorker:
                 self._audit(job, materials)
             else:
                 raise ValueError(f"unknown job kind {job['kind']}")
-        except BackgroundBudgetDeferred as exc:
-            for member in materials.get("batch_jobs") or [job]:
-                params = dict(job_id=member["id"], available_at=exc.retry_at, **self._attempt(member))
-                if hasattr(self.client, "call"):
-                    self.client.call("defer_job", **params)
-                else:
-                    self.client.defer_job(**params)
-            return False
         except Exception as exc:
             if self._transport_error(exc):
-                # A completion/deferral may already have committed. Do not
+                # A completion may already have committed. Do not
                 # resend it or turn an unknown outcome into a failed job; let
                 # the server's fenced lease recovery determine what remains.
                 raise
