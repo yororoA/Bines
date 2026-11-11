@@ -142,7 +142,7 @@ def correct_memory(source_id: str, quote: str, replacement: str, explanation: st
 
 
 def learn_expression(technique: str, situation: str, source_quote: str, source_id: str = ""):
-    """从本轮实际看过的外部原文学习表达特征；历史用 citation_id，当前网页/字幕可省略 source_id。"""
+    """学习真实网页/字幕中的少女语气。technique 取 short_reaction/softener/echo_play/playful_exaggeration/self_mock/curious_followup/natural_particles/light_teasing/tease_then_care/warm_direct/understated_pride/playful_reframe/gentle_protest/varied_rhythm/leave_space/specific_response；situation 取 casual/praised/teased/upset/celebration/parting。quote 必须逐字来自原文，只学表达方式，不复制身份或整段台词。"""
     from tools.context import CURRENT_CONTEXT
     context = CURRENT_CONTEXT.get()
     if context.planning_only:

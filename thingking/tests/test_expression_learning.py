@@ -97,6 +97,22 @@ class ExpressionLearningTest(unittest.TestCase):
         self.assertIn("得意可以轻轻露出来", rendered)
         self.assertEqual(render_expression_notes([{"technique": injection, "situation": "casual"}]), "")
 
+    def test_samples_are_bounded_public_rhythm_references(self):
+        from memory.expression_learning import render_expression_notes
+        quote = "才不是特意等你夸的，不过你这句话我还挺高兴的。https://private.invalid/x"
+        source, _ = self.experience(quote=quote)
+        self.learn(source, quote=quote)
+        default = self.learning.snapshot("owner")
+        self.assertNotIn("sample", default[0])
+        rows = self.learning.snapshot("owner", include_samples=True)
+        self.assertIn("sample", rows[0])
+        self.assertLessEqual(len(rows[0]["sample"]), 25)
+        self.assertNotIn("http", rows[0]["sample"])
+        rendered = render_expression_notes(rows, include_samples=True)
+        self.assertIn("语感参考", rendered)
+        self.assertNotIn("private.invalid", rendered)
+        self.assertNotIn(quote, rendered)
+
     def test_fixed_enums_exact_quote_and_size_validation_are_strict(self):
         source, _ = self.experience(quote="中文四字\n不能抄错原句这点小事倒也难不住我")
         self.assertEqual(self.learn(source, quote="中文四字")["status"], "accepted")

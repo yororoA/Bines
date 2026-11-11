@@ -573,7 +573,7 @@ def build_conversation_messages(context: Dict[str, Any], *, budget_limit=None,
     from memory.expression_learning import render_expression_notes
     expression_message, expression_cost = None, 0
     for count in (3, 2, 1):
-        notes = render_expression_notes(context.get("expression_notes") or [], limit=count)
+        notes = render_expression_notes(context.get("expression_notes") or [], limit=count, include_samples=True)
         message = {"role": "system", "content": notes}
         cost = counter.messages([message]) if notes else 0
         if notes and cost <= min(1024, available // 10):

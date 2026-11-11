@@ -546,7 +546,7 @@ class MemoryService:
             "retrieval_trace": {"recall": recall_trace, "profile": profile_trace},
             "state": visible_state,
             "life": self.life.snapshot(env.scope),
-            "expression_notes": self.expression_learning.snapshot(env.scope, limit=3),
+            "expression_notes": self.expression_learning.snapshot(env.scope, limit=3, include_samples=True),
             "last_user_ts": last_user["ts"] if last_user else None,
         }
 

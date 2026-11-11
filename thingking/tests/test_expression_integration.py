@@ -1,6 +1,7 @@
 """Shared learning through real journals, scoped HTTP, persistence and prompt assembly."""
 from helpers import approved_diary
 import json
+import re
 from pathlib import Path
 import threading
 import time
@@ -77,8 +78,12 @@ class ExpressionIntegrationTests(unittest.TestCase):
             messages = build_conversation_messages(context)
             self.assertTrue(any("可选的表达练习" in item["content"] for item in messages))
             expression = next(item["content"] for item in messages if "可选的表达练习" in item["content"])
-            self.assertNotIn(QUOTE, expression)
+            self.assertIn("语感参考", expression)
+            samples = re.findall(r"语感参考：([^）]*)", expression)
+            self.assertTrue(samples)
+            self.assertTrue(all(len(sample) <= 25 for sample in samples))
             self.assertNotIn("fictional.invalid", expression)
+            self.assertNotIn("https://", expression)
             self.assertLess(context["context_budget"]["section_tokens"]["expression"], 1024)
         self.assertEqual(build_conversation_messages(local)[0], build_conversation_messages({**local, "expression_notes": []})[0])
 
