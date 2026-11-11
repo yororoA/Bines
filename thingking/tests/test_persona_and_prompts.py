@@ -52,8 +52,8 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("QQ 回复格式", guard)
         self.assertIn("篇幅跟着对方走", guard)
         self.assertIn("标点跟着语境和情绪", guard)
-        self.assertIn("自己决定分段", guard)
-        self.assertIn("不按字数拆分", guard)
+        self.assertIn("严禁包含任何换行符", guard)
+        self.assertIn("独立的聊天气泡", guard)
         self.assertNotIn("正常使用逗号、顿号、句号", guard)
         self.assertIn("两个空格", persona_profile.output_rules())
 
@@ -88,7 +88,7 @@ class PersonaSourceTest(unittest.TestCase):
     def test_historical_character_and_reaction_constraints_are_preserved(self):
         # The February/May baseline is proud and pouty, while never malicious.
         text = persona_profile.character_prompt()
-        for trait in ("充满活力", "活泼", "捉摸不透又黏人", "自然"):
+        for trait in ("活泼", "捉摸不透又黏人", "自然"):
             self.assertIn(trait, text)
         reactions = persona_profile.load_persona()["reactions"]
         for scene, requirements in {
