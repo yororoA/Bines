@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -81,6 +82,7 @@ class ExpressionVectorStore:
                  timeout: float = 2.0, min_score: float = 0.35, top_k: int = 12):
         self.url = str(url or "").rstrip("/")
         self.collection = str(collection or "bines_expression")
+        self.scenario_collection = self.collection + "_scenarios"
         self.embedder = embedder
         self.timeout = max(0.2, float(timeout))
         self.min_score = float(min_score)
@@ -88,6 +90,7 @@ class ExpressionVectorStore:
         self._session = requests.Session()
         self._lock = threading.RLock()
         self._ready = False
+        self._scenario_ready = False
         self._dimensions: Optional[int] = None
         self.last_error = ""
 
@@ -148,7 +151,30 @@ class ExpressionVectorStore:
 
     def status(self) -> Dict[str, Any]:
         return {"url": self.url, "collection": self.collection, "ready": self._ready,
+                "scenario_collection": self.scenario_collection, "scenario_ready": self._scenario_ready,
                 "dimensions": self._dimensions, "last_error": self.last_error}
+
+    def _ensure_scenarios(self, *, create=False) -> bool:
+        """旧库仍可只按原句检索；场景索引在明确导入时建立。"""
+        with self._lock:
+            if self._scenario_ready:
+                return True
+            info = self._request("GET", f"/collections/{self.scenario_collection}", allow_404=True)
+            if info is None:
+                if not create:
+                    return False
+                self._request("PUT", f"/collections/{self.scenario_collection}", json={
+                    "vectors": {"size": self._dimensions, "distance": "Cosine"},
+                })
+            else:
+                vectors = (((info.get("result") or {}).get("config") or {})
+                           .get("params") or {}).get("vectors")
+                if isinstance(vectors, dict) and (
+                    vectors.get("size") != self._dimensions or str(vectors.get("distance")).lower() != "cosine"
+                ):
+                    raise ExpressionVectorError("Qdrant expression scenario vector configuration mismatch")
+            self._scenario_ready = True
+            return True
 
     def count(self, scope: Optional[str] = None) -> int:
         self.ensure_collection()
@@ -172,6 +198,18 @@ class ExpressionVectorStore:
         # Embed the response itself, not the whole transcript: long contexts
         # dilute short emotional queries and create technical false positives.
         return _clip(f"{situation}。{item['quote']}", _MAX_INDEX_CHARS)
+
+    @staticmethod
+    def _scenario_text(item: Dict[str, Any]) -> str:
+        """取目标原句前的短对话，学到“这类处境可以怎样接话”。"""
+        context, quote = str(item.get("context") or ""), str(item.get("quote") or "")
+        if not quote or quote not in context:
+            return ""
+        prefix = context.split(quote, 1)[0]
+        utterances = re.split(
+            r"(?:^|\n)\s*[^\s:：]{1,12}[:：]\s*|\s+(?:A|B|他|她|我|对方)[:：]\s*", prefix)
+        utterances = [part.strip() for part in utterances if len(part.strip()) >= 4]
+        return _clip(" / ".join(utterances[-2:]), 140)
 
     @staticmethod
     def _payload(scope: str, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -209,13 +247,31 @@ class ExpressionVectorStore:
         for start in range(0, len(points), _UPSERT_BATCH):
             self._request("PUT", f"/collections/{self.collection}/points?wait=true",
                           json={"points": points[start:start + _UPSERT_BATCH]})
-        return len(points)
+        scenarios = [(item, self._scenario_text(item)) for item in records]
+        scenarios = [(item, text) for item, text in scenarios if text]
+        if scenarios:
+            self._ensure_scenarios(create=True)
+            vectors = self.embedder.embed_documents([text for _, text in scenarios])
+            if len(vectors) != len(scenarios) or any(len(v) != self._dimensions for v in vectors):
+                raise ExpressionVectorError("scenario embedding result dimension/count mismatch")
+            points = [{
+                "id": self._point_id(scope, item),
+                "vector": [float(x) for x in vector],
+                "payload": self._payload(scope, item),
+            } for (item, _), vector in zip(scenarios, vectors)]
+            for start in range(0, len(points), _UPSERT_BATCH):
+                self._request("PUT", f"/collections/{self.scenario_collection}/points?wait=true",
+                              json={"points": points[start:start + _UPSERT_BATCH]})
+        return len(records)
 
     def delete_scope(self, scope: str = "owner") -> None:
         self.ensure_collection()
         self._request("POST", f"/collections/{self.collection}/points/delete?wait=true",
                       json={"filter": {"must": [{"key": "scope",
                                                  "match": {"value": scope}}]}})
+        if self._ensure_scenarios():
+            self._request("POST", f"/collections/{self.scenario_collection}/points/delete?wait=true",
+                          json={"filter": {"must": [{"key": "scope", "match": {"value": scope}}]}})
 
     def reindex(self, items: Iterable[Dict[str, Any]], scope: str = "owner") -> int:
         self.ensure_collection()
@@ -262,8 +318,16 @@ class ExpressionVectorStore:
         }
         data = self._request("POST", f"/collections/{self.collection}/points/search",
                              json=body)
+        hits = list(data.get("result") or [])
+        try:
+            if self._ensure_scenarios():
+                scenes = self._request("POST", f"/collections/{self.scenario_collection}/points/search",
+                                       json=body)
+                hits.extend(scenes.get("result") or [])
+        except ExpressionVectorError as exc:
+            log.warning("expression scenario search unavailable, using response index: %s", exc)
         candidates: List[Dict[str, Any]] = []
-        for hit in data.get("result") or []:
+        for hit in hits:
             payload = hit.get("payload") or {}
             if not isinstance(payload, dict):
                 continue
@@ -289,4 +353,9 @@ class ExpressionVectorStore:
                 "_vector": hit_vector,
             })
         candidates.sort(key=lambda item: item["score"], reverse=True)
+        # 同一表达可能同时命中原句和原场景，只保留分数更高的那份。
+        unique = {}
+        for item in candidates:
+            unique.setdefault(item["id"], item)
+        candidates = list(unique.values())
         return self._mmr(candidates, max(1, min(3, int(limit))))

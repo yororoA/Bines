@@ -149,7 +149,8 @@ def main():
                     policy.state.last_decision.update(status="disallowed_kind", proposed=decision)
                     decision = None
                 if not decision:
-                    policy.defer(time.time(), policy.state.last_decision.get("delay_seconds"))
+                    policy.defer(time.time(), policy.state.last_decision.get("delay_seconds"),
+                                 wait_scope=policy.state.last_decision.get("wait_scope", "all"))
                     save()
                     continue
                 latest = memory.activity_snapshot()

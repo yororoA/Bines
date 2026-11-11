@@ -215,6 +215,7 @@ class ProactiveState:
     user_ref: str = ""
     value: float = 0  # Compatibility/status: maximum current willingness, not an elapsed timer.
     next_decision: float = 0
+    contact_wait_until: float = 0  # Model-selected contact wait, independent of activity reviews.
     sent_user_ref: str = ""
     sent_at: float = 0
     feedback_done: bool = True
@@ -337,12 +338,14 @@ class ProactivePolicy:
         contact_delay = min(config.min_idle, config.followup_delay) if followup else config.min_idle
         limited = config.daily_limit > 0 and state.sent_today >= config.daily_limit
         boundary = contact_boundary(user, now, config, last_activity)
+        contact_wait = state.contact_wait_until if ref and ref == state.user_ref else 0
         reason = next((label for blocked, label in (
             (not public, "planning_or_quiet_hours"),
             (not ref, "no_private_recipient"),
             (limited, "daily_contact_limit"),
             (bool(ref) and state.uncertain_contact_ref == ref, "uncertain_contact"),
             (bool(boundary), boundary),
+            (now < contact_wait, "model_selected_contact_wait"),
             (now - max(float((user or {}).get("ts") or 0), last_activity, last_reply_at) < contact_delay,
              "contact_not_idle"),
             (state.sent_at and now - state.sent_at < cooldown,
@@ -355,6 +358,7 @@ class ProactivePolicy:
             reason = "uncertain_legacy_contact"
         return {"contact_allowed": public, "owner_contact_allowed": owner,
                 "owner_contact_reason": reason or "allowed",
+                "owner_contact_wait_until": contact_wait,
                 "contact_mode": "followup" if followup else "initiate"}
 
     def record_decision(self, decision, now):
@@ -430,6 +434,7 @@ class ProactivePolicy:
                 if reply_ts > state.sent_at:
                     self._feedback(reply_ts - state.sent_at)
             state.user_ref = ref
+            state.contact_wait_until = 0  # A real incoming message ends this conversational wait.
             if ref != state.uncertain_contact_ref:
                 state.uncertain_contact_ref = ""
             # Conversation provides material and engagement instead of draining
@@ -500,12 +505,18 @@ class ProactivePolicy:
         # Drives inform the model; they do not veto its chance to choose.
         return not reason
 
-    def defer(self, now, delay=None):
+    def defer(self, now, delay=None, *, wait_scope="all"):
         self.state.last_review_at = now
         delay = self.config.decision_interval if delay is None else delay
         if self.state.planning_only:
             delay = max(delay, self.config.rest_interval)
             self.state.rest_review_at = now
+        elif wait_scope == "contact":
+            # Waiting for a reply must not suspend independent deliberation.
+            # A later review can still choose to rest, without timer-driven work.
+            self.state.contact_wait_until = max(self.state.contact_wait_until, now + delay)
+            self.state.followup_review_ref = self.state.user_ref
+            delay = self.config.decision_interval
         self.state.next_decision = now + delay
 
     def reserve(self, candidate):
@@ -611,8 +622,11 @@ def inspect_decision(text, *, recent_intents=None, now=0):
         return {"status": "invalid", "reason": "should_act必须为布尔值"}
     if not data["should_act"]:
         delay = number(data.get("delay_seconds"), 300, 30, 3600)
+        wait_scope = data.get("wait_scope", "all")
+        if wait_scope not in ("all", "contact"):
+            return {"status": "invalid", "reason": "等待范围必须是all或contact"}
         return {"status": "quiet", "reason": str(data.get("reason") or "选择保持安静")[:300],
-                "delay_seconds": delay}
+                "delay_seconds": delay, "wait_scope": wait_scope}
     kind, topic = data.get("kind"), data.get("topic")
     intent, reason = data.get("intent"), data.get("reason")
     if (kind not in DRIVES or not isinstance(topic, str) or not 2 <= len(topic.strip()) <= 80
@@ -674,6 +688,8 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
         "也不把吃饭、休息和报平安反复当作催办目标。对方的最新明确说法优先于旧日状态。"
         "waiting_intentions 是独立保存的等待活动，不占用当前思考；不要换措辞重复新建这些目标。"
         "等待对方回复时可以考虑其他真实兴趣，也可以安静，不需要守着同一话题反复确认等待。"
+        "不继续发消息不等于停止自己的生活；可以读点感兴趣的资料、看内容、整理想法或继续未完成的活动，"
+        "有想做的事就选择curiosity或initiative，依据现有能力和精力执行，不需要向对方播报。"
         "普通接话已经完成就结束主动联系；以后用户发来消息由正常聊天处理，无需额外创建等回复的任务。"
         "避免复述刚发过的话、连续盘问或机械追问。"
         "contact_mode=initiate时结合具体兴趣或发现发起交流，并考虑打扰成本；"
@@ -686,8 +702,14 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
         "不为满足计时器凑任务，不用在吗、忙什么、催回复开场。"
         "输出JSON：{\"should_act\":true或false,\"kind\":\"connection|curiosity|initiative\","
         "\"topic\":\"具体主题\",\"intent\":\"想做的具体目标，执行时可选择工具和消息组合\","
-        "\"reason\":\"自身兴趣、观察或时间情绪的具体理由\",\"delay_seconds\":300}。"
-        "无意愿时should_act=false并说明原因及下次思考间隔30–3600秒。",
+        "\"reason\":\"自身兴趣、观察或时间情绪的具体理由\",\"delay_seconds\":300,"
+        "\"wait_scope\":\"all|contact\"}。"
+        "不行动时should_act=false，说明原因及等待间隔30–3600秒。"
+        "wait_scope=contact表示仅暂缓联系主人：delay_seconds只用于联系等待，其他活动会按正常节奏另作取舍；"
+        "只是等回复、让对方忙或想暂停接话时用contact，不因此暂停独立活动。"
+        "wait_scope=all表示自己也想休息、发呆或暂时没有其他兴趣，全部自主取舍等待该间隔。"
+        "owner_contact_wait_until是本轮真实的联系等待截止时间，其他行动不解除它；"
+        "到时只是允许重新考虑联系，不要求发消息。planning_only时仍遵守休息阶段的取舍间隔。",
         {"context": context, "willingness": state.drives, "emotion": state.emotion,
          "interests": state.interests, "previous_topics": state.topics,
          "recent_outcomes": state.recent_outcomes, "capabilities": capabilities,

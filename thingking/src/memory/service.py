@@ -507,17 +507,56 @@ class MemoryService:
             status["error"] = f"{type(exc).__name__}: {exc}"
         return status
 
-    def _expression_notes(self, scope: str, query: str) -> List[Dict[str, Any]]:
+    def _expression_notes(self, scope: str, query: str, *, context_query: str = "") -> List[Dict[str, Any]]:
         """Prefer the dedicated semantic corpus; fall back to lexical selection."""
         if self.expression_vector is not None and scope == OWNER_SCOPE:
             try:
                 # A successful empty result means "no sufficiently close
                 # sample"; do not fill the prompt with a lexical near-miss.
-                return self.expression_vector.search(scope, query, limit=3)
+                rows = self.expression_vector.search(scope, query, limit=3)
             except Exception as exc:
                 logger.warning("expression vector search failed, using lexical fallback: %s", exc)
+            else:
+                if not context_query or context_query == query:
+                    return rows
+                try:
+                    context_rows = self.expression_vector.search(scope, context_query, limit=1)
+                except Exception as exc:
+                    logger.warning("expression context search failed, keeping current-message results: %s", exc)
+                    return rows
+                # 当前消息优先，前文只补一个场景候选，不能盖过眼前的话。
+                selected, seen = [], set()
+                for row in [*rows[:1], *context_rows, *rows[1:]]:
+                    key = row.get("id") or row.get("sample") or (row.get("technique"), row.get("situation"))
+                    if key not in seen:
+                        selected.append(row)
+                        seen.add(key)
+                    if len(selected) >= 3:
+                        break
+                return selected
         return self.expression_learning.snapshot(
             scope, limit=3, include_samples=True, query=query)
+
+    def _expression_query(self, query: str, working: Sequence[Dict[str, Any]]) -> str:
+        """短接话可补充近期场景，保留独立的当前消息检索。"""
+        text = " ".join(str(query or "").split())
+        if not text or len(text) > 12:
+            return text
+        previous = list(working)
+        if previous and previous[-1].get("role") == ROLE_USER and (
+            " ".join(str(previous[-1].get("content") or "").split()) == text
+        ):
+            previous.pop()
+        recent = []
+        for row in previous[-2:]:
+            content = " ".join(str(row.get("content") or "").split())
+            age = self.clock() - float(row.get("ts") or 0)
+            if (row.get("role") not in {ROLE_USER, ROLE_ASSISTANT}
+                    or not 0 <= age <= 900 or not content or content.startswith("[image:")):
+                continue
+            label = "对方" if row["role"] == ROLE_USER else "我"
+            recent.append(f"{label}：{content[:80]}")
+        return "\n".join([f"对方现在说：{text}", *recent]) if recent else text
 
     def build_context(self, envelope: Dict[str, Any], query: str = "") -> Dict[str, Any]:
         env = self.resolve(envelope)
@@ -583,7 +622,9 @@ class MemoryService:
             "retrieval_trace": {"recall": recall_trace, "profile": profile_trace},
             "state": visible_state,
             "life": self.life.snapshot(env.scope),
-            "expression_notes": self._expression_notes(env.scope, query),
+            "expression_notes": self._expression_notes(
+                env.scope, query or env.content,
+                context_query=self._expression_query(query or env.content, working)),
             "last_user_ts": last_user["ts"] if last_user else None,
         }
 

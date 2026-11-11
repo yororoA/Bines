@@ -4,6 +4,8 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from common.proactive import (
     ProactiveConfig, ProactivePolicy, appraise_history, capability_summary, compact_life,
@@ -11,6 +13,28 @@ from common.proactive import (
 )
 
 log = logging.getLogger("bines.qq.proactive")
+
+_GATE_LABELS = {
+    "unavailable": "会话忙碌或连接不可用",
+    "owner_paused": "主人暂停了自主活动",
+    "activity_paused": "活动已暂停",
+    "pending": "已有意图等待执行",
+    "new_user_observed": "收到新消息",
+    "not_idle": "尚未空闲",
+    "startup_grace": "启动缓冲",
+    "decision_cooldown": "等待下次取舍",
+    "rest_review_cooldown": "休息期间等待取舍",
+    "model_selected_delay": "等待活动继续时间",
+    "no_allowed_kind": "当前没有允许的行动",
+    "planning_opportunity": "可以内部思考",
+    "opportunity": "可以自主取舍",
+}
+
+
+def _log_text(value, limit=220):
+    """将模型理由收成一行，避免换行和过长文本淹没终端。"""
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def enabled():
@@ -135,6 +159,49 @@ class QQProactive:
         self.appraise = appraise
         self.policies = {}
         self.capabilities = None
+        self._gate_logs = {}
+
+    def _clock_text(self, timestamp):
+        return datetime.fromtimestamp(timestamp, ZoneInfo(self.config.timezone)).strftime("%H:%M:%S")
+
+    def _log_gate(self, conversation, policy):
+        """门控变化时报告一次；持久化的等待在重启后也可见。"""
+        state, gate = policy.state, policy.state.last_gate
+        reason = gate.get("reason", "")
+        next_at = state.next_decision if reason == "decision_cooldown" else (
+            state.activity.get("next_at", 0) if reason == "model_selected_delay" else 0)
+        key = (reason, gate.get("planning_only"), tuple(gate.get("allowed_kinds") or []), next_at)
+        if self._gate_logs.get(conversation) == key:
+            return
+        self._gate_logs[conversation] = key
+        detail = ""
+        if next_at:
+            detail = f" · 下次 {self._clock_text(next_at)}"
+            if state.last_decision.get("reason"):
+                detail += " · " + _log_text(state.last_decision["reason"])
+        elif reason == "startup_grace":
+            detail = f" · {self.config.startup_grace:g}s 启动缓冲"
+        if state.contact_wait_until > gate.get("at", 0):
+            detail += f" · 联系等待至 {self._clock_text(state.contact_wait_until)}"
+        log.info("自主意图门控 · %s%s", _GATE_LABELS.get(reason, reason), detail)
+
+    def _log_decision(self, policy, decision):
+        if decision:
+            log.info("自主意图选定 · %s · %s · 目标：%s · 理由：%s",
+                     decision["kind"], _log_text(decision["topic"], 80),
+                     _log_text(decision["intent"]), _log_text(decision["reason"]))
+            return
+        result = policy.state.last_decision
+        label = {"quiet": "选择等待", "invalid": "输出无效", "duplicate": "目标重复",
+                 "waiting_duplicate": "目标已在等待", "disallowed_kind": "当前不允许此行动"
+                 }.get(result.get("status"), result.get("status", "未生成意图"))
+        if result.get("status") == "quiet" and result.get("wait_scope") == "contact" and not policy.state.planning_only:
+            log.info("自主意图取舍 · 暂缓联系至 %s · %s · 其他活动下次 %s",
+                     self._clock_text(policy.state.contact_wait_until),
+                     _log_text(result.get("reason")), self._clock_text(policy.state.next_decision))
+            return
+        log.info("自主意图取舍 · %s · %s · 下次 %s", label,
+                 _log_text(result.get("reason")), self._clock_text(policy.state.next_decision))
 
     def save(self, conversation, policy):
         with self.store.connection() as db:
@@ -330,20 +397,25 @@ class QQProactive:
                 life=snapshot.get("life") or {},
             )
             self.save(conversation, policy)  # Save observation even during cooldown/quiet.
+            self._log_gate(conversation, policy)
             if not ready:
                 continue
+            log.info("自主意图取舍开始 · %s · 可选 %s",
+                     "内部思考" if policy.state.planning_only else "自主行动",
+                     "/".join(policy.state.last_gate.get("allowed_kinds") or []))
             policy.defer(now)  # Failed model calls also back off, rather than retrying every tick.
             self.save(conversation, policy)
             from chatBot.memory_hub import identity_envelope
             continuing = policy.state.activity.get("mode") in {"continue", "review"}
             memory_context = (snapshot if continuing else self.memory.build_context(
-                identity_envelope(identity), query="近期兴趣、情绪变化与未完成的想法"))
+                identity_envelope(identity), query=user.get("content") or "近期兴趣、情绪变化与未完成的想法"))
             materials = {
                 "envelope": memory_context.get("envelope") or identity_envelope(identity),
                 "recent": memory_context.get("working", [])[-12:],
                 "memories": memory_context.get("recalled", [])[:5],
                 "profile": memory_context.get("profile") or {},
                 "bridge": memory_context.get("bridge"),
+                "expression_notes": memory_context.get("expression_notes") or [],
                 "state": memory_context.get("state") or {},
                 "life": compact_life(memory_context.get("life") or snapshot.get("life")),
                 "activity": dict(policy.state.activity),
@@ -374,9 +446,12 @@ class QQProactive:
                 policy.state.last_decision.update(status="disallowed_kind", proposed=decision)
                 decision = None
             if not decision:
-                policy.defer(self.clock(), policy.state.last_decision.get("delay_seconds"))
+                policy.defer(self.clock(), policy.state.last_decision.get("delay_seconds"),
+                             wait_scope=policy.state.last_decision.get("wait_scope", "all"))
                 self.save(conversation, policy)
+                self._log_decision(policy, None)
                 continue
+            self._log_decision(policy, decision)
             event_id = "proactive:" + uuid.uuid4().hex
             candidate = {**decision, "id": event_id, "based_on_user": human_ref(user),
                          "activity_at": activity, "reply_at": conversation_activity, "timestamp": self.clock(),
@@ -396,6 +471,7 @@ class QQProactive:
             reason = guard(self.store, event, self.clock(), config=self.config,
                            central_activity=float(latest.get("ts") or 0))
             if reason:
+                log.info("自主意图取消 · %s · %s", _log_text(decision["topic"], 80), reason)
                 policy.state.last_decision.update(status="cancelled", cancellation_reason=reason)
                 with self.store.connection() as db:
                     db.execute("UPDATE proactive_runs SET status='skipped',error=? WHERE id=?", (reason, event_id))
@@ -410,7 +486,8 @@ class QQProactive:
             self.save(conversation, policy)
 
     def run(self, stop):
-        log.info("自主意愿已启用 · 时间、情绪与交流历史")
+        log.info("自主意愿已启用 · 调度检查 2s · 取舍间隔 %ss · 聊天接续等待 %ss",
+                 self.config.decision_interval, self.config.followup_delay)
         failures = 0
         while not stop.wait(2):
             try:
