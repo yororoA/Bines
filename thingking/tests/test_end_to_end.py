@@ -143,7 +143,8 @@ class EndToEndTest(unittest.TestCase):
         self.worker.run_once()
         self.fx.clock.advance(2 * 86400)
         self.assertTrue(self.worker.run_once())
-        self.assertEqual(self.llm.calls[-1][0]["content"], "写日记的人格")
+        import persona_profile
+        self.assertEqual(self.llm.calls[-1][0]["content"], persona_profile.diary_system_prompt())
         diaries = self.client.list_memories(kinds=["diary"])
         self.assertEqual([d["content"] for d in diaries["items"]], ["今天和管理员聊得很开心。"])
 

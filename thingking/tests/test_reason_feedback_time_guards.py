@@ -73,8 +73,9 @@ class ReasonFeedbackTimeTest(unittest.TestCase):
         self.assertEqual(result[0]["retrieval_status"], "cold")
         self.assertEqual(self.graph.for_message(mid)["retrieval_status"], "cold")
         self.service.retriever.sync()
-        self.assertNotIn(f"u:{mid}:0", self.service.retriever.keys.all_ids())
-        self.assertNotIn(f"u:{mid}:0", {k["id"] for k in self.service.retriever.keys.unindexed_keys()})
+        self.assertEqual(self.service.retriever.keys.get_keys([f"u:{mid}:0"], ["owner"]), {})
+        self.assertIn(f"u:{mid}:0", {k["id"] for k in self.service.retriever.keys.unindexed_keys()
+                                    if k["meta"].get("archive_vector")})
         self.assertFalse(self.service.search("QZ981", ["owner"], as_of=self.fx.clock() - 1))
 
     def test_zero_and_current_time_fence_hot_and_cold_originals(self):

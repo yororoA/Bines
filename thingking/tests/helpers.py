@@ -21,6 +21,12 @@ STRANGER_QQ = "20002"
 GROUP_ID = "30003"
 
 
+def approved_diary(claim, text):
+    """Synthetic passing reviewer receipt for diary lifecycle tests only."""
+    from memory.attribution import receipt
+    return receipt(claim["materials"], text)
+
+
 class FakeEmbedder:
     """Deterministic character-bigram embedding: similar strings get similar vectors."""
 

@@ -8,9 +8,12 @@ from common.local_auth import token_matches
 
 class GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
-    def __init__(self, service, address=None, token=None, memory_hub=None):
+    def __init__(self, service, address=None, token=None, memory_hub=None, sticker_library=None):
         self.service = service
         self.memory_hub = memory_hub
+        from chatBot.sticker_service import StickerService
+        self.stickers = StickerService(service, library=sticker_library)
+        service.sticker_library = self.stickers.library
         self.token = token or gateway_token()
         super().__init__(address or (GATEWAY_HOST, GATEWAY_PORT), GatewayHandler)
 
@@ -65,6 +68,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     raise PermissionError("完整 schema 只允许本机或已绑定主人")
                 result = service.catalog.schemas()
             elif self.path == "/action":
+                if event.get("post_type") == "message":
+                    from chatBot.messages import SEND_ACTIONS
+                    operation_id = data.get("operation_id")
+                    prior = service.store.operation(operation_id) if operation_id else {"status": "not_found"}
+                    if (data["action"] in SEND_ACTIONS and prior.get("status") == "not_found"
+                            and service.store.turn_waits.new_input(event_id)):
+                        raise RuntimeError("qq_new_input：同一人已补充消息，本轮尚未发送的旧回复已取消")
                 if event.get("post_type") == "bines_proactive":
                     from chatBot.proactive import dispatch_allowed
                     activity = self.server.memory_hub.call(
@@ -72,6 +82,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     ).get("last_owner_activity") or {}
                     dispatch_allowed(service.store, event, data["action"], data.get("params", {}),
                                      data.get("operation_id"), central_activity=float(activity.get("ts") or 0))
+                    # Refuse invented destinations before even creating a tool journal
+                    # entry; this is a definite pre-dispatch denial, not uncertain IO.
+                    operation_id = data.get("operation_id")
+                    if not operation_id or service.store.operation(operation_id).get("status") == "not_found":
+                        service.recipients.authorize(identity, data["action"], data.get("params", {}), autonomous=True)
+                operation_id = data.get("operation_id")
+                if operation_id and service.store.operation(operation_id).get("status") != "not_found":
+                    # Receipt replays still pass authorization and exact action/params
+                    # binding in call(), but must never reopen the original journal.
+                    result = service.call(identity, data["action"], data.get("params", {}),
+                                          operation_id, data.get("timeout", 30),
+                                          autonomous=event.get("post_type") == "bines_proactive")
+                    if self.server.memory_hub:
+                        self.server.memory_hub.remember_receipt(identity, data["action"], data.get("params", {}), result)
+                    return self.respond(200, {"result": result})
                 journal, entry = None, None
                 if self.server.memory_hub and data["action"] not in {"get_friend_msg_history", "get_group_msg_history"}:
                     from common.memory_journal import MemoryJournal
@@ -89,7 +114,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         key=journal.prefix + ":native:" + operation_id if operation_id else None)
                 try:
                     result = service.call(identity, data["action"], data.get("params", {}),
-                                          data.get("operation_id"), data.get("timeout", 30))
+                                          data.get("operation_id"), data.get("timeout", 30),
+                                          autonomous=event.get("post_type") == "bines_proactive")
                 except BaseException as exc:
                     if journal:
                         journal.finish(entry, str(exc), status="uncertain")
@@ -99,10 +125,50 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     self.server.memory_hub.remember_receipt(identity, data["action"], data.get("params", {}), result)
             elif self.path == "/quoted_message":
                 result = service.quoted_message(identity, event_id, data.get("message_id"))
+            elif self.path == "/stickers":
+                sync_allowed = data.get("sync_qq", True) is True
+                before_sync = None
+                if event.get("post_type") == "bines_proactive":
+                    from chatBot.proactive import guard, dispatch_allowed
+                    activity = self.server.memory_hub.call(
+                        LOCAL_IDENTITY, "activity_snapshot", {},
+                    ).get("last_owner_activity") or {} if self.server.memory_hub else {}
+                    central_activity = float(activity.get("ts") or 0)
+                    if event.get("proactive", {}).get("planning_only"):
+                        raise PermissionError("休息思考轮次不执行表情操作")
+                    reason = guard(service.store, event, central_activity=central_activity)
+                    if reason:
+                        raise PermissionError(f"表情操作已取消：{reason}")
+                    if data.get("method") == "collect":
+                        if not str(data.get("operation_id") or "").startswith(str(event_id) + ":"):
+                            raise PermissionError("收藏必须绑定本轮回执编号")
+                        try:
+                            dispatch_allowed(service.store, event, "add_custom_face", {},
+                                             data.get("operation_id"), central_activity=central_activity)
+                        except PermissionError:
+                            sync_allowed = False  # Quiet observation may save locally, never write QQ.
+                        def before_sync():
+                            try:
+                                fresh_activity = self.server.memory_hub.call(
+                                    LOCAL_IDENTITY, "activity_snapshot", {},
+                                ).get("last_owner_activity") or {} if self.server.memory_hub else {}
+                                central = float(fresh_activity.get("ts") or 0)
+                                if guard(service.store, event, central_activity=central):
+                                    return False
+                                # Use the not-yet-started QQ sub-operation for the
+                                # dispatch check; the outer collection is already recorded.
+                                dispatch_allowed(service.store, event, "add_custom_face", {},
+                                                 data["operation_id"] + ":sync-check", central_activity=central)
+                                return True
+                            except Exception:
+                                return False
+                result = self.server.stickers.call(
+                    identity, data["method"], data.get("params", {}), event_id=event_id,
+                    operation_id=data.get("operation_id"), sync_allowed=sync_allowed, before_sync=before_sync)
             elif self.path == "/operation":
                 if not identity.qq_admin:
                     raise PermissionError("回执查询只允许本机或已绑定主人")
-                result = service.store.operation(data["operation_id"])
+                result = self.server.stickers.reconcile(identity, data["operation_id"])
             elif self.path == "/operation_state":
                 # A scoped reply can inspect its own persisted turn's receipts.
                 # Knowing an operation ID must not expose another conversation.

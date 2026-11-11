@@ -255,6 +255,7 @@ class MemoryAdminTest(unittest.TestCase):
         source = self.service.add_memory("semantic", "owner", "用户约好周末送蓝色围巾")["id"]
         target = self.service.add_memory("semantic", "owner", "周末准备把蓝色围巾送给朋友")["id"]
         claimed = self.service.claim_job(["associate"])
+        claimed["materials"].pop("compact")  # Exercise the legacy verbatim-quote protocol.
         other = self.service.graph.for_memory(target)
         self.assertEqual(claimed["job"]["payload"]["node_id"], self.service.graph.for_memory(source)["id"])
         link = {"target_id": other["id"], "reason_key": "scarf-gift", "reason": "周末赠送蓝色围巾的约定",

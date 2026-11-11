@@ -56,7 +56,7 @@ def search_memory(query: str, k: int = 8):
         # whole source again and accidentally returning its unrelated opening.
         span = _snippet(matched[0] if matched else hit["content"], query, counter, 640)
         evidence = [{key: ev.get(key) for key in
-                     ("source_type", "source_ref", "role", "ts", "action", "status")}
+                     ("source_type", "source_id", "source_ref", "role", "actor_id", "actor_name", "ts", "action", "status")}
                     | {"content": _snippet(ev.get("content") or "", query, counter, 256)}
                     for ev in (hit.get("evidence") or [])[:3]]
         associations = [{"id": row["id"], "reason": counter.prefix(str(row.get("reason") or ""), 160)}
@@ -141,6 +141,30 @@ def correct_memory(source_id: str, quote: str, replacement: str, explanation: st
     return "事实纠正已暂存，完成本轮后按真实用户原话核验并重评关联。"
 
 
+def learn_expression(technique: str, situation: str, source_quote: str, source_id: str = ""):
+    """从本轮实际看过的外部原文学习表达特征；历史用 citation_id，当前网页/字幕可省略 source_id。"""
+    from tools.context import CURRENT_CONTEXT
+    context = CURRENT_CONTEXT.get()
+    if context.planning_only:
+        raise PermissionError("休息思考轮次不新增表达经验")
+    reason = context.check() if context.check else ""
+    if reason:
+        raise RuntimeError(f"表达学习已取消：{reason}")
+    journal = context.journal
+    if journal is None:
+        raise RuntimeError("本轮没有可核验的表达来源")
+    source = journal.resolve_expression_source(source_quote, source_id)
+    client, identity = _memory_client()
+    # QQ's hub owns outbox delivery. Desktop has the trusted direct client;
+    # do not send record_experience through an ordinary QQ identity.
+    if identity.local and source.get("kind") == "experience":
+        journal.outbox.sync(client.call, limit=50, time_budget=1.0)
+    reason = context.check() if context.check else ""
+    if reason:
+        raise RuntimeError(f"表达学习已取消：{reason}")
+    return client.learn_expression(identity.scope, source, source_quote, technique, situation)
+
+
 def _apply_changes(state, *, current_location=None, relationship_delta=None, add_item=None, remove_item=None,
                    active_quest=None, current_time=None, npc_name=None, npc_attire=None, npc_visual_status=None,
                    npc_activity=None, add_memory_highlight=None, remove_memory_highlight=None, important_thing=None):
@@ -205,27 +229,32 @@ def update_status(current_location=None, relationship_level=None, relationship_d
         source_ref = context.journal.prefix + ":user" if not context.autonomous else context.journal.prefix + ":turn"
     else:
         source_ref = None
+    changes = {key: value for key, value in {
+        "current_location": current_location, "relationship_delta": delta,
+        "add_item": add_item, "remove_item": remove_item, "active_quest": active_quest,
+        "current_time": current_time, "npc_name": npc_name, "npc_attire": npc_attire,
+        "npc_visual_status": npc_visual_status, "npc_activity": npc_activity,
+        "add_memory_highlight": add_memory_highlight, "remove_memory_highlight": remove_memory_highlight,
+        "important_thing": important_thing,
+    }.items() if value is not None}
     for _ in range(_MAX_CONFLICT_RETRIES):
         current = client.get_state(scope)
         if expected_version is not None and expected_version != current.get("version"):
             return "状态更新失败：状态已被其他线程更新，请重新读取后再操作"
-        updated = _apply_changes(
-            current.get("data") or {}, current_location=current_location, relationship_delta=delta,
-            add_item=add_item, remove_item=remove_item, active_quest=active_quest, current_time=current_time,
-            npc_name=npc_name, npc_attire=npc_attire, npc_visual_status=npc_visual_status, npc_activity=npc_activity,
-            add_memory_highlight=add_memory_highlight, remove_memory_highlight=remove_memory_highlight,
-            important_thing=important_thing,
-        )
+        updated = _apply_changes(current.get("data") or {}, **changes)
         try:
-            result = client.put_state(scope, updated, expected_version=current.get("version"),
+            result = client.put_state(scope, updated, expected_version=current.get("version"), changes=changes,
                                       **({"source_ref": source_ref} if source_ref else {}))
         except RuntimeError as exc:
             if "StateConflict" not in str(exc):
                 raise
             last_error = str(exc)
             continue
+        committed = result.get("data")
+        if not isinstance(committed, dict):
+            committed = updated  # Older clients may return only the version.
         warnings = [f"警告：{key} 与预期状态不符" for key, value in (expected_state or {}).items()
-                    if key in updated and updated[key] != value]
+                    if key in committed and committed[key] != value]
         return (f"动态状态已更新 (版本: {current.get('version')} -> {result['version']})"
                 + ("\n" + "\n".join(warnings) if warnings else ""))
     return f"状态更新失败：状态被并发修改，重试 {_MAX_CONFLICT_RETRIES} 次仍冲突（{last_error}）。"

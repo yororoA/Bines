@@ -28,6 +28,10 @@ venv/
 .tools/memory_export/
 .tools/memory-delivery/
 .tools/memory-repair-*/
+.tools/memory-persona-audit-*/
+.tools/persona-interest-*/
+.tools/qq-quote-*/
+.tools/qq-turn-wait-*/
 .tools/agent-browser/
 singing/singing_venv/
 voiceprints
@@ -114,3 +118,4 @@ deploy/napcat/data/
 deploy/napcat/.env
 deploy/napcat/qrcode.png
 mcp.servers.json
+.tools/memory-subject-audit-*/

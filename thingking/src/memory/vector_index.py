@@ -17,6 +17,7 @@ from pathlib import Path
 from .embedding import Embedder, embedding_identity
 from .embedding_cache import EmbeddingCache
 from .chunking import EmbeddingChunks
+from .evidence import vector_key_eligible, vector_key_filter
 
 COLLECTION = "memories"
 PREFIX = "memory_keys_v3_"
@@ -192,13 +193,12 @@ class VectorIndex:
         if not value or value.get("key_rowid") is None or value.get("snapshot_complete"):
             return value
         cursor = int(value.get("snapshot_cursor", 0))
-        rows = repo.conn.execute("SELECT rowid,id,source_hash,search_hash,"
-            "COALESCE(json_extract(meta,'$.retrieval_status'),'hot') AS tier FROM retrieval_keys "
+        rows = repo.conn.execute("SELECT rowid,id,source_hash,search_hash,meta FROM retrieval_keys "
             "WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?", (cursor, value["key_rowid"], limit)).fetchall()
         with repo.transaction():
             repo.conn.executemany("INSERT OR IGNORE INTO retrieval_vector_build_members VALUES(?,?,?,?,0)",
                 [(self.generation, row["id"], row["source_hash"], row["search_hash"]) for row in rows
-                 if row["tier"] != "cold"])
+                 if vector_key_eligible(dict(row))])
             value["snapshot_cursor"] = rows[-1]["rowid"] if rows else value["key_rowid"]
             value["snapshot_complete"] = len(rows) < limit or value["snapshot_cursor"] >= value["key_rowid"]
             repo.conn.execute("UPDATE meta SET value=? WHERE key='vector_build_watermark'", (json.dumps(value),))
@@ -226,7 +226,7 @@ class VectorIndex:
             CROSS JOIN retrieval_vector_build_members b
             WHERE k.indexed_at IS NULL AND k.rowid<=? AND b.generation=? AND b.key_id=k.id
               AND b.superseded=0 AND b.source_hash=k.source_hash AND b.search_hash=k.search_hash
-              AND COALESCE(json_extract(k.meta,'$.retrieval_status'),'hot')!='cold'"""
+              AND """ + vector_key_filter("k")
         if allow_quarantined:
             pending += (" AND NOT EXISTS (SELECT 1 FROM retrieval_vector_failures f WHERE "
                         "f.key_id=k.id AND f.generation=? AND f.source_hash=k.source_hash "
@@ -273,8 +273,7 @@ class VectorIndex:
             self._keys, self._manifest = target, updated
 
     def upsert_keys(self, keys, *, generation=None):
-        keys = [key for key in keys if (json.loads(key["meta"]) if isinstance(key.get("meta"), str)
-                                       else key.get("meta") or {}).get("retrieval_status") != "cold"]
+        keys = [key for key in keys if vector_key_eligible(key)]
         if not keys:
             return []
         target = self._keys if generation is None else self._client.get_collection(generation, embedding_function=None)
@@ -315,6 +314,7 @@ class VectorIndex:
             metadata.append({"scope": key["scope"], "kind": key["kind"], "source_hash": key["source_hash"],
                              "search_hash": hashlib.sha256(key["search_text"].encode()).hexdigest(),
                              "memory_id": str(key.get("memory_id") or ""),
+                             "retrieval_status": extra.get("retrieval_status", "hot"),
                              "subject_id": str(extra.get("subject_id") or "")})
         target.upsert(ids=[key["id"] for key in keys], embeddings=embeddings,
                       documents=[key["search_text"] for key in keys], metadatas=metadata)
@@ -344,7 +344,7 @@ class VectorIndex:
             target = self._keys if generation is None else self._client.get_collection(generation, embedding_function=None)
             target.delete(ids=list(ids))
 
-    def _query(self, text, scopes, kinds, n, subject_id=None):
+    def _query(self, text, scopes, kinds, n, subject_id=None, *, archive_only=False):
         started = time.monotonic()
         trace = {"status": "empty", "cache_hit": False, "wait_ms": 0.0}
         self.last_query_trace = trace
@@ -393,6 +393,12 @@ class VectorIndex:
                 clauses.append({"kind": {"$in": list(kinds)}})
             if subject_id:
                 clauses.append({"subject_id": subject_id})
+            if archive_only:
+                clauses.append({"retrieval_status": "cold"})
+            else:
+                # Chroma's $ne includes absent metadata, preserving old hot
+                # keys while excluding archive vectors before the top-N limit.
+                clauses.append({"retrieval_status": {"$ne": "cold"}})
             result = target.query(query_embeddings=[embedding],
                 where=clauses[0] if len(clauses) == 1 else {"$and": clauses},
                 n_results=max(1, min(int(n), count)), include=["distances", "metadatas"])
@@ -407,6 +413,14 @@ class VectorIndex:
 
     def query_keys(self, text, scopes, kinds=None, n=40):
         result = self._query(text, scopes, kinds, n)
+        return self._matches(result)
+
+    def query_archive_keys(self, text, scopes, kinds=None, n=12):
+        # _query reuses the same query embedding and cache as the hot channel.
+        return self._matches(self._query(text, scopes, kinds, n, archive_only=True))
+
+    @staticmethod
+    def _matches(result):
         if result is None:
             return VectorMatches()
         return VectorMatches(zip(result["ids"][0], result["distances"][0]),

@@ -101,7 +101,9 @@ class MemoryStore:
             if "batch" not in columns:
                 db.execute("ALTER TABLE events ADD COLUMN batch TEXT")
             for name, definition in (("next_attempt", "REAL NOT NULL DEFAULT 0"),
-                                     ("last_error", "TEXT"), ("failure_reason", "TEXT")):
+                                     ("last_error", "TEXT"), ("failure_reason", "TEXT"),
+                                     ("deferred_claims", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("response_requested", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE events ADD COLUMN {name} {definition}")
             db.execute("CREATE INDEX IF NOT EXISTS event_due ON events(status,next_attempt,received)")
@@ -111,6 +113,8 @@ class MemoryStore:
                 db.execute("ALTER TABLE messages ADD COLUMN memory_synced INTEGER DEFAULT 0")
         from chatBot.recovery import initialize_recovery
         initialize_recovery(self)
+        from chatBot.turn_wait import TurnWaits
+        self.turn_waits = TurnWaits(self)
 
     @contextmanager
     def connection(self):
@@ -175,17 +179,18 @@ class MemoryStore:
                                "failure_reason=NULL WHERE id=?", (event["id"],))
                     continue
                 reason = "side_effects" if self._turn_writes(db, turn_id) else (
-                    "retry_exhausted" if event["attempts"] >= self.max_attempts else None)
+                    "retry_exhausted" if event["attempts"] - event["deferred_claims"] >= self.max_attempts else None)
                 db.execute("UPDATE events SET status=?,worker=NULL,lease=0,next_attempt=0,"
                            "error=?,last_error=?,failure_reason=? WHERE id=?",
                            ("failed" if reason else "pending", "处理租约已过期", "处理租约已过期", reason, event["id"]))
             # Older versions left exhausted pending rows invisible to claim().
             db.execute("UPDATE events SET status='failed',failure_reason='retry_exhausted',"
                        "last_error=COALESCE(last_error,error,'重试次数已耗尽') "
-                       "WHERE status='pending' AND attempts>=?", (self.max_attempts,))
+                       "WHERE status='pending' AND attempts-deferred_claims>=?", (self.max_attempts,))
+            self.turn_waits.refresh_due(db, now, debounce)
             row = db.execute("""
                 SELECT conversation,MIN(received) first,MAX(received) last FROM events
-                WHERE status='pending' AND attempts<? AND next_attempt<=? AND conversation NOT IN
+                WHERE status='pending' AND attempts-deferred_claims<? AND next_attempt<=? AND conversation NOT IN
                 (SELECT conversation FROM events WHERE status='working')
                 AND conversation NOT IN (SELECT conversation FROM events WHERE status='pending' AND next_attempt>?)
                 GROUP BY conversation HAVING MAX(received)<=? OR MIN(received)<=?
@@ -194,20 +199,22 @@ class MemoryStore:
             if not row:
                 return []
             rows = db.execute(
-                "SELECT * FROM events WHERE status='pending' AND attempts<? AND next_attempt<=? "
-                "AND conversation=? ORDER BY received,id LIMIT ?",
+                "SELECT rowid AS queue_seq,* FROM events WHERE status='pending' AND attempts-deferred_claims<? AND next_attempt<=? "
+                "AND conversation=? ORDER BY received,rowid LIMIT ?",
                 (self.max_attempts, now, row["conversation"], limit),
             ).fetchall()
             batch = rows[0]["batch"]
             if batch:
-                rows = db.execute("SELECT * FROM events WHERE batch=? AND status='pending' ORDER BY received,id", (batch,)).fetchall()
+                rows = db.execute("SELECT rowid AS queue_seq,* FROM events WHERE batch=? AND status='pending' ORDER BY received,rowid", (batch,)).fetchall()
+                rows = self.turn_waits.merge(db, batch, rows, limit)
             else:
                 rows = [event for event in rows if not event["batch"]]
                 # Internal initiations never coalesce into a real person's reply batch.
-                humans = [event for event in rows
-                          if json.loads(event["raw"]).get("post_type") != "bines_proactive"]
+                from chatBot.turn_wait import human_input
+                humans = [event for event in rows if human_input(json.loads(event["raw"]))]
                 rows = humans or rows[:1]
                 batch = hashlib.sha256("|".join(event["id"] for event in rows).encode()).hexdigest()
+            self.turn_waits.register(db, batch, rows)
             for event in rows:
                 db.execute("UPDATE events SET status='working',worker=?,lease=?,attempts=attempts+1,batch=?,next_attempt=0 WHERE id=?",
                            (worker, now+lease, batch, event["id"]))
@@ -246,10 +253,12 @@ class MemoryStore:
                 status, reason, due = "done", None, 0
                 if error is not None:
                     reason = "side_effects" if self._turn_writes(db, self._event_turn(row)) else (
-                        "non_retryable" if not retryable else "retry_exhausted" if row["attempts"] >= self.max_attempts else None)
+                        "non_retryable" if not retryable else "retry_exhausted"
+                        if row["attempts"] - row["deferred_claims"] >= self.max_attempts else None)
                     status = "failed" if reason else "pending"
                     if not reason:
-                        due = now + min(self.retry_max, self.retry_base * 2 ** min(row["attempts"] - 1, 20))
+                        due = now + min(self.retry_max, self.retry_base * 2 ** min(
+                            row["attempts"] - row["deferred_claims"] - 1, 20))
                 db.execute("UPDATE events SET status=?,error=?,last_error=COALESCE(?,last_error),"
                            "failure_reason=?,worker=NULL,lease=0,next_attempt=? WHERE id=? AND worker=?",
                            (status, str(error)[:2000] if error is not None else None,

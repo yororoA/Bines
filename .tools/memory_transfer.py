@@ -6,6 +6,10 @@
     python .tools/memory_transfer.py verify  D:\\bines-memory-20261022.tar.gz
     python .tools/memory_transfer.py import  D:\\bines-memory-20261022.tar.gz
 
+已有记忆库时默认拒绝替换；先用 thingking/scripts/merge_memory_history.py
+生成合并计划并验证隔离副本。仅在明确需要整库替换且已审阅备份时追加
+--replace-existing。import 是替换，不会合并本机新增历史。
+
 为什么不能直接复制文件夹：
   memory.db 跑着 WAL 模式，2 MB 的热数据还在 memory.db-wal 里，
   只拷 memory.db 会丢掉最近的对话。export 会先停容器再打包。
@@ -95,6 +99,7 @@ def sqlite_counts(db: Path) -> dict:
         return {}
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        con.execute("PRAGMA query_only=ON")
         counts = {}
         for table in ("memories", "messages", "conversations"):
             try:
@@ -218,7 +223,13 @@ def do_verify(source: Path) -> int:
     return 0
 
 
-def do_import(source: Path) -> int:
+def do_import(source: Path, *, replace_existing: bool = False) -> int:
+    # Refuse before stopping containers or extracting/moving any files.
+    if (MEMORY_DIR / "memory.db").exists() and not replace_existing:
+        print("[中止] 当前设备已有记忆库；import 会替换而非合并，可能遗漏本机新增历史。")
+        print("请先运行 thingking/scripts/merge_memory_history.py plan/stage 审阅恢复计划。")
+        print("若确实需要整库替换，审阅备份后显式使用 import <包> --replace-existing。")
+        return 2
     if do_verify(source):
         return 1
     live = running_containers()
@@ -282,7 +293,8 @@ def do_import(source: Path) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    replace = len(sys.argv) == 4 and sys.argv[1] == "import" and sys.argv[3] == "--replace-existing"
+    if len(sys.argv) != 3 and not replace:
         print(__doc__)
         return 2
     action, raw = sys.argv[1], sys.argv[2]
@@ -292,7 +304,7 @@ def main() -> int:
     if not handler:
         print(f"未知动作：{action}\n\n{__doc__}")
         return 2
-    return handler(target)
+    return do_import(target, replace_existing=replace) if action == "import" else handler(target)
 
 
 if __name__ == "__main__":

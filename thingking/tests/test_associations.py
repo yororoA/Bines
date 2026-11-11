@@ -1,4 +1,5 @@
 """Isolated lifecycle and graph regression; no model downloads or production DB."""
+from helpers import approved_diary
 import json
 import tempfile
 import unittest
@@ -103,6 +104,7 @@ class AssociationTest(unittest.TestCase):
         self.assertEqual(self.repo.pending_message_count("local"), 8)
         self.assertIsNone(self.service.claim_job(["summarize"]))  # refreshed source must associate first
         self.drain_associations()
+        self.clock.advance(30)  # dependency deferral expires after the source is ready
         fresh = self.claim("summarize")
         self.assertNotEqual(fresh["materials"]["retention"]["source_hash"],
                             claimed["materials"]["retention"]["source_hash"])
@@ -115,7 +117,7 @@ class AssociationTest(unittest.TestCase):
         self.service.enqueue_due_diaries()
         claimed = self.claim("diary")
         self.assertEqual(len(claimed["materials"]["episodes"]), 3)
-        result = self.service.complete_diary(claimed["job"]["id"], "当天全部三段经历")
+        result = self.service.complete_diary(claimed["job"]["id"], "当天全部三段经历", attribution_review=approved_diary(claimed, '当天全部三段经历'))
         diary = self.repo.get_memory(result["diary_id"])
         self.assertEqual(set(diary["meta"]["episode_ids"]), set(ids))
         self.assertEqual([self.service.graph.for_memory(mid)["retrieval_status"] for mid in ids],
@@ -305,7 +307,7 @@ class AssociationTest(unittest.TestCase):
             block = prompt_builder._memory_recall_block({"recalled": views * 10})
         self.assertIn("来源 n:", block)
         self.assertGreater(len(journal.memory_presentations), 0)
-        self.assertLess(len(block), 4800)
+        self.assertLess(len(block), 5000)  # Includes explicit speaker role and ID.
         self.assertTrue(all(len(span) <= 480 for item in journal.memory_presentations.values() for span in item["spans"]))
 
     def test_vector_failure_keeps_lexical_and_graph(self):
@@ -530,7 +532,8 @@ class AssociationTest(unittest.TestCase):
         cold = next(hit for hit in hits if hit["id"] == b)
         self.assertTrue(cold["evidence"])
         self.assertEqual(cold["retrieval_status"], "cold")
-        self.assertNotIn(f"m:{b}:0", self.service.retriever.keys.all_ids())
+        self.assertEqual(self.service.retriever.keys.get_keys([f"m:{b}:0"], ["owner"]), {})
+        self.assertIn(f"m:{b}:0", self.service.retriever.keys.all_ids())
         self.assertEqual(self.service.retriever.keys.source_evidence(b, ["qq_group:30003"]), [])
         self.service.delete_memory(b)
         self.assertNotIn(b, {hit["id"] for hit in self.service.search("星河", ["owner"])})

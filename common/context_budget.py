@@ -106,6 +106,10 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
     hard_limit = max(0, window - output_reserve - 256) if window else None
     limit = min(configured_limit, hard_limit) if hard_limit is not None else configured_limit
     result = [dict(message) for message in messages]
+    # Automatic observations are replaceable context, not immutable tool
+    # receipts. Bound them before they can crowd out recalled evidence.
+    from common.website_perception import compact_website_context
+    result = compact_website_context(result, counter=counter, budget=min(8192, max(0, limit // 4)))
     schemas = {k: v for k, v in {"tools": tools, "response_format": response_format}.items() if v}
     schema_cost = counter.count(schemas) + 16 if schemas else 0
     cost = lambda: counter.messages(result) + schema_cost

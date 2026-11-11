@@ -104,8 +104,13 @@ class MemoryLearningTest(unittest.TestCase):
         self.assertEqual(claimed["job"]["payload"]["memory_id"], summary["memory_id"])
         self.assertEqual(claimed["materials"]["corrections"][0]["replacement"], "上海")
         self.service.complete_memory_repair(claimed["job"]["id"], "管理员住在上海")
+        # The dependent repair may already have been inspected before its
+        # parent. Dependency waits use a short delay, not a model-failure retry.
+        self.clock.advance(30)
         next_job = self.service.claim_job(["repair_memory"])
         self.assertEqual(next_job["job"]["payload"]["memory_id"], diary["memory_id"])
+        self.assertEqual(next_job["job"]["payload"].get("generation_failures", 0), 0)
+        self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM memory_model_calls").fetchone()[0], 0)
         self.assertIn("上海", json.dumps(next_job["materials"], ensure_ascii=False))
         self.service.complete_memory_repair(next_job["job"]["id"], "朋友住在上海")
         self.assertTrue(self.graph.valid(self.graph.for_memory(diary["memory_id"])))

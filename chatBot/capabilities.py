@@ -4,7 +4,6 @@ import json
 import threading
 import time
 import base64
-import re
 from pathlib import PurePosixPath
 from urllib.request import Request, build_opener, ProxyHandler
 from chatBot.config import WEBUI_URL, WEBUI_TOKEN, ROOT
@@ -13,6 +12,9 @@ from chatBot.messages import (
     compact_qq_send_params,
 )
 from chatBot.catalog import reference_catalog, with_runtime_schema, bundled_document
+from chatBot.quotes import cached_quote, message_id as quote_id, validate_quote_peer, validate_reply_segments
+from chatBot.receipts import classify_write_result
+from chatBot.recipients import RecipientRegistry
 
 # Safe conversation operations are explicit; new/unknown actions require local ownership.
 SCOPED = {
@@ -118,13 +120,15 @@ class CapabilityService:
     def __init__(self, client, store, catalog=None):
         self.client, self.store = client, store
         self.catalog = catalog or SchemaCatalog()
+        self.recipients = RecipientRegistry(store)
         self.started_at = time.time()
 
     def _message(self, identity, message_id):
         # Equality matters: LIKE would let a model-supplied "%" bypass the scope lookup.
-        message_id = str(message_id)
-        if not re.fullmatch(r"[1-9]\d*", message_id):
-            raise PermissionError("需使用当前会话中真实的 message_id")
+        try:
+            message_id = quote_id(message_id)
+        except ValueError:
+            raise PermissionError("需使用当前会话中真实的 message_id") from None
         external_id = f"{identity.account}:{identity.group or 'p:'+identity.user}:{message_id}"
         with self.store.connection() as db:
             row = db.execute(
@@ -137,8 +141,11 @@ class CapabilityService:
 
     def quoted_message(self, identity, event_id, message_id):
         """Resolve only a reply actually present in this event, checking its peer."""
-        message_id = str(message_id)
-        if not event_id or not re.fullmatch(r"[1-9]\d*", message_id):
+        try:
+            message_id = quote_id(message_id)
+        except ValueError:
+            raise PermissionError("引用消息需来自当前 QQ 事件") from None
+        if not event_id:
             raise PermissionError("引用消息需来自当前 QQ 事件")
         with self.store.connection() as db:
             row = db.execute("SELECT raw FROM events WHERE id=?", (event_id,)).fetchone()
@@ -154,17 +161,24 @@ class CapabilityService:
         external_id = f"{identity.account}:{identity.group or 'p:'+identity.user}:{message_id}"
         with self.store.connection() as db:
             cached = db.execute(
-                "SELECT raw,recalled FROM messages WHERE scope=? AND external_id=?",
+                "SELECT raw,recalled,role,actor,name FROM messages WHERE scope=? AND external_id=?",
                 (identity.scope, external_id),
             ).fetchone()
-        if cached and cached["recalled"]:
+
+        def recalled():
+            # events.raw retains the envelope after recall; it cannot remain a
+            # grant to fetch a quote once the referring message was withdrawn.
+            current_id = str(event.get("message_id") or "")
+            current_external = f"{identity.account}:{identity.group or 'p:'+identity.user}:{current_id}"
+            with self.store.connection() as db:
+                return db.execute(
+                    "SELECT 1 FROM messages WHERE scope=? AND external_id IN (?,?) AND recalled=1 LIMIT 1",
+                    (identity.scope, external_id, current_external),
+                ).fetchone() is not None
+
+        if recalled():
             return {"status": "failed", "msg": "引用消息已撤回"}
-        cached_data = None
-        if cached and cached["raw"]:
-            try:
-                cached_data = json.loads(cached["raw"])
-            except (TypeError, ValueError):
-                cached_data = None
+        cached_data = cached_quote(identity, message_id, cached)
         cached_segments = segments(
             (cached_data or {}).get("message", (cached_data or {}).get("raw_message", ""))
         )
@@ -177,32 +191,22 @@ class CapabilityService:
         # Refresh expiring image URLs through NapCat; cached text remains useful
         # when the original message is no longer available from the history API.
         result = self.client.raw_api("get_msg", {"message_id": message_id}, timeout=10)
+        if recalled():
+            return {"status": "failed", "msg": "引用消息已撤回"}
         if not isinstance(result, dict) or result.get("status") != "ok":
             if cached_data:
                 return {"status": "ok", "data": cached_data}
             return {"status": "failed", "msg": "引用消息暂不可读取"}
         data = result.get("data") or {}
-        if not isinstance(data, dict):
-            raise PermissionError("引用消息返回格式无效")
-        same_message = str(data.get("message_id")) == message_id
-        same_account = str(data.get("self_id", identity.account)) == identity.account
-        if identity.group:
-            same_peer = (data.get("message_type") == "group"
-                         and str(data.get("group_id")) == identity.group)
-        else:
-            sender = str(data.get("user_id") or (data.get("sender") or {}).get("user_id") or "")
-            outgoing_peer = str(data.get("target_id") or data.get("peer_id") or "")
-            same_peer = (data.get("message_type") == "private" and not data.get("group_id")
-                         and (sender == identity.user or
-                              (sender == identity.account and
-                               (outgoing_peer == identity.user or bool(cached)))))
-        if not (same_message and same_account and same_peer):
-            raise PermissionError("引用消息不属于当前会话")
+        validate_quote_peer(data, identity, message_id, cached=bool(cached))
         return result
 
     def _image_source(self, identity, source):
         if not isinstance(source, str) or not source:
             raise ValueError("image 需要 file")
+        library = getattr(self, "sticker_library", None)
+        if library is not None and library.authorize_path(identity, source):
+            return
         if source.startswith("base64://"):
             encoded = source.removeprefix("base64://")
             if len(encoded) > 3 * 1024 * 1024:
@@ -315,6 +319,11 @@ class CapabilityService:
         if not isinstance(action, str) or not action or len(action) > 128 or not isinstance(params or {}, dict):
             raise ValueError("action 和 params 格式无效")
         params = dict(params or {})
+        if action in SEND_ACTIONS:
+            if "message" in params and "messages" in params:
+                raise ValueError("不能同时传 message 和 messages")
+            validate_reply_segments(sent_message(params), auto_escape=params.get("auto_escape") in {True, "true"})
+            self._sticker_media(identity, sent_message(params))
         if action in SEND_ACTIONS and not (identity.local or identity.owner):
             if "message" in params and "messages" in params:
                 raise ValueError("不能同时传 message 和 messages")
@@ -327,20 +336,39 @@ class CapabilityService:
         self.authorize(identity, action, params)
         return compact_qq_send_params(action, params)
 
-    def call(self, identity, action, params=None, operation_id=None, timeout=30):
+    def _sticker_media(self, identity, message):
+        """Account administration does not expose private library files in a group."""
+        import posixpath
+        from urllib.parse import unquote
+        library = getattr(self, "sticker_library", None)
+        for part in segments(message):
+            data = part.get("data") or {}
+            if part.get("type") == "image":
+                source = data.get("file")
+                if not isinstance(source, str):
+                    continue
+                path = posixpath.normpath(unquote(source).removeprefix("file://"))
+                path = "/" + path.lstrip("/") if path.startswith("/") else path
+                if path.startswith("/bines-media/stickers/"):
+                    if library is None or not library.authorize_path(identity, path):
+                        raise PermissionError("表情文件不属于当前可访问范围")
+            elif part.get("type") == "node" and "content" in data:
+                self._sticker_media(identity, data["content"])
+
+    def call(self, identity, action, params=None, operation_id=None, timeout=30, *, autonomous=False):
         params = self.prepare(identity, action, params)
         if not is_read(action):
             if not operation_id:
                 raise ValueError("写操作必须携带 operation_id")
+            if self.store.operation(operation_id).get("status") == "not_found":
+                self.recipients.authorize(identity, action, params, autonomous=autonomous)
             new, previous = self.store.begin_operation(operation_id, action, params)
             if not new:
                 return previous
         result = self.client.raw_api(action, params, timeout=max(1, min(float(timeout), 120)))
-        if isinstance(result, dict) and result.get("status") == "failed" and result.get("retcode") in {200, 1200}:
-            # NapCat catches handler exceptions (including timeouts) under these
-            # generic codes, after a write may already have affected QQ.
-            if not is_read(action):
-                result = {**result, "status": "uncertain"}
+        self.recipients.observe(identity, action, params, result)
+        if not is_read(action):
+            result = classify_write_result(action, params, result)
         if operation_id and not is_read(action):
             self.store.complete_operation(operation_id, result)
         return result

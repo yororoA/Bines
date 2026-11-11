@@ -327,6 +327,9 @@ class MemoryJournal:
         self.memory_diagnostics = {}
         self.tool_result_refs = {}
         self.last_tool_receipt = ""
+        self.expression_records = {}
+        self.confirmed_expression_sources = {}
+        self.confirmed_expression_memories = {}
         self.prompt_frames = []
         self.prefix = "experience:" + hashlib.sha256(str(outbox.path.resolve()).encode()).hexdigest() + ":" + turn_id
 
@@ -340,7 +343,15 @@ class MemoryJournal:
                                       "citations": self.memory_citations}
             record["memory_corrections"] = self.memory_corrections
             record["memory_diagnostics"] = self.memory_diagnostics
-        self.outbox.put(key, "record_experience", {"envelope": self.envelope, "record": safe_data(record)})
+        record = safe_data(record)
+        revision = self.outbox.put(key, "record_experience", {"envelope": self.envelope, "record": record})
+        self.expression_records.pop(key, None)
+        from common.expression_sources import experience_text_fields
+        if experience_text_fields(record) or (record.get("status") == "succeeded"
+                and record.get("action") in {"search_memory", "read_memory_source"}):
+            self.expression_records[key] = {"record": record, "revision": revision, "rendered": ""}
+            while len(self.expression_records) > 128:
+                self.expression_records.pop(next(iter(self.expression_records)))
 
     def record_memory_diagnostic(self, stage, data):
         # Diagnostics contain counts/IDs/statuses, never another copy of raw
@@ -417,6 +428,84 @@ class MemoryJournal:
         self.memory_citations.append({"source_id": source_id, "answer_span": answer_span,
                                       "source_quote": source_quote, "chain_id": chain_id})
 
+    def confirm_expression_presentations(self, messages):
+        """Confirm source text only from the actual successful model request.
+
+        Assistant/user text cannot grant an external source. The service still
+        validates live scope, revisions and the human/external evidence roots.
+        """
+        from common.expression_sources import visible_experience_fields, visible_observation_fields
+        from common.website_perception import _observation_block
+
+        def confirm(ref, entry, fields):
+            for field in fields:
+                source = {"kind": "experience", "id": ref, "revision": entry["revision"], "path": field["path"]}
+                key = json.dumps(source, sort_keys=True)
+                previous = self.confirmed_expression_sources.get(key, {})
+                spans = list(dict.fromkeys([field["text"], *(previous.get("spans") or [])]))[:8]
+                self.confirmed_expression_sources[key] = {"source": source, "spans": spans}
+
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") not in {"tool", "system"}:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            memory_result = False
+            if message.get("role") == "tool" or content.startswith("<skill_result>"):
+                raw = (content.partition(">")[2].rsplit("</skill_result>", 1)[0].strip()
+                       if content.startswith("<skill_result>") else content)
+                ref = (self.tool_result_refs.get(message.get("tool_call_id")) or
+                       self.tool_result_refs.get("result:" + hashlib.sha256(raw.strip().encode()).hexdigest()))
+                # Legacy text-protocol results have no tool_call_id after a
+                # budget cut. Bind them by the actual receipt serialization;
+                # never trust a source ID written inside the page/receipt.
+                candidates = ([ref] if ref else list(self.expression_records)
+                              if message.get("role") == "system" else [])
+                for candidate in candidates:
+                    entry = self.expression_records.get(candidate)
+                    if not entry:
+                        continue
+                    confirm(candidate, entry, visible_experience_fields(entry["record"], entry["rendered"], raw))
+                    if (ref == candidate and entry["record"].get("action") in {"search_memory", "read_memory_source"}):
+                        memory_result = True
+            block = _observation_block(message)
+            if block:
+                for shown in block[1]:
+                    ref = shown.get("id")
+                    entry = self.expression_records.get(ref)
+                    if entry:
+                        confirm(ref, entry, visible_observation_fields(entry["record"], shown))
+            if memory_result or (message.get("role") == "system" and content.startswith("<memory_recall>\n")):
+                for nid, item in self.confirmed_memory_presentations.items():
+                    if nid not in content:
+                        continue
+                    spans = [span for span in item["spans"] if any(value in content for value in
+                             (span, repr(span)[1:-1], json.dumps(span, ensure_ascii=False)[1:-1]))]
+                    if spans:
+                        previous = self.confirmed_expression_memories.get(nid, {})
+                        old = previous.get("spans", []) if previous.get("node_digest") == item["node_digest"] else []
+                        self.confirmed_expression_memories[nid] = {
+                            "node_digest": item["node_digest"], "spans": list(dict.fromkeys([*spans, *old]))[:32]}
+
+    def resolve_expression_source(self, source_quote, source_id=""):
+        """Return runtime proof, not a model-authored source object or URL."""
+        if not isinstance(source_quote, str) or not source_quote.strip() or not isinstance(source_id, str):
+            raise ValueError("表达学习需要本轮实际呈现的连续原文")
+        for item in reversed(list(self.confirmed_expression_sources.values())):
+            source = item["source"]
+            current = self.expression_records.get(source["id"])
+            if (current and current["revision"] == source["revision"]
+                    and (not source_id or source_id == source["id"])
+                    and any(source_quote in span for span in item["spans"])):
+                return {**source, "path": list(source["path"])}
+        for nid, item in reversed(list(self.confirmed_expression_memories.items())):
+            current = self.memory_presentations.get(nid, {})
+            if ((not source_id or source_id == nid) and current.get("node_digest") == item["node_digest"]
+                    and any(source_quote in span for span in item["spans"])):
+                return {"kind": "memory", "id": nid, "digest": item["node_digest"]}
+        raise ValueError("表达来源必须是本轮模型确实看过的网页原文、可见字幕或有来源的记忆原话")
+
     def correct_memory(self, source_id, quote, replacement, explanation, correction_quote):
         from tools.context import CURRENT_CONTEXT
         context = CURRENT_CONTEXT.get()
@@ -460,6 +549,9 @@ class MemoryJournal:
                 }
                 record["activity"] = activity_checkpoint(candidate, activity, [])
         self._record(key, record)
+        if key in self.expression_records:
+            self.expression_records[key]["rendered"] = (result if isinstance(result, str)
+                                                        else json.dumps(result_data(result), ensure_ascii=False))
 
     def capture(self, action, args, result, *, status=None, category="observation", key=None, activity=None):
         if category == "turn" and key:

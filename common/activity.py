@@ -84,6 +84,10 @@ def complete_activity(context, candidate, outcomes, text="", *, ordinary=False):
     """An undecided boundary asks the model; it does not choose continuation."""
     if context.activity.get("mode"):
         return
+    if ordinary and (candidate.get("activity") or {}).get("mode") == "pause":
+        # A casual reply does not revoke a timed/manual pause. An explicit
+        # activity tool above may still update it at the owner's request.
+        return
     browsing = any(row.get("action") in {
         "website_open", "website_snapshot", "website_scroll", "website_interact",
         "website_media_status", "website_watch", "website_tabs", "browser_search", "web_fetch",
@@ -117,8 +121,37 @@ def desktop_activity():
 
 
 def save_desktop_handoff(turn_id, checkpoint):
-    atomic_write_json(control_path().parent / "desktop_activity_handoff.json",
-                      {"id": turn_id, "activity": checkpoint})
+    directory = control_path().parent
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "desktop_activity_handoff.json"
+    # The desktop scheduler and conversation process have separate lifetimes.
+    # Keep every unacknowledged goal, including across two quick owner turns.
+    with (directory / "desktop_activity_handoff.lock").open("a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            lock.write(b"\0"); lock.flush(); lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            saved = json.loads(path.read_text())
+        except (OSError, ValueError):
+            saved = {}
+        try:
+            acknowledged = json.loads((directory / "proactive_desktop.json").read_text()).get("handoff_ref")
+        except (OSError, ValueError):
+            acknowledged = None
+        if turn_id == acknowledged:
+            return
+        entries = saved.get("handoffs") or ([{"id": saved["id"], "activity": saved["activity"]}] if saved.get("id") else [])
+        for index, entry in enumerate(entries):
+            if entry["id"] == acknowledged:
+                entries = entries[index + 1:]
+                break
+        if not any(entry["id"] == turn_id for entry in entries):
+            entries.append({"id": turn_id, "activity": checkpoint})
+        atomic_write_json(path, {**entries[-1], "handoffs": entries})
 
 
 def consume_desktop_handoff(policy):
@@ -128,8 +161,12 @@ def consume_desktop_handoff(policy):
         return False
     if policy.state.pending or not handoff.get("id") or handoff["id"] == policy.state.handoff_ref:
         return False
-    checkpoint = handoff["activity"]
-    policy.state.activity = {} if checkpoint.get("mode") == "finish" else checkpoint
-    policy.state.next_decision = checkpoint.get("next_at", time.time())
+    entries = handoff.get("handoffs") or [handoff]
+    for index, entry in enumerate(entries):
+        if entry["id"] == policy.state.handoff_ref:
+            entries = entries[index + 1:]
+            break
+    for entry in entries:
+        policy.accept_activity(entry["activity"], time.time())
     policy.state.handoff_ref = handoff["id"]
     return True

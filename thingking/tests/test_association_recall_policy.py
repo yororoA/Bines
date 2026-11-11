@@ -141,14 +141,14 @@ class RecallPolicyTest(unittest.TestCase):
         self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM association_reason_fts WHERE association_reason_fts MATCH '承诺'").fetchone()[0], 1)
         self.assertEqual(self.repo.conn.execute("SELECT COUNT(*) FROM association_reason_fts WHERE association_reason_fts MATCH '赠送'").fetchone()[0], 0)
 
-    def test_cold_exact_detail_rescued_without_vector_keys_or_promotion(self):
+    def test_cold_exact_detail_rescued_without_hot_keys_or_promotion(self):
         mid, _, node = self.cold()
         hits = self.service.search("QZ981", ["owner"])
         self.assertEqual(hits[0]["node_id"], node["id"])
         self.assertIn("QZ981", hits[0]["matched_spans"][0])
         keys = self.service.retriever.keys
-        self.assertNotIn(f"u:{mid}:0", keys.all_ids())
-        self.assertNotIn(f"u:{mid}:0", {k["id"] for k in keys.unindexed_keys()})
+        self.assertEqual(keys.get_keys([f"u:{mid}:0"], ["owner"]), {})
+        self.assertIn(f"u:{mid}:0", {k["id"] for k in keys.unindexed_keys() if k["meta"].get("archive_vector")})
         self.assertEqual(self.service.graph.get(node["id"])["retrieval_status"], "cold")
         self.assertEqual(self.service.retriever.last_trace["cold_fallback"], 1)
 

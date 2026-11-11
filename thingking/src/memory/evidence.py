@@ -219,6 +219,18 @@ def _strings(values: Sequence[str]) -> List[str]:
     return list(dict.fromkeys([values] if isinstance(values, str) else values))
 
 
+def vector_key_filter(alias=""):
+    """SQL predicate shared with bounded asynchronous vector maintenance."""
+    column = f"{alias}.meta" if alias else "meta"
+    return (f"(COALESCE(json_extract({column},'$.retrieval_status'),'hot')!='cold' "
+            f"OR json_extract({column},'$.archive_vector')=1)")
+
+
+def vector_key_eligible(key):
+    meta = _object(key.get("meta"))
+    return meta.get("retrieval_status") != "cold" or meta.get("archive_vector") is True
+
+
 class EvidenceStore:
     """Derived storage on repo.conn; construction creates only its own schema."""
 
@@ -257,7 +269,7 @@ class EvidenceStore:
             if "search_hash" not in key_columns:
                 self.conn.execute("ALTER TABLE retrieval_keys ADD COLUMN search_hash TEXT NOT NULL DEFAULT ''")
             tracking_changed = self._install_dirty_triggers(tables)
-            signature = str(getattr(self.index, "chunking_signature", "chars-700-80")) + ":cold-fts-v2:search-hash-v1"
+            signature = str(getattr(self.index, "chunking_signature", "chars-700-80")) + ":cold-archive-v3:search-hash-v1"
             prior_signature = self.conn.execute("SELECT value FROM retrieval_sync_state WHERE key='chunking_signature'").fetchone()
             if not prior_signature or prior_signature[0] != signature:
                 self._queue_all_sources()
@@ -393,9 +405,20 @@ class EvidenceStore:
         fit_text = getattr(self.index, "fit_text", lambda text: text)
         tier = "hot" if self._direct_source(row, source_type) else "cold"
         lexical_context = "\n".join([*context, *(text for _, text in expansions)])
-        for chunk_index, chunk in enumerate(splitter(source_text)):
+        chunks = list(splitter(source_text))
+        for chunk_index, chunk in enumerate(chunks):
             lexical_text = "\n".join([chunk, lexical_context])
-            search_text = fit_text(lexical_text)
+            archive_vector = tier == "cold" and chunk_index in {0, len(chunks) - 1}
+            archive_span = chunk
+            if archive_vector and len(chunks) > 1:
+                # The index's tokenizer already bounds chunks. Prefer complete
+                # endpoint sentences so repeated background cannot drown out a
+                # short fact at the end; never synthesize or concatenate prose.
+                sentences = list(re.finditer(r"[^。！？!?\n]+(?:[。！？!?\n]+|$)", chunk))
+                if sentences:
+                    archive_span = (chunk[:sentences[min(1, len(sentences) - 1)].end()][:240]
+                                    if chunk_index == 0 else chunk[sentences[max(0, len(sentences) - 2)].start():][-240:])
+            search_text = fit_text("\n".join([archive_span, lexical_context]) if archive_vector else lexical_text)
             yield {
                 "id": f"{prefix}:{row['id']}:{chunk_index}",
                 "scope": row["scope"],
@@ -415,6 +438,8 @@ class EvidenceStore:
                     "source_ref": row.get("source_ref"), "origin": row.get("origin"),
                     "subject_id": row.get("subject_id"),
                     "retrieval_status": tier,
+                    **({"archive_vector": archive_vector} if tier == "cold" else {}),
+                    **({"archive_span": archive_span} if archive_vector else {}),
                     "episode_id": row.get("episode_id"),
                     "ts": row.get("ts"),
                     "lexical_context": lexical_context,
@@ -430,10 +455,16 @@ class EvidenceStore:
         return _active(row, source_type, include_archived=status is True)
 
     def _cold_source(self, row, source_type):
-        """Archived originals retain a lexical rescue path, never cold vectors."""
-        if source_type != "message" or not _active(row, source_type, include_archived=True):
+        """Cold sources stay verifiable while only bounded representative chunks get vectors."""
+        if not _active(row, source_type, include_archived=True):
             return False
         graph = getattr(self.repo, "associations", None)
+        if source_type == "memory":
+            node = graph.for_memory(row["id"]) if graph else None
+            return bool(row.get("kind") in {"episode", "excerpt"} and node
+                        and node["retrieval_status"] == "cold" and graph.valid(node))
+        if source_type != "message":
+            return False
         node = graph.for_message(row["id"]) if graph else None
         if node and (not graph.valid(node) or node["retrieval_status"] != "cold"):
             return False
@@ -559,7 +590,7 @@ class EvidenceStore:
                                 continue
                             if "tokens" not in key:
                                 key["tokens"] = " ".join(_tokens(key["search_text"]))
-                            if _object(key["meta"]).get("retrieval_status") == "cold":
+                            if not vector_key_eligible(key):
                                 self.conn.execute("INSERT OR IGNORE INTO retrieval_vector_deletions VALUES(?)", (key_id,))
                             columns = list(key)
                             updates = ", ".join(f"{name} = excluded.{name}" for name in columns if name != "id")
@@ -705,22 +736,22 @@ class EvidenceStore:
         result = []
         with self._atomic():
             cursor = self.conn.execute(
-                "SELECT * FROM retrieval_keys WHERE COALESCE(json_extract(meta,'$.retrieval_status'),'hot')!='cold' " + ("AND indexed_at IS NULL " if only_unindexed else "") +
+                "SELECT * FROM retrieval_keys WHERE " + vector_key_filter() + " " + ("AND indexed_at IS NULL " if only_unindexed else "") +
                 "ORDER BY id"
             )
             while limit is None or len(result) < limit:
                 rows = cursor.fetchmany(_BATCH_SIZE if limit is None else min(_BATCH_SIZE, limit - len(result)))
                 if not rows:
                     break
-                result.extend(self._live_keys(rows).values())
+                result.extend(self._live_keys(rows, include_cold=True).values())
         return result if limit is None else result[:limit]
 
     def unindexed_keys(self, limit: int = 128) -> List[Dict[str, Any]]:
         return self._current_keys(only_unindexed=True, limit=limit)
 
     def vector_pending_count(self):
-        return self.conn.execute("SELECT COUNT(*) FROM retrieval_keys WHERE indexed_at IS NULL "
-            "AND COALESCE(json_extract(meta,'$.retrieval_status'),'hot')!='cold'").fetchone()[0]
+        return self.conn.execute("SELECT COUNT(*) FROM retrieval_keys WHERE indexed_at IS NULL AND "
+                                 + vector_key_filter()).fetchone()[0]
 
     def mark_indexed(self, ids: Sequence[str]) -> None:
         ids = _strings(ids)
@@ -731,7 +762,8 @@ class EvidenceStore:
                 ).fetchall()
                 self.conn.executemany(
                     "UPDATE retrieval_keys SET indexed_at = ? WHERE id = ?",
-                    ((self.repo.clock(), key_id) for key_id in self._live_keys(rows)),
+                    ((self.repo.clock(), key_id) for key_id, key in self._live_keys(rows, include_cold=True).items()
+                     if vector_key_eligible(key)),
                 )
 
     def all_ids(self) -> List[str]:
@@ -867,7 +899,8 @@ class EvidenceStore:
             message_evidence = [{
                 "source_type": "message", "source_id": row["id"],
                 "source_ref": row.get("source_ref") or f"messages:{row['id']}",
-                "role": row["role"], "actor_id": row["actor_id"], "content": _short_evidence(row["content"], query),
+                "role": row["role"], "actor_id": row["actor_id"], "actor_name": row.get("actor_name") or "",
+                "content": _short_evidence(row["content"], query),
                 "ts": row["ts"], "scope": row["scope"],
             } for row in messages[:limit]]
             combined = message_evidence + experience_evidence

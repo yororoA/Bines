@@ -36,6 +36,7 @@ def _patch(data, patch):
 
 
 _RELATIONSHIP = ("relationship_score", "relationship_level", "relationship_distribution")
+_OPERATION_KINDS = {"automatic", "manual_operations"}
 
 
 def _apply(data, changes, event_key):
@@ -66,8 +67,11 @@ class StateEffects:
         self.conn.execute("""CREATE TABLE IF NOT EXISTS state_effects (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE NOT NULL,
             scope TEXT NOT NULL, conversation_id TEXT, message_id INTEGER,
-            event_ts REAL NOT NULL, kind TEXT NOT NULL, changes TEXT NOT NULL)""")
+            event_ts REAL NOT NULL, kind TEXT NOT NULL, changes TEXT NOT NULL, source_ref TEXT)""")
+        if "source_ref" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(state_effects)")}:
+            self.conn.execute("ALTER TABLE state_effects ADD COLUMN source_ref TEXT")
         self.conn.execute("CREATE INDEX IF NOT EXISTS state_effect_scope ON state_effects(scope,conversation_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS state_effect_source ON state_effects(source_ref,scope)")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS state_field_clocks (
             scope TEXT NOT NULL, field TEXT NOT NULL, event_ts REAL NOT NULL, message_id INTEGER NOT NULL,
             PRIMARY KEY(scope,field))""")
@@ -154,21 +158,43 @@ class StateEffects:
             return True
         return False
 
-    def manual(self, scope, data, expected_version=None, source_ref=None):
+    def manual(self, scope, data, expected_version=None, source_ref=None, changes=None):
         current = self._baseline(scope)
         message = self.conn.execute("SELECT * FROM messages WHERE source_ref=?", (source_ref,)).fetchone() if source_ref else None
-        before, after = _flat(current["data"]), _flat(data)
-        patch = {key: [key in after, after.get(key)] for key in before.keys() | after.keys()
-                 if (key in before) != (key in after) or before.get(key) != after.get(key)}
+        if message and self._message_state_scope(message) != scope:
+            raise ValueError("state source message must belong to the same state scope")
+        event_key = "manual:" + uuid.uuid4().hex
+        if changes is not None:
+            import inspect
+            from tools.memory_tool import _apply_changes
+            allowed = set(inspect.signature(_apply_changes).parameters) - {"state"}
+            if not isinstance(changes, dict) or set(changes) - allowed:
+                raise ValueError("状态操作包含未知字段")
+            changes = {key: value for key, value in changes.items() if value is not None}
+            if any(type(value) is not int if key == "relationship_delta" else not isinstance(value, str)
+                   for key, value in changes.items()):
+                raise ValueError("状态操作需要字符串字段和整数好感度增量")
+            # Explicit operations distinguish a fresh same-value confirmation
+            # from fields merely carried forward in the caller's full snapshot.
+            kind, effect = "manual_operations", changes
+            data = _apply(current["data"], changes, event_key)
+        else:
+            before, after = _flat(current["data"]), _flat(data)
+            effect = {key: [key in after, after.get(key)] for key in before.keys() | after.keys()
+                      if (key in before) != (key in after) or before.get(key) != after.get(key)}
+            kind = "patch"
         stamp = (message["ts"], message["id"]) if message else (self.repo.clock(), 0)
         version = self.repo.put_state(scope, data, expected_version, source_ref=source_ref)
-        if patch:
-            self.conn.execute("INSERT INTO state_effects(event_key,scope,conversation_id,message_id,event_ts,kind,changes) "
-                              "VALUES(?,?,?,?,?,'patch',?)", ("manual:" + uuid.uuid4().hex, scope,
+        if effect:
+            self.conn.execute("INSERT INTO state_effects(event_key,scope,conversation_id,message_id,event_ts,kind,changes,source_ref) "
+                              "VALUES(?,?,?,?,?,?,?,?)", (event_key, scope,
                               message["conversation_id"] if message else None, message["id"] if message else None,
-                              stamp[0], json.dumps(patch, ensure_ascii=False)))
-            for key in patch:
-                self._mark(scope, key, stamp)
+                              stamp[0], kind, json.dumps(effect, ensure_ascii=False), source_ref))
+            for key, value in effect.items():
+                fields = (_RELATIONSHIP if kind in _OPERATION_KINDS and key == "relationship_delta" else
+                          (_clock_key(key, value) if kind in _OPERATION_KINDS else key,))
+                for field in fields:
+                    self._mark(scope, field, stamp)
         return version
 
     def _relationship(self, scope):
@@ -178,7 +204,7 @@ class StateEffects:
             if not self._source_valid(row):
                 continue
             changes = json.loads(row["changes"])
-            if row["kind"] == "automatic" and "relationship_delta" in changes:
+            if row["kind"] in _OPERATION_KINDS and "relationship_delta" in changes:
                 data = _apply(data, {"relationship_delta": changes["relationship_delta"]}, row["event_key"])
             elif row["kind"] == "patch":
                 data = _patch(data, {key: value for key, value in changes.items() if key in _RELATIONSHIP})
@@ -191,7 +217,50 @@ class StateEffects:
         message = self.repo.get_message(effect["message_id"])
         return bool(message and _active(message, "message", include_archived=True))
 
-    def _rebuild(self, scope, source_ref=None):
+    def _message_state_scope(self, message):
+        from .models import CHANNEL_QQ_GROUP
+        conversation = self.conn.execute("SELECT channel FROM conversations WHERE id=?",
+                                         (message["conversation_id"],)).fetchone()
+        if conversation and conversation["channel"] == CHANNEL_QQ_GROUP:
+            return message["scope"] + ":user:" + message["actor_id"].removeprefix("qq:")
+        return message["scope"]
+
+    def link_message(self, message, *, rebuild=True):
+        """Attach desktop state operations whose raw message arrived via outbox later."""
+        if message.get("source_ref"):
+            scope = self._message_state_scope(message)
+            linked = self.conn.execute("UPDATE state_effects SET message_id=?,conversation_id=?,event_ts=? "
+                                       "WHERE source_ref=? AND scope=? AND message_id IS NULL",
+                                       (message["id"], message["conversation_id"], message["ts"],
+                                        message["source_ref"], scope)).rowcount
+            if linked and rebuild:
+                # Delivery time previously ordered these operations. Replaying
+                # also retimes field clocks, including unchanged current values.
+                self._rebuild(scope, only_if_changed=True)
+
+    def retract_message(self, message):
+        """Remove only this invalid source's effects, including group-user state."""
+        refs = {"message:" + str(message["id"])}
+        if message.get("source_ref"):
+            refs.add(message["source_ref"])
+        self.link_message(message, rebuild=False)
+        state_scope = self._message_state_scope(message)
+        marks = ",".join("?" for _ in refs)
+        scopes = {row[0] for row in self.conn.execute(
+            "SELECT DISTINCT scope FROM state_effects WHERE message_id=? AND scope=? "
+            "UNION SELECT DISTINCT scope FROM state_history WHERE redacted=0 AND scope=? "
+            f"AND source_ref IN ({marks})", (message["id"], state_scope, state_scope, *sorted(refs)))}
+        # Old databases may only have sourced snapshots. Convert those into
+        # patches before temporal retraction redacts their aggregate payloads.
+        for scope in sorted(scopes):
+            self._baseline(scope)
+        for scope in sorted(scopes | {message["scope"]}):
+            for ref in sorted(refs):
+                self.repo.temporal.retract_source(scope, ref)
+        for scope in sorted(scopes):
+            self._rebuild(scope, only_if_changed=True)
+
+    def _rebuild(self, scope, source_ref=None, *, only_if_changed=False):
         baseline = self.conn.execute("SELECT * FROM state_effect_baselines WHERE scope=?", (scope,)).fetchone()
         data = json.loads(baseline["data"]) if baseline else {}
         self.conn.execute("DELETE FROM state_field_clocks WHERE scope=?", (scope,))
@@ -203,17 +272,21 @@ class StateEffects:
             changes = json.loads(row["changes"])
             stamp = (row["event_ts"], row["message_id"] or 0)
             changes = {action: value for action, value in changes.items()
-                       if (row["kind"] == "automatic" and action == "relationship_delta")
-                       or self._accept(scope, _clock_key(action, value) if row["kind"] == "automatic" else action, stamp)}
-            data = _apply(data, changes, row["event_key"]) if row["kind"] == "automatic" else _patch(data, changes)
+                       if (row["kind"] in _OPERATION_KINDS and action == "relationship_delta")
+                       or self._accept(scope, _clock_key(action, value) if row["kind"] in _OPERATION_KINDS else action, stamp)}
+            data = _apply(data, changes, row["event_key"]) if row["kind"] in _OPERATION_KINDS else _patch(data, changes)
             for action, value in changes.items():
                 if action == "relationship_delta":
                     for field in _RELATIONSHIP:
                         self._mark(scope, field, stamp)
                 else:
-                    self._mark(scope, _clock_key(action, value) if row["kind"] == "automatic" else action,
+                    self._mark(scope, _clock_key(action, value) if row["kind"] in _OPERATION_KINDS else action,
                                stamp)
-        self.repo.put_state(scope, data, source_ref=source_ref)
+        current = self.repo.get_state(scope)
+        current_snapshot = self.conn.execute("SELECT 1 FROM state_history WHERE scope=? AND version=? AND redacted=0",
+                                             (scope, current["version"])).fetchone()
+        if not only_if_changed or data != current["data"] or not current_snapshot:
+            self.repo.put_state(scope, data, source_ref=source_ref)
 
     def migrate_conversation(self, conversation_id, old_scope, new_scope):
         self._baseline(old_scope)

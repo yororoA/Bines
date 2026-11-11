@@ -1,6 +1,7 @@
 """Load ``thingking/persona/persona.yaml`` (the only persona source) and render it for prompts and docs."""
 from __future__ import annotations
 
+import hashlib
 import math
 import threading
 from pathlib import Path
@@ -47,20 +48,18 @@ def character_prompt(persona: Dict[str, Any] | None = None) -> str:
     ident, look, personality = p["identity"], p["appearance"], p["personality"]
     boundaries = p["capability_boundaries"]
     reactions = p["reactions"]
+    preference_descriptions = personality.get("preference_descriptions") or {}
+    likes = [preference_descriptions.get(item, item) for item in personality["likes"]]
     sections = [
         "--- 角色设定 ---",
         identity_line(p),
         f"诞生于 {ident['birthday']}，身高 {ident['height']}。母语{ident['native_language']}，"
         f"能流利使用{'、'.join(ident['languages'])}。在 QQ 上的名字是{ident['qq_name']}。{ident['situation']}",
         "以下外貌、穿着和小癖好是角色背景，不表示此刻正在做的事；相关时再提，不据此编造今日经历。",
-        f"外貌：{look['hair']}{look['eyes']}{look['expression']}",
-        f"日常穿着：{look['outfits']['daily']}",
-        f"居家状态：{look['outfits']['home']}",
+        look.get("prompt_summary") or f"外貌：{look['hair']}{look['eyes']}{look['expression']}",
         "--- 性格 ---",
         _bullets(personality["core"]),
-        "小癖好：",
-        _bullets(personality["quirks"]),
-        f"喜欢：{'、'.join(personality['likes'])}。",
+        f"背景喜好：{'、'.join(likes)}。{personality.get('preference_policy', '')}",
         "--- 说话方式 ---",
         _bullets(p["speech_style"]),
         "--- 情绪触发 ---",
@@ -151,7 +150,7 @@ def style_guard(persona: Dict[str, Any] | None = None, *, state: Dict[str, Any] 
 
 
 def qq_style_guard(persona: Dict[str, Any] | None = None, *, state: Dict[str, Any] | None = None) -> str:
-    """QQ-specific style: shorter, fewer punctuation marks and segmented long replies."""
+    """QQ-specific style: brief reactions, expressive punctuation and contextual length."""
     p = persona or load_persona()
     return _guard(p, qq_output_rules(p), relationship_guard(state or {}, p))
 
@@ -159,7 +158,8 @@ def qq_style_guard(persona: Dict[str, Any] | None = None, *, state: Dict[str, An
 def brief(persona: Dict[str, Any] | None = None) -> str:
     """Short personality summary for side tasks (e.g. proactive-chat judgement)."""
     p = persona or load_persona()
-    return identity_line(p) + "性格：" + "".join(p["personality"]["core"])
+    return (identity_line(p) + "性格：" + "".join(p["personality"]["core"])
+            + p.get("proactive", {}).get("expression_learning", ""))
 
 
 def relationship_mood(level: str, persona: Dict[str, Any] | None = None) -> str:
@@ -168,9 +168,24 @@ def relationship_mood(level: str, persona: Dict[str, Any] | None = None) -> str:
     return f"当前心情：{level}。{mood}" if mood else f"当前心情：{level}。"
 
 
+def diary_voice_prompt(persona: Dict[str, Any] | None = None) -> str:
+    """Render the diary voice without conversation examples or channel formatting."""
+    p = persona or load_persona()
+    diary = p["diary"]
+    return "\n".join(part for part in [
+        "--- 写日记 ---", diary["voice"], _bullets(diary.get("directives") or []),
+        "只输出日记正文，使用纯文本。",
+    ] if part)
+
+
 def diary_system_prompt(persona: Dict[str, Any] | None = None) -> str:
     p = persona or load_persona()
-    return "\n".join([character_prompt(p), "--- 写日记 ---", p["diary"]["voice"], "只输出日记正文，使用纯文本。"])
+    return "\n".join([character_prompt(p), diary_voice_prompt(p)])
+
+
+def diary_persona_version(persona: Dict[str, Any] | None = None) -> str:
+    """Fingerprint the actual rendered diary persona for generation provenance."""
+    return hashlib.sha256(diary_system_prompt(persona).encode("utf-8")).hexdigest()
 
 
 def render_markdown(persona: Dict[str, Any] | None = None) -> str:
@@ -193,6 +208,13 @@ def render_markdown(persona: Dict[str, Any] | None = None) -> str:
         qq_style_guard(p),
         "```",
         "",
+        "## 完整外貌与小癖好档案（不重复注入日常提示）",
+        "",
+        f"外貌：{p['appearance']['hair']}{p['appearance']['eyes']}{p['appearance']['expression']}",
+        f"日常穿着：{p['appearance']['outfits']['daily']}",
+        f"居家状态：{p['appearance']['outfits']['home']}",
+        _bullets(p["personality"]["quirks"]),
+        "",
         "## 对话关系口吻（按当前会话的好感度）",
         "",
         _bullets((p.get("relationship_voice") or {}).get("directives") or []),
@@ -209,5 +231,6 @@ def render_markdown(persona: Dict[str, Any] | None = None) -> str:
         "## 日记口吻",
         "",
         p["diary"]["voice"],
+        _bullets(p["diary"].get("directives") or []),
         "",
     ])

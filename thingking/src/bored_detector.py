@@ -118,18 +118,21 @@ def main():
                 continuing = policy.state.activity.get("mode") in {"continue", "review"}
                 memory_context = (snapshot if continuing else memory.build_context(
                     local_envelope("").to_dict(), query="近期兴趣、情绪变化与未完成想法"))
-                materials = {"recent": memory_context.get("working", [])[-12:],
+                materials = {"envelope": memory_context.get("envelope") or local_envelope("").to_dict(),
+                             "recent": memory_context.get("working", [])[-12:],
                              "memories": memory_context.get("recalled", [])[:5],
                              "profile": memory_context.get("profile") or {}, "bridge": memory_context.get("bridge"),
                              "state": memory_context.get("state") or {},
                              "life": compact_life(memory_context.get("life") or snapshot.get("life")),
-                             "available_skills": capabilities, "recent_outcomes": policy.state.recent_outcomes,
+                             "available_skills": capabilities, "activity": dict(policy.state.activity),
+                             "waiting_intentions": policy.waiting_intentions(),
                              "planning_only": policy.state.planning_only,
                              **policy.contact_permissions(now, snapshot.get("last_user"),
                                                           float(owner.get("ts") or 0),
                                                           last_reply_at=conversation_activity)}
                 if (policy.appraisal_due(policy.state.user_ref, now)
-                        and (not continuing or bool(policy.state.emotion_at))):
+                        and (not continuing or bool(policy.state.emotion_at)
+                             or getattr(policy.state, "interest_reappraisal_pending", False))):
                     appraisal = appraise_history(materials, policy.state, now)
                     policy.appraise(appraisal, policy.state.user_ref, now)
                     save()

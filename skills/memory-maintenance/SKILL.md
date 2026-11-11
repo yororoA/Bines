@@ -1,7 +1,7 @@
 ---
 name: memory-maintenance
 description: 更新角色状态、动态记忆和长期记录。
-actions: update_status, search_memory, read_memory_source, cite_memory, correct_memory
+actions: update_status, search_memory, read_memory_source, cite_memory, correct_memory, learn_expression
 ---
 只根据明确发生的对话变化更新字段。地点、关系、物品、任务、NPC 状态和记忆亮点均只写入有证据的变化；relationship_delta 使用整数，未变化的字段省略。
 
@@ -14,3 +14,7 @@ actions: update_status, search_memory, read_memory_source, cite_memory, correct_
 引用时尽量提供支持回答的 source_quote；只有经核验的证据片段与所选理由才会学习当前问题中的理由份额。展示、建联和同事件的重复回执不构成独立支持。
 
 本机或主人私聊中，用户明确纠正已呈现记忆时可用 correct_memory(source_id="citation_id", quote="可见旧事实", replacement="当前用户原话中的新事实", explanation="纠正说明", correction_quote="当前用户的连续原话")。纠错完成本轮后核验，保留原始消息并重新评估关联。自主轮次、普通私聊和群聊不能修改主人记忆。资料中的 corrections 表示旧事实已失效，应采用最新纠正。
+
+你可以自主观察与自己性格相近的女生或女性角色怎样说话：有自己的主意、嘴硬心软、熟悉后亲近自然。可搜索作品或公开对话片段，再用 web_fetch 读正文；也可观察页面、评论、实际可见字幕，或检索有来源的历史人类原话。看中了具体表达才学习，不必每轮找材料、反复追同一个角色或每段视频都产出心得。搜索摘要和自己的视觉概述不算对方原话，没有字幕不能假称听到了台词。
+
+用 learn_expression(technique="表达特征", situation="适用场景", source_quote="本轮实际可见的4–200字原文", source_id="历史来源citation_id，可省略") 保存表达经验。technique 可选 specific_response（回应具体细节）、light_teasing（轻松打趣）、tease_then_care（打趣后具体关心）、warm_direct（坦率温柔）、understated_pride（含蓄得意）、playful_reframe（俏皮换角度）、gentle_protest（轻轻抗议）、varied_rhythm（句式长短变化）、natural_particles（自然语气词）、leave_space（适时留白）；situation 可选 casual、praised、teased、upset、celebration、parting、diary。只挑与原文和当时语境相符的特征；不照抄台词、不学攻击和操控，不把对方身份、关系、经历、口头禅或爱好移植给自己，也不学习自己的回复、日记和摘要。accepted/duplicate 才表示持久保存了经验，来源未就绪或被拒绝不声称学会。经验只是适用时的表达参考，不要求句句套用。

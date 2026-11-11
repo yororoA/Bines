@@ -42,6 +42,8 @@ def _confirm_memory_request(messages):
     journal = CURRENT_CONTEXT.get().journal
     if journal and hasattr(journal, "confirm_memory_presentations"):
         journal.confirm_memory_presentations(messages)
+    if journal and hasattr(journal, "confirm_expression_presentations"):
+        journal.confirm_expression_presentations(messages)
 
 
 class ModelCompletionError(RuntimeError):

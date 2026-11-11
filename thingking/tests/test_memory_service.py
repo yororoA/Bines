@@ -1,3 +1,4 @@
+from helpers import approved_diary
 import unittest
 
 from helpers import (
@@ -212,8 +213,10 @@ class ConsolidationTest(unittest.TestCase):
         self.fx.clock.advance(2 * 86400)
         claimed = self.fx.service.claim_job()
         self.assertEqual(claimed["job"]["kind"], "diary")
-        self.assertEqual(claimed["materials"]["episodes"], ["今天一起听了歌"])
-        self.fx.service.complete_diary(claimed["job"]["id"], "今天和管理员一起听歌，很开心。")
+        self.assertEqual(len(claimed["materials"]["episodes"]), 1)
+        self.assertIn("今天一起听了歌", claimed["materials"]["episodes"][0])
+        self.assertIn(claimed["materials"]["episode_ids"][0], claimed["materials"]["episodes"][0])
+        self.fx.service.complete_diary(claimed["job"]["id"], "今天和管理员一起听歌，很开心。", attribution_review=approved_diary(claimed, '今天和管理员一起听歌，很开心。'))
         self.assertIsNone(self.fx.service.claim_job())
         self.assertEqual(self.fx.repo.count_memories(kinds=["diary"]), 1)
 
@@ -336,40 +339,44 @@ class RuntimeMemoryBoundaryTest(unittest.TestCase):
         job = self.service.claim_job(kinds=["diary"])
         self.assertEqual(job["materials"]["episode_ids"], [legacy])
         self.assertEqual(job["materials"]["state"], {})
-        self.assertEqual(self.service.complete_diary(job["job"]["id"], "legacy diary")["status"], "done")
+        self.assertEqual(self.service.complete_diary(job["job"]["id"], "legacy diary", attribution_review=approved_diary(job, 'legacy diary'))["status"], "done")
         self.assertEqual(self.repo.count_memories(kinds=["diary"]), 1)
 
     def test_deleted_diary_can_be_regenerated_from_same_episode_set(self):
         self._episode()
         first = self.service.claim_job(kinds=["diary"])
-        diary = self.service.complete_diary(first["job"]["id"], "first diary")["diary_id"]
+        diary = self.service.complete_diary(first["job"]["id"], "first diary", attribution_review=approved_diary(first, 'first diary'))["diary_id"]
         self.service.delete_memory(diary)
         self.assertEqual(self.service.enqueue_due_diaries(), 1)
         second = self.service.claim_job(kinds=["diary"])
         self.assertEqual(second["materials"]["episodes_hash"], first["materials"]["episodes_hash"])
-        replacement = self.service.complete_diary(second["job"]["id"], "replacement diary")["diary_id"]
+        replacement = self.service.complete_diary(second["job"]["id"], "replacement diary", attribution_review=approved_diary(second, 'replacement diary'))["diary_id"]
         self.assertNotEqual(replacement, diary)
         self.assertTrue(self.repo.get_memory(diary)["deleted"])
         self.assertEqual(self.repo.count_memories(kinds=["diary"]), 1)
 
     def test_late_episode_and_edited_episode_overwrite_one_active_diary(self):
-        first = self._episode("first event", meta={"source_message_ids": [11], "source_memory_ids": ["old-1"]})
+        raw_first = self._message("first source", ts=self.fx.clock() - 86400, origin="archived")
+        raw_second = self._message("second source", ts=self.fx.clock() - 86400, origin="archived")
+        source_first = self.repo.add_memory("semantic", OWNER_SCOPE, "first evidence")
+        source_second = self.repo.add_memory("semantic", OWNER_SCOPE, "second evidence")
+        first = self._episode("first event", meta={"source_message_ids": [raw_first], "source_memory_ids": [source_first]})
         day = self.repo.get_memory(first)["day_key"]
         deleted = self.repo.add_memory("diary", OWNER_SCOPE, "deleted diary", day_key=day)
         self.repo.delete_memory(deleted)
         job = self.service.claim_job(kinds=["diary"])
-        diary_id = self.service.complete_diary(job["job"]["id"], "first diary")["diary_id"]
+        diary_id = self.service.complete_diary(job["job"]["id"], "first diary", attribution_review=approved_diary(job, 'first diary'))["diary_id"]
         self.assertNotEqual(diary_id, deleted)
-        second = self._episode("late event", meta={"source_message_ids": [22], "source_memory_ids": ["old-2"]})
+        second = self._episode("late event", meta={"source_message_ids": [raw_second], "source_memory_ids": [source_second]})
         self.assertEqual(self.service.enqueue_due_diaries(), 1)
         job = self.service.claim_job(kinds=["diary"])
         self.assertEqual(set(job["materials"]["episode_ids"]), {first, second})
-        result = self.service.complete_diary(job["job"]["id"], "revised diary")
+        result = self.service.complete_diary(job["job"]["id"], "revised diary", attribution_review=approved_diary(job, 'revised diary'))
         self.assertEqual(result["diary_id"], diary_id)
         diary = self.repo.get_memory(diary_id)
         self.assertEqual(diary["content"], "revised diary")
-        self.assertEqual(set(diary["meta"]["source_message_ids"]), {11, 22})
-        self.assertEqual(set(diary["meta"]["source_memory_ids"]), {"old-1", "old-2"})
+        self.assertEqual(set(diary["meta"]["source_message_ids"]), {raw_first, raw_second})
+        self.assertEqual(set(diary["meta"]["source_memory_ids"]), {source_first, source_second})
         self.assertEqual(self.repo.count_memories(kinds=["diary"], day_key=day), 1)
         self.assertTrue(self.repo.get_memory(deleted)["deleted"])
         self.assertEqual(self.service.enqueue_due_diaries(), 0)
@@ -378,7 +385,7 @@ class RuntimeMemoryBoundaryTest(unittest.TestCase):
         self.assertEqual(self.service.enqueue_due_diaries(), 1)
         job = self.service.claim_job(kinds=["diary"])
         self.assertNotEqual(job["job"]["payload"]["episodes_hash"], digest)
-        self.assertEqual(self.service.complete_diary(job["job"]["id"], "corrected diary")["diary_id"], diary_id)
+        self.assertEqual(self.service.complete_diary(job["job"]["id"], "corrected diary", attribution_review=approved_diary(job, 'corrected diary'))["diary_id"], diary_id)
 
     def test_changed_evidence_during_generation_rejects_stale_diary(self):
         first = self._episode()
@@ -390,7 +397,7 @@ class RuntimeMemoryBoundaryTest(unittest.TestCase):
         self.assertEqual(self.repo.count_memories(kinds=["diary"]), 0)
         replacement = self.service.claim_job(kinds=["diary"])
         self.assertEqual(set(replacement["materials"]["episode_ids"]), {first, second})
-        self.service.complete_diary(replacement["job"]["id"], "complete output")
+        self.service.complete_diary(replacement["job"]["id"], "complete output", attribution_review=approved_diary(replacement, 'complete output'))
         self.assertEqual(self.repo.count_memories(kinds=["diary"]), 1)
 
     def test_pending_message_during_generation_rejects_diary(self):

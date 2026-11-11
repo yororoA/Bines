@@ -18,7 +18,7 @@ SYSTEM = (
     "有关系时links条目格式：{\"reason_key\":\"稳定键\",\"reason\":\"具体关系和时间限定\","
     "\"relation_type\":\"support|similar|event|cause|contradicts\","
     "\"direction\":\"bidirectional|source_to_target|target_to_source\","
-    "\"confidence\":0.7,\"evidence_ids\":[\"s0\",\"t1e0\"]}。"
+    "\"confidence\":0.7,\"evidence_ids\":[\"se0\",\"t1e0\"]}。"
     "evidence_ids必须分别来自source和该target；只返回编号，不复述证据。"
     "共同词汇、相同工具动作、未知内容的图片、泛泛闲聊不足以关联；"
     "不同事件需有具体事实或明确变化。因果须有明确证据，冲突用contradicts。"

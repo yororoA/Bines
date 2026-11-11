@@ -175,9 +175,12 @@ class IncrementalMemoryTest(MemoryCase):
         node = self.service.graph.register_memory(mid)
         self.sync()
         self.repo.conn.execute("UPDATE association_nodes SET retrieval_status='cold' WHERE id=?", (node["id"],))
-        self.assertEqual(self.sync()["deleted"], 1)
+        self.assertEqual(self.sync()["updated"], 1)
+        self.assertEqual(self.keys.get_keys([f"m:{mid}:0"], ["owner"]), {})
+        self.assertTrue(self.keys.get_keys([f"m:{mid}:0"], ["owner"], include_cold=True))
         self.repo.conn.execute("UPDATE association_nodes SET retrieval_status='hot' WHERE id=?", (node["id"],))
-        self.assertEqual(self.sync()["added"], 1)
+        self.assertEqual(self.sync()["updated"], 1)
+        self.assertTrue(self.keys.get_keys([f"m:{mid}:0"], ["owner"]))
 
     def test_experience_sql_update_changes_keys_and_rejects_stale_fingerprint(self):
         mid = self.memory("网页经历", meta={"experience_ref": "test:experience"})

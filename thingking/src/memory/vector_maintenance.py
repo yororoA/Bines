@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from .evidence import vector_key_filter
 
 log = logging.getLogger("bines.memory.vector_maintenance")
 
@@ -42,7 +43,7 @@ class VectorMaintenance:
         row = self.repo.conn.execute("SELECT COUNT(*),COALESCE(SUM(f.quarantined),0),MIN(f.next_attempt) "
             "FROM retrieval_vector_failures f JOIN retrieval_keys k ON k.id=f.key_id "
             "AND k.source_hash=f.source_hash AND k.search_text=f.search_text WHERE f.generation=? "
-            "AND k.indexed_at IS NULL AND COALESCE(json_extract(k.meta,'$.retrieval_status'),'hot')!='cold'",
+            "AND k.indexed_at IS NULL AND " + vector_key_filter("k"),
             (self.index.generation,)).fetchone()
         self._wake_at = row[2]
         return {"retrying_keys": row[0] - row[1], "quarantined_keys": row[1], "next_retry_at": row[2]}
@@ -111,7 +112,7 @@ class VectorMaintenance:
         if generation != self.index.generation:
             return
         # A source may change while the worker runs. Never mark its replacement indexed.
-        live = self.keys.get_keys([key["id"] for key in batch], list({key["scope"] for key in batch}))
+        live = self.keys.get_keys([key["id"] for key in batch], list({key["scope"] for key in batch}), include_cold=True)
         confirmed = [key["id"] for key in batch if key["id"] in ids and
                      (current := live.get(key["id"])) and
                      all(current.get(field) == key.get(field) for field in
@@ -158,11 +159,11 @@ class VectorMaintenance:
             params.append(self.index.generation)
         params.append(self.batch_size)
         rows = self.repo.conn.execute("SELECT k.id,k.scope,k.source_hash,k.search_text FROM retrieval_keys k WHERE k.indexed_at IS NULL "
-            "AND COALESCE(json_extract(k.meta,'$.retrieval_status'),'hot')!='cold' AND NOT EXISTS "
+            "AND " + vector_key_filter("k") + " AND NOT EXISTS "
             "(SELECT 1 FROM retrieval_vector_failures f WHERE f.key_id=k.id AND f.generation=? "
             "AND f.source_hash=k.source_hash AND f.search_text=k.search_text AND f.next_attempt>?) "
             "ORDER BY " + ordering + "k.id LIMIT ?", params).fetchall()
-        live = self.keys.get_keys([row["id"] for row in rows], list({row["scope"] for row in rows}))
+        live = self.keys.get_keys([row["id"] for row in rows], list({row["scope"] for row in rows}), include_cold=True)
         with self.repo.transaction():
             self.index.supersede_build_members(self.repo, [dict(row) for row in rows if row["id"] not in live])
         return list(live.values())

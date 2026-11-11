@@ -153,8 +153,8 @@ class ModelClockTests(unittest.TestCase):
         _complete("评估自主意愿", {"now": TS}, model=model)
         messages = model.complete_text.call_args.args[0]
         self.assertEqual(messages[0]["content"], "评估自主意愿")
-        self.assertIn("2026年10月23日 星期五 00:30:00", messages[1]["content"])
-        self.assertEqual(json.loads(messages[-1]["content"])["now"], TS)
+        self.assertEqual(messages[-1], clock_message(TS))
+        self.assertEqual(sum(m["content"].startswith(CLOCK_MARKER) for m in messages), 1)
 
     def test_memory_completion_keeps_its_historical_materials(self):
         # Clock refresh belongs to conversational/skill requests. Historical

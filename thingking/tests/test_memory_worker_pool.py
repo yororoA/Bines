@@ -104,6 +104,7 @@ class WorkerClaimTest(unittest.TestCase):
         self.node("周六归还蓝色围巾")
         self.node("蓝色围巾周六归还")
         claimed = self.service.claim_job(["associate"])
+        claimed["materials"].pop("compact")  # Legacy quote repair retains verified links.
         source, target = claimed["materials"]["source"], claimed["materials"]["candidates"][0]
         good = {"target_id": target["id"], "reason_key": "return", "reason": "蓝色围巾归还约定",
                 "relation_type": "support", "confidence": .8,

@@ -118,7 +118,10 @@ class HybridRetriever:
         k = max(1, min(int(k), 50))
         count = max(k, self.settings.retrieval_candidates)
         anchors = re.findall(r'[“"「]([^”"」]{2,})[”"」]', query)
-        anchors += re.findall(r'(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*\d)[A-Za-z][A-Za-z0-9_-]{2,}(?![A-Za-z0-9_-])|(?<![A-Za-z0-9])\d{4,}(?![A-Za-z0-9])', query)
+        # Explicit quotations express the requested literal. Numbers extracted
+        # from inside a quoted URL must not become weaker alternative matches.
+        if not anchors:
+            anchors = re.findall(r'(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*\d)[A-Za-z][A-Za-z0-9_-]{2,}(?![A-Za-z0-9_-])|(?<![A-Za-z0-9])\d{4,}(?![A-Za-z0-9])', query)
         exact = bool(anchors or re.search(r'原话|原文|编号|代号', query))
         if retrieval_mode not in {"auto", "exact", "association", "explore"}:
             raise ValueError("unknown retrieval_mode")
@@ -221,31 +224,15 @@ class HybridRetriever:
                            "retrieval_mode": mode, "cold_fallback": 0}
         if self.settings.reranker_model and candidates:
             candidates = self._rerank(query, candidates[:count])
-        # Cold originals have only lexical keys. Rescue a few precise matches
-        # without exposing all archived dialogue to normal vector retrieval.
+        # Archived detail is an independent, bounded retrieval channel. It must
+        # not disappear merely because loose hot matches already fill k slots.
         quota = max(0, min(10, getattr(self.settings, "cold_fallback_limit", 3)))
-        if quota and "message" in allowed_kinds and (mode == "exact" or len(candidates) < k):
-            cold = self.keys.bm25_query(" ".join(anchors) or topic, scopes, ["message"], quota * 4, accept=eligible,
-                per_source=1, cold_only=True, scan_limit=128)
-            cold_keys = eligible(self.keys.get_keys([kid for kid, _ in cold], scopes, include_cold=True))
-            cold_count = 0
-            for key_id, _ in cold:
-                row = cold_keys.get(key_id)
-                if not row:
-                    continue
-                coverage = sum(t in row["content"].lower() for t in terms) / max(1, len(terms))
-                if anchors:
-                    if not any(anchor.lower() in row["content"].lower() for anchor in anchors):
-                        continue
-                elif coverage < .75:
-                    continue
-                score = (1 + coverage) / (self.settings.retrieval_rrf_constant + 1)
-                candidates.append({**row, "score": score, "rrf_score": score,
-                                   "retrieval_channels": {"cold_fts": cold_count + 1}})
-                cold_count += 1
-                if cold_count == quota:
-                    break
-            self.last_trace["cold_fallback"] = cold_count
+        if quota:
+            cold, trace = self._cold_candidates(query, topic, anchors, terms, scopes,
+                                                allowed_kinds, eligible, quota)
+            candidates.extend(cold)
+            self.last_trace.update(trace)
+        candidates.sort(key=lambda row: (-row["score"], row["id"]))
         if mode == "exact":
             candidates.sort(key=lambda row: (bool(anchors) and not any(
                 anchor.lower() in row["content"].lower() for anchor in anchors), -row["score"], row["id"]))
@@ -270,7 +257,7 @@ class HybridRetriever:
                 "memory_id": row["memory_id"], "message_id": row["message_id"],
                 "key_id": row["id"], "scope": row["scope"], "kind": row["kind"],
                 "content": memory["content"] if memory else row["content"], "evidence": evidence,
-                "matched_spans": [row["content"]],
+                "matched_spans": [row.get("matched_content", row["content"])],
                 "score": row["score"], "rrf_score": row["rrf_score"],
                 "retrieval_channels": row["retrieval_channels"], "origin": row["meta"].get("origin"),
                 "retrieval_status": row["meta"].get("retrieval_status", "hot"),
@@ -280,6 +267,93 @@ class HybridRetriever:
         if not graph_enabled:
             return self._describe(output[:k], as_of)
         return self._graph_fusion(query, output, scopes, allowed_kinds, k, excluded, as_of, historical, mode)
+
+    def _cold_candidates(self, query, topic, anchors, terms, scopes, kinds, eligible, quota):
+        kinds = [kind for kind in kinds if kind in {"message", "episode", "excerpt"}]
+        trace = {"cold_fallback": 0, "cold_vector": {"status": "disabled"}}
+        if not kinds:
+            return [], trace
+        # Preserve candidates throughout the existing bounded scan before
+        # testing full literals. Short URL near-misses can outrank the sole
+        # exact quote in BM25; they must not consume a pre-filter shortlist or
+        # hide another chunk of the same source before its literal is checked.
+        lexical = self.keys.bm25_query(" ".join(anchors) or topic, scopes, kinds, 128,
+            accept=eligible, cold_only=True, scan_limit=128)
+        live = eligible(self.keys.get_keys([kid for kid, _ in lexical], scopes, include_cold=True))
+        accepted, coverage = {}, {}
+        for kid, _ in lexical:
+            row = live.get(kid)
+            if not row:
+                continue
+            content = row["content"].lower()
+            fraction = sum(term in content for term in terms) / max(1, len(terms))
+            if (anchors and not any(anchor.lower() in content for anchor in anchors)) or (not anchors and fraction < .75):
+                continue
+            accepted[kid], coverage[kid] = row, fraction
+        rankings = {"cold_fts": list(accepted)}
+        distances = {}
+        if hasattr(self.index, "query_archive_keys"):
+            try:
+                requested = max(12, quota * 4)
+                while True:
+                    vector = self.index.query_archive_keys(query, scopes, kinds, requested)
+                    trace["cold_vector"] = dict(getattr(self.index, "last_query_trace", {}) or
+                                                  {"status": "ok" if vector else "empty"})
+                    rows = eligible(self.keys.get_keys([kid for kid, _ in vector], scopes, include_cold=True))
+                    source_hashes = getattr(vector, "source_hashes", None)
+                    search_hashes = getattr(vector, "search_hashes", None)
+                    for kid, distance in vector:
+                        row = rows.get(kid)
+                        if (not row or row["meta"].get("retrieval_status") != "cold"
+                                or not row["meta"].get("archive_vector")
+                                or not math.isfinite(distance) or distance > self.settings.retrieval_max_distance
+                                or (source_hashes is not None and source_hashes.get(kid) != row["source_hash"])
+                                or (search_hashes is not None and search_hashes.get(kid) != hashlib.sha256(row["search_text"].encode()).hexdigest())):
+                            continue
+                        content = row["content"].lower()
+                        if anchors and not any(anchor.lower() in content for anchor in anchors):
+                            continue
+                        if kid not in accepted:
+                            accepted[kid] = {**row, "matched_content": row["meta"].get("archive_span") or row["content"]}
+                        coverage[kid] = sum(term in content for term in terms) / max(1, len(terms))
+                        distances[kid] = distance
+                    independent = {(accepted[kid]["source_type"], accepted[kid]["memory_id"] or
+                                    accepted[kid]["message_id"]) for kid in distances}
+                    if len(independent) >= quota or len(vector) < requested or requested >= 128:
+                        break
+                    requested = min(128, requested * 2)
+                rankings["cold_vector"] = sorted(distances, key=lambda kid: distances[kid])
+                # A partial literal match can corroborate an independently
+                # eligible semantic hit. It must not become a lexical-only
+                # shortcut around the precise-match threshold above.
+                rankings["cold_fts"] = [kid for kid, _ in lexical if kid in accepted
+                                         and (kid in rankings["cold_fts"] or coverage.get(kid, 0) > 0)]
+            except Exception:
+                trace["cold_vector"] = {"status": "error"}
+                log.exception("归档向量检索失败，保留有界全文召回")
+        scores, channels = rrf(rankings, self.settings.retrieval_rrf_constant)
+        graph = getattr(self.repo, "associations", None)
+        candidates = []
+        for kid, score in scores.items():
+            row = accepted[kid]
+            semantic = max(0, 1 - distances[kid] / max(.001, self.settings.retrieval_max_distance)) if kid in distances else 0
+            score += max(coverage[kid], semantic) / (self.settings.retrieval_rrf_constant + 1)
+            candidates.append({**row, "score": score, "rrf_score": scores[kid],
+                               "retrieval_channels": channels[kid]})
+        candidates.sort(key=lambda row: (-row["score"], row["id"]))
+        output, seen = [], set()
+        for row in candidates:
+            node = (graph.for_memory(row["memory_id"]) if row["memory_id"] else
+                    graph.for_message(row["message_id"])) if graph else None
+            source = node["id"] if node else (row["source_type"], row["memory_id"] or row["message_id"])
+            if source in seen:
+                continue
+            seen.add(source)
+            output.append(row)
+            if len(output) == quota:
+                break
+        trace["cold_fallback"] = len(output)
+        return output, trace
 
     def _graph_fusion(self, query, direct, scopes, kinds, k, excluded, as_of, historical, mode="association"):
         graph = self.repo.associations
@@ -361,7 +435,9 @@ class HybridRetriever:
             family = graph.evidence_family(node)
             if families.intersection(family):
                 continue
-            view = graph.view(node, self.keys, query)
+            view = graph.view(node, self.keys, query,
+                              matched_message_id=rows[nid].get("message_id"),
+                              matched_spans=rows[nid].get("matched_spans") or ())
             if not view:
                 continue
             row = {**rows[nid], **view}

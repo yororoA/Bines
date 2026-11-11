@@ -3,6 +3,7 @@ import re
 import subprocess
 import sys
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 
 from helpers import GROUP_ID, OWNER_QQ, STRANGER_QQ, THINKING_DIR, ROOT_DIR, MemoryFixture, local_env, qq_group_env, qq_private_env
@@ -47,11 +48,11 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("不在回复中谈论人格提示", guard)
         self.assertIn("以下示例只约束语气", guard)
 
-    def test_qq_style_guard_is_short_and_light_on_punctuation(self):
+    def test_qq_style_guard_is_brief_with_contextual_punctuation(self):
         guard = persona_profile.qq_style_guard()
         self.assertIn("QQ 回复格式", guard)
-        self.assertIn("简洁直接", guard)
-        self.assertIn("少用标点", guard)
+        self.assertIn("按整轮控制篇幅", guard)
+        self.assertIn("标点跟着语境和情绪", guard)
         self.assertIn("自己决定分段", guard)
         self.assertIn("不按字数拆分", guard)
         self.assertNotIn("正常使用逗号、顿号、句号", guard)
@@ -84,6 +85,63 @@ class PersonaSourceTest(unittest.TestCase):
             with self.subTest(score=value):
                 state = {"relationship_score": value, "relationship_level": "亲近"}
                 self.assertEqual(persona_profile.relationship_level(state), "亲近")
+
+    def test_historical_character_and_reaction_constraints_are_preserved(self):
+        # The February/May baseline is proud and pouty, while never malicious.
+        text = persona_profile.character_prompt()
+        for trait in ("表面高傲", "偶尔有点不耐烦", "嘴硬心软", "内心善良", "活泼", "娇嗔", "电波系"):
+            self.assertIn(trait, text)
+        reactions = persona_profile.load_persona()["reactions"]
+        for scene, requirements in {
+            "praised": ("骄傲", "固定句子"),
+            "teased": ("娇嗔", "不升级成争吵", "明确不喜欢时收住"),
+            "insulted": ("真被冒犯", "绝不恶意或粗鲁"),
+            "name_mistaken": ("认真纠正", "明确约定的称呼不当成叫错"),
+        }.items():
+            with self.subTest(scene=scene):
+                for requirement in requirements:
+                    self.assertIn(requirement, reactions[scene])
+
+    def test_closeness_modulates_character_without_erasing_it_or_pressuring_user(self):
+        for renderer in (persona_profile.style_guard, persona_profile.qq_style_guard):
+            guard = renderer(state={"relationship_score": 200})
+            for requirement in ("不能替换活泼、骄傲、嘴硬心软和奇趣", "自己的主意",
+                                "不索取回应、施压或让他内疚", "不靠撒娇糊弄反馈",
+                                "坦率承认具体问题", "直接回应原话题或收住",
+                                "调整宣言或承诺尾句", "道歉和关心落在这次具体事情上",
+                                "背景喜好只表示喜欢和联想", "实际见闻与操作要有证据", "不编造共同经历"):
+                self.assertIn(requirement, guard)
+
+    def test_diary_uses_same_character_with_its_own_voice_and_fact_boundaries(self):
+        persona = persona_profile.load_persona()
+        diary = persona_profile.diary_system_prompt(persona)
+        self.assertIn(persona_profile.character_prompt(persona), diary)
+        self.assertIn(persona_profile.diary_voice_prompt(persona), diary)
+        for requirement in ("表面高傲内心温柔", "娇嗔", "不写成第三人称工作报告",
+                            "区分真实互动、工具观察和未执行的想法", "不按调用顺序抄流水账",
+                            "同一件事的得意、娇嗔或嘴硬表达一次就够", "随后写事情的结果或真正的新感受",
+                            "不要求每篇集齐全部性格或复读口头禅"):
+            self.assertIn(requirement, diary)
+        for chat_only in ("QQ 回复格式", "两个空格", "本轮关系口吻", "用户：", "发送接口"):
+            self.assertNotIn(chat_only, diary)
+
+    def test_diary_persona_version_tracks_rendered_voice_and_ignores_qq_format(self):
+        persona = deepcopy(persona_profile.load_persona())
+        before = deepcopy(persona)
+        version = persona_profile.diary_persona_version(persona)
+        self.assertRegex(version, r"^[a-f0-9]{64}$")
+        self.assertEqual(version, persona_profile.diary_persona_version(dict(reversed(list(persona.items())))))
+        self.assertEqual(persona, before)
+        changed = deepcopy(persona)
+        changed["qq_output_format"].append("测试通道格式变化")
+        self.assertEqual(version, persona_profile.diary_persona_version(changed))
+        for section, key in (("personality", "core"), ("diary", "directives")):
+            changed = deepcopy(persona)
+            changed[section][key].append("测试口吻变化")
+            self.assertNotEqual(version, persona_profile.diary_persona_version(changed))
+        changed = deepcopy(persona)
+        changed["diary"]["voice"] += "测试日记语气变化"
+        self.assertNotEqual(version, persona_profile.diary_persona_version(changed))
 
 
 class PromptBuilderTest(unittest.TestCase):
@@ -120,6 +178,18 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertIn("本轮角色口吻（高优先级）", messages[-1]["content"])
         self.assertIn("直接以碧波的口吻回答", messages[-1]["content"])
         self.assertIn("本轮关系口吻：非常亲密", messages[-1]["content"])
+
+    def test_desktop_and_qq_share_restored_character_with_distinct_output_formats(self):
+        character = persona_profile.character_prompt()
+        for env, expected, absent in ((local_env(), "两个空格", "QQ 回复格式"),
+                                      (qq_private_env(OWNER_QQ), "QQ 回复格式", "两个空格")):
+            with self.subTest(channel=env["channel_type"]):
+                _, messages = self._system_text(env)
+                self.assertIn(character, messages[0]["content"])
+                self.assertIn("活泼、有点高傲、嘴硬心软", messages[-1]["content"])
+                self.assertIn(expected, messages[-1]["content"])
+                self.assertNotIn(absent, messages[-1]["content"])
+        self.assertIn(character, persona_profile.diary_system_prompt())
 
     def test_group_scene_hides_owner_private_data(self):
         text, _ = self._system_text(qq_group_env(OWNER_QQ))
@@ -221,8 +291,8 @@ class PromptBuilderTest(unittest.TestCase):
         _, messages = self._system_text(qq_group_env(STRANGER_QQ, name="小明"))
         transcript = [m["content"] for m in messages if m["content"].startswith("--- 群聊近况")]
         self.assertEqual(len(transcript), 1)
-        self.assertIn("小明(未@你): 今天吃什么", transcript[0])
-        self.assertIn("你: 你好呀", transcript[0])
+        self.assertIn('observed(id="qq:20002",name="小明")(未@你): 今天吃什么' , transcript[0])
+        self.assertIn("Bines(role=assistant): 你好呀", transcript[0])
         self.assertFalse(any(m["role"] in ("user", "assistant") for m in messages))
 
     def test_private_history_preserves_complete_reply_without_voice_examples(self):

@@ -16,7 +16,13 @@ class GatewayClient:
         from tools.context import CURRENT_CONTEXT
         context = CURRENT_CONTEXT.get()
         payload = dict(data)
-        current_event_id = event_id or context.event_id
+        # A desktop turn ID is not a persisted QQ event. Only trusted remote
+        # context (or an explicit internal lookup) supplies the gateway identity;
+        # never promote a remote caller without an event to local authority.
+        current_event_id = event_id or (context.event_id if not context.identity.local else None)
+        if not context.identity.local and not current_event_id:
+            raise PermissionError("QQ 操作需要当前可信事件")
+        payload.pop("event_id", None)
         if current_event_id:
             payload["event_id"] = current_event_id
         request = Request(self.url+path, data=json.dumps(payload).encode(), headers={

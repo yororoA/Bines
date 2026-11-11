@@ -270,6 +270,8 @@ class MemoryHub:
 
     def call(self, identity, method, params, event_id=None):
         params = dict(params)
+        if method == "retry_failed_job" and not identity.local:
+            raise PermissionError("失败任务恢复仅允许受信本机管理调用")
         if not identity.local:
             if method == "build_context":
                 params["envelope"] = identity_envelope(identity)
@@ -294,6 +296,9 @@ class MemoryHub:
             elif method == "read_memory_source":
                 params = {"source_id": params.get("source_id"), "scope": identity.scope,
                           "offset": params.get("offset", 0), "limit": params.get("limit", 1024)}
+            elif method == "learn_expression":
+                params = {key: params.get(key) for key in ("source", "quote", "technique", "situation")}
+                params["scope"] = identity.scope
             elif method == "activity_snapshot" and identity.owner and not identity.group and event_id:
                 # Only a persisted scheduler event can recheck cross-channel activity.
                 with self.store.connection() as db:
@@ -305,6 +310,11 @@ class MemoryHub:
                 raise PermissionError("当前 QQ 会话只允许读取自身上下文和更新自身状态")
         if method == "build_context":
             self._sync_context(identity, event_id)
+        if method == "learn_expression":
+            self._sync_context(identity, event_id)
+            source = params.get("source") or {}
+            if isinstance(source, dict) and source.get("kind") == "experience":
+                self.outbox.sync(self._sync_outbox_record, source_refs=[source.get("id")], time_budget=1.0)
         if method == "put_state" and not identity.local:
             # 服务端从事件推导消息来源，模型不能指定要跳过哪个状态任务。
             params.pop("source_ref", None)

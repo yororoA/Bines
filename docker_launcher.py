@@ -264,6 +264,8 @@ IMAGE_SOURCES = {
     "bines-thinking:local": _SHARED_SOURCES + (
         # RAG Server 初始化时也使用网关数据库迁移和消息身份定义。
         "chatBot/__init__.py", "chatBot/store.py", "chatBot/messages.py", "chatBot/config.py",
+        "chatBot/quotes.py", "chatBot/turn_wait.py",
+        "chatBot/receipts.py", "chatBot/recipients.py", "chatBot/capabilities.py",
         "thingking/rag_web_static/*",
         "requirements/thinking.txt", "requirements/launcher.txt",
         "requirements-chatbot.txt", "requirements/ml-constraints.txt",

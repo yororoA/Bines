@@ -71,7 +71,9 @@ class RequestBudgetCompatibilityTests(unittest.TestCase):
             # Optional dialogue is intentionally much larger than either target.
             messages.insert(-1, {"role": "user", "content": "OLD_OPTIONAL " + "旧对话" * 40000})
             expected_tools = runner.function_tools("QQ")
-            self.assertEqual(len(expected_tools), 53 if owner else 15)
+            self.assertEqual(len(expected_tools), 57 if owner else 19)
+            self.assertTrue({"learn_expression", "napcat_collect_sticker", "napcat_search_stickers",
+                             "napcat_send_sticker"} <= {tool["function"]["name"] for tool in expected_tools})
             rules = runner.instructions_for_source("QQ", native=True)
             observations = [{"platform": "bilibili", "status": "ok", "source_url": "https://www.bilibili.com/",
                              "captured_at": 1000, "description": "可见页面观察" * 900}] if owner else []
@@ -94,6 +96,8 @@ class RequestBudgetCompatibilityTests(unittest.TestCase):
                 self.assertFalse(any("OLD_OPTIONAL" in str(m.get("content")) for m in sent))
                 current = next(m for m in reversed(messages) if m.get("role") == "user")
                 self.assertIn(current, sent)
+                if owner:
+                    self.assertIn("可见页面观察", str(sent))
                 call_ids = {c["id"] for m in sent for c in m.get("tool_calls", [])}
                 replies = {m["tool_call_id"] for m in sent if m.get("role") == "tool"}
                 self.assertEqual(call_ids, replies)
@@ -109,9 +113,8 @@ class RequestBudgetCompatibilityTests(unittest.TestCase):
             self.assertTrue(all(t["count_is_upper_bound"] for t in traces))
             self.assertTrue(all(t["hard_input_limit"] is None and not t["hard_window_exceeded"] for t in traces))
             self.assertGreater(traces[0]["history_removed"], 0)
-            # Subsequent requests extend the bounded first request.
-            if owner:
-                self.assertTrue(all(t["soft_target_exceeded"] and t["over_budget"] for t in traces))
+            # Bounded browser observations may now let the complete owner
+            # request fit the soft target; all capabilities still survive.
             for trace in traces:
                 self.assertEqual(trace["input_units"], sum(trace["message_units_by_role"].values()) + trace["schema_units"])
         finally:

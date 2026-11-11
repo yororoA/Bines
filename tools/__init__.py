@@ -39,7 +39,7 @@ _MODULES = {
     "pointer_tool": {name: name for name in (
         "left_click", "left_double_click", "right_click", "left_drag", "right_drag", "type_text", "hotkey")},
     "game_mode_tool": {name: name for name in ("enable_game_mode", "disable_game_mode")},
-    "memory_tool": {name: name for name in ("update_status", "search_memory", "read_memory_source", "cite_memory", "correct_memory")},
+    "memory_tool": {name: name for name in ("update_status", "search_memory", "read_memory_source", "cite_memory", "correct_memory", "learn_expression")},
     "life_tool": {"regulate_life": "regulate_life"},
     "visual_tool": {"get_visual_info": "get_visual_info"},
     "sing_tool": {name: name for name in ("sing", "list_songs")},
@@ -49,7 +49,8 @@ _MODULES = {
     "napcat_tool": {name: name for name in (
         "napcat_call", "napcat_discover", "napcat_catalog", "napcat_operation",
         "napcat_events", "napcat_send", "napcat_forward",
-        "napcat_custom_faces", "napcat_send_custom_face")},
+        "napcat_custom_faces", "napcat_send_custom_face",
+        "napcat_collect_sticker", "napcat_search_stickers", "napcat_send_sticker")},
     "moments_tool": {
         "get_moments": "get_moments_simple", **{name: name for name in (
             "add_moment", "comment_moment", "get_comments", "like_moment", "like_comment", "analyze_moment_images")}},

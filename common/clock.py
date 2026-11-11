@@ -39,12 +39,22 @@ def clock_message(timestamp=None):
 
 
 def with_current_time(messages, timestamp=None):
-    """Append a trusted clock sample; never rewrite an already-sent prefix."""
+    """Keep one explanation and a bounded tail of trusted clock samples."""
     result = [dict(message) for message in messages]
     sample = clock_message(timestamp)
-    previous = next((message for message in reversed(result)
-                     if message.get("role") == "system"
-                     and str(message.get("content") or "").startswith(CLOCK_MARKER)), None)
-    if previous != sample:
-        result.append(sample)
+    clocks = [i for i, message in enumerate(result)
+              if message.get("role") == "system"
+              and str(message.get("content") or "").startswith(CLOCK_MARKER)]
+    if not clocks:
+        return [*result, sample]
+    stamp = sample["content"].splitlines()[:2]
+    previous = result[clocks[-1]]["content"].splitlines()[:2]
+    # Preserve the original prompt-frame clock and its interpretation rules.
+    # Later samples need only the date/time, never another copy of those rules.
+    if previous != stamp:
+        result.append({"role": "system", "content": "\n".join(stamp)})
+        clocks.append(len(result) - 1)
+    if len(clocks) > 4:
+        expired = set(clocks[1:-3])
+        result = [message for i, message in enumerate(result) if i not in expired]
     return result

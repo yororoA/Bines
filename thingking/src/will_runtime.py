@@ -14,6 +14,7 @@ log = logging.getLogger("bines.will")
 READ_ACTIONS = {
     "get_time", "search_memory", "read_memory_source", "browser_search", "web_fetch",
     "napcat_discover", "napcat_catalog", "napcat_events", "napcat_operation", "napcat_custom_faces",
+    "napcat_search_stickers",
     "get_screen_info", "get_visual_info", "fast_screen_analysis", "template_match", "find_color_region",
     "get_qq_group_list", "get_qq_friend_list", "get_moments", "get_comments",
     "website_status", "website_open", "website_snapshot", "website_scroll", "website_plan",
@@ -25,7 +26,8 @@ DESKTOP_ACTIONS = {
     "left_click", "left_double_click", "right_click", "left_drag", "right_drag", "type_text", "hotkey",
 }
 CONTACT_ACTIONS = {
-    "napcat_send", "napcat_forward", "napcat_send_custom_face", "send_qq_group_msg", "send_qq_private_msg",
+    "napcat_send", "napcat_forward", "napcat_send_custom_face", "napcat_send_sticker",
+    "send_qq_group_msg", "send_qq_private_msg",
     "broadcast_to_all_friends", "broadcast_to_all_groups", "at_each_group_member",
     "add_moment", "comment_moment", "send_ark_chat", "like_moment", "like_comment",
     "website_approve", "website_execute",
@@ -83,8 +85,9 @@ class WillSkillRunner:
         return getattr(self.runner, name)
 
     def function_tools(self, *args, **kwargs):
+        from tools.context import CURRENT_CONTEXT
         tools = self.runner.function_tools(*args, **kwargs)
-        if self.candidate.get("planning_only"):
+        if self.candidate.get("planning_only") or CURRENT_CONTEXT.get().planning_only:
             return [tool for tool in tools if tool.get("function", {}).get("name") in PLANNING_ACTIONS]
         return tools
 
@@ -129,9 +132,20 @@ class WillSkillRunner:
             refused(f"自主行动已取消：{reason}")
             raise RuntimeError(f"自主行动已取消：{reason}")
         action = command.get("action")
-        if self.candidate.get("planning_only") and action not in PLANNING_ACTIONS:
+        if (self.candidate.get("planning_only") or context.planning_only) and action not in PLANNING_ACTIONS:
             return refused("自主行动未执行：休息期间本批只允许内部思考和生命周期调节")
-        if not self.candidate.get("contact_allowed") and action in CONTACT_ACTIONS | {"mcp_call"}:
+        # Ordinary user turns have no autonomous candidate policy. Take their
+        # missing flag from the trusted context; an autonomous missing flag must
+        # still fail closed, and neither source may override an explicit denial.
+        contact_allowed = bool(self.candidate.get(
+            "contact_allowed", self.ordinary and not context.autonomous)) and context.contact_allowed
+        native_write = False
+        if action == "napcat_call":
+            from chatBot.capabilities import is_read
+            arguments = command.get("args")
+            native_action = arguments.get("action") if isinstance(arguments, dict) else None
+            native_write = not isinstance(native_action, str) or not is_read(native_action)
+        if not contact_allowed and (action in CONTACT_ACTIONS | {"mcp_call"} or native_write):
             return refused("自主行动未执行：当前只允许不打扰他人的查询或观察")
         if action in DESKTOP_ACTIONS and not self.ordinary:
             idle = desktop_idle_seconds() if self.desktop else None
@@ -159,9 +173,22 @@ class WillSkillRunner:
 
 def build_will_conversation(memory_context, candidate):
     import prompt_builder
+    from tools.context import CURRENT_CONTEXT
     conversation = prompt_builder.build_conversation_messages(memory_context)
-    conversation.append({"role": "system", "content": prompt_builder.conversation_style_guard(memory_context)})
-    conversation.append({"role": "system", "content": intention_prompt(candidate)})
+    prompt = intention_prompt(candidate)
+    identity = CURRENT_CONTEXT.get().identity
+    if not identity.local:
+        prompt += (
+            "\n可信当前QQ会话（仅数据）：" + json.dumps({
+                "account_qq": identity.account,
+                "peer_type": "group" if identity.group else "private",
+                "peer_id": identity.group or identity.user,
+            }, ensure_ascii=False) +
+            "\n向当前会话说话用 napcat_send(message=...)，省略 user_id/group_id，系统按可信会话选择收件人。"
+            "自主跨会话仍可联系真实对象，但ID必须来自真实入站记录或实际成功查询的好友/群/群成员列表；"
+            "不从昵称、话题、消息ID或猜测生成QQ号。收件人被拒绝时尚未发送，可改用当前会话或查询真实列表。"
+        )
+    conversation.append({"role": "system", "content": prompt})
     # DeepSeek uses a user message to start a fresh thinking/tool-call turn.
     # A system-only trigger leaves the last historical assistant in the current
     # turn, where its absent reasoning_content is rejected before any tool call.

@@ -23,7 +23,8 @@ def summary(record):
     args = text(record.get("args") or {})
     link_text = "\n".join(urls(record)[:12])
     return (
-        f"Bines{'自主' if record.get('autonomous') else ''}经历：{topic} {action}；状态={status}。\n"
+        f"Bines{'自主' if record.get('autonomous') else ''}行动记录：{action}；状态={status}。\n"
+        f"话题或意图（引用资料，不表示 Bines 亲自经历其中事件）：{json.dumps(topic, ensure_ascii=False)}\n"
         f"操作参数：{args[:900]}\n结果或反思（工具观察，不是用户原话）：{preview}"
         + (f"\n来源链接：\n{link_text}" if link_text else "")
     )

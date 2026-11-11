@@ -144,6 +144,8 @@ class MemoryService:
         self.model_costs = ModelCostStore(repo)
         from .turn_audit import TurnAudit
         self.turn_audit = TurnAudit(self)
+        from .expression_learning import ExpressionLearning
+        self.expression_learning = ExpressionLearning(self)
         with self.repo.transaction():
             # Existing unsummarized receipts must settle before association.
             for row in self.repo.conn.execute("""SELECT DISTINCT e.memory_id FROM experiences e JOIN jobs j
@@ -222,7 +224,7 @@ class MemoryService:
             turn_audit = (record.get("category") == "turn"
                           and (not record.get("result") or record["status"] in {"completed", "sent"}
                                and bool(record.get("source_message_refs"))))
-            audit_only = turn_audit or action in {"search_memory", "cite_memory", "correct_memory", "get_time", "update_status", "napcat_discover",
+            audit_only = turn_audit or action in {"search_memory", "cite_memory", "correct_memory", "learn_expression", "get_time", "update_status", "napcat_discover",
                                     "napcat_catalog", "mcp_discover", "activity_continue", "activity_finish",
                                     "activity_pause"}
             meta = {"experience_ref": source_ref, "experience_revision": revision,
@@ -391,25 +393,25 @@ class MemoryService:
             env = self.resolve(envelope)
             ts = float(env.timestamp or self.clock())
             actor_id = ASSISTANT_ACTOR if role == ROLE_ASSISTANT else env.actor_id
+            old = None
             if source_ref and recalled:
                 old = self.repo.conn.execute(
-                    "SELECT id,episode_id,source_ref,day_key FROM messages WHERE source_ref=?", (source_ref,)
+                    "SELECT * FROM messages WHERE source_ref=?", (source_ref,)
                 ).fetchone()
                 if old:
                     self._cancel_state_for_message(old["id"])
-                    # 自动状态任务用 memory 消息 id，网关手动更新用 source_ref；两者都要撤回。
-                    self.repo.temporal.retract_source(env.scope, f"message:{old['id']}")
-                    if old["source_ref"]:
-                        self.repo.temporal.retract_source(env.scope, old["source_ref"])
+                    self.repo.conn.execute(
+                        "UPDATE messages SET content='[消息已撤回]',origin='recalled' WHERE id=?", (old["id"],)
+                    )
+                    # Rebuild after invalidating the source, while old sourced
+                    # state history is still available for legacy conversion.
+                    self.state_effects.retract_message(dict(old))
                     self.repo.conn.execute(
                         "UPDATE jobs SET status='done',dedupe_key=NULL WHERE kind=? AND conversation_id=? "
                         "AND status IN ('pending','running')",
                         (JOB_SUMMARIZE, env.conversation_id),
                     )
                     self._retract_message_memories(env.scope, dict(old))
-                    self.repo.conn.execute(
-                        "UPDATE messages SET content='[消息已撤回]',origin='recalled' WHERE id=?", (old["id"],)
-                    )
                     node = self.graph.for_message(old["id"])
                     if node:
                         self.graph.invalidate(node["id"])
@@ -419,6 +421,11 @@ class MemoryService:
                 source_ref=source_ref,
                 origin="recalled" if recalled else ORIGIN_LIVE,
             )
+            message = self.repo.get_message(message_id)
+            if recalled and old is None:
+                self.state_effects.retract_message(message)
+            elif not recalled:
+                self.state_effects.link_message(message)
             self.provenance.register_message(env.scope, source_ref, message_id, turn_ref=turn_ref)
             self.life.record_message(message_id)
             if not recalled:
@@ -471,6 +478,10 @@ class MemoryService:
             )
 
     # ---------- context ----------
+    def learn_expression(self, scope, source, quote, technique, situation):
+        """Learn a bounded expression feature from a runtime-verified source."""
+        return self.expression_learning.learn(scope, source, quote, technique, situation)
+
     def build_context(self, envelope: Dict[str, Any], query: str = "") -> Dict[str, Any]:
         env = self.resolve(envelope)
         scopes = scope_policy.recall_scopes(env.scope)
@@ -535,6 +546,7 @@ class MemoryService:
             "retrieval_trace": {"recall": recall_trace, "profile": profile_trace},
             "state": visible_state,
             "life": self.life.snapshot(env.scope),
+            "expression_notes": self.expression_learning.snapshot(env.scope, limit=3),
             "last_user_ts": last_user["ts"] if last_user else None,
         }
 
@@ -646,16 +658,17 @@ class MemoryService:
         return self.repo.get_state(scope)
 
     def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
-                  source_ref: Optional[str] = None) -> Dict[str, Any]:
+                  source_ref: Optional[str] = None, changes: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self.repo.transaction():
-            version = self.state_effects.manual(scope, data, expected_version, source_ref=source_ref)
+            version = self.state_effects.manual(scope, data, expected_version, source_ref=source_ref, changes=changes)
             if source_ref:
                 message = self.repo.conn.execute(
                     "SELECT id FROM messages WHERE source_ref=?", (source_ref,),
                 ).fetchone()
                 if message:
                     self._cancel_state_for_message(message["id"])
-        return {"version": version}
+            committed = self.repo.get_state(scope)["data"]
+        return {"version": version, "data": committed}
 
     def import_gateway_snapshot(self, source: str, states: Sequence[Dict[str, Any]],
                                 memories: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -741,6 +754,12 @@ class MemoryService:
         if not self.settings.state_updates:
             return
         scope = f"{env.scope}:user:{env.external_user_id}" if env.is_group else env.scope
+        if self.repo.conn.execute("SELECT 1 FROM state_effects WHERE message_id=? AND scope=? "
+                                  "AND kind IN ('patch','manual_operations') LIMIT 1", (message_id, scope)).fetchone():
+            # A desktop tool may commit before its raw message reaches this
+            # service. Once linked, it owns the same update as an on-time write.
+            self._cancel_state_for_message(message_id)
+            return
         self.repo.enqueue_job(
             JOB_STATE, scope, {"message_id": message_id, "memory_scope": env.scope},
             dedupe_key=f"{JOB_STATE}:{message_id}", conversation_id=env.conversation_id,
@@ -803,10 +822,13 @@ class MemoryService:
         ]
         if any(e["meta"].get("repair_pending") or e["meta"].get("experience_summary_pending") for e in episodes):
             return []
-        return episodes
+        from .evidence import _active
+        return [e for e in episodes if _active(e, "memory")]
 
     @staticmethod
-    def _episode_signature(episodes: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    def _episode_signature(episodes: Sequence[Dict[str, Any]], *, persona_version=None) -> Dict[str, Any]:
+        from .diary_materials import POLICY
+        from persona_profile import diary_persona_version
         material = [
             [e["id"], e["content"], e["meta"].get("source_message_ids", []),
              e["meta"].get("source_memory_ids", [])]
@@ -815,13 +837,16 @@ class MemoryService:
         digest = hashlib.sha256(json.dumps(
             material, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
-        return {"episode_ids": [e["id"] for e in episodes], "episodes_hash": digest}
+        return {"episode_ids": [e["id"] for e in episodes], "episodes_hash": digest,
+                "diary_material_policy": POLICY, "diary_persona_version": persona_version or diary_persona_version()}
 
     def _diary_is_current(self, scope: str, day: str, signature: Dict[str, Any]) -> bool:
         diaries = self.repo.list_memories(kinds=[KIND_DIARY], scopes=[scope], day_key=day, limit=2)
         if len(diaries) != 1:
             return False
         meta = diaries[0]["meta"]
+        if meta.get("repair_pending"):
+            return False
         if "episodes_hash" not in meta and meta.get("episode_id"):
             return signature["episode_ids"] == [meta["episode_id"]]
         return all(meta.get(key) == value for key, value in signature.items())
@@ -895,7 +920,16 @@ class MemoryService:
                     from .experience_batch import collect
                     materials = collect(self, job, materials)
             if materials is False:
-                self.repo.conn.execute("UPDATE jobs SET status='pending',lease_until=NULL WHERE id=?", (job["id"],))
+                # Waiting for source associations is not a model failure. Keep
+                # the monotonic claim token, but avoid reclaiming this job on
+                # every worker poll while its dependencies are still running.
+                deferred_at = self.clock()
+                self.repo.conn.execute(
+                    "UPDATE jobs SET status='pending',available_at=?,lease_until=NULL,"
+                    "started_at=NULL,duration_seconds=NULL,updated_at=? "
+                    "WHERE id=? AND status='running' AND attempts=?",
+                    (deferred_at + 30, deferred_at, job["id"], job["attempts"]),
+                )
                 deferred.append(job["id"])
                 continue
             if materials is not None:
@@ -1084,26 +1118,47 @@ class MemoryService:
             episodes = self._diary_episodes(job["scope"], day)
             if not episodes:
                 return None
-            signature = self._episode_signature(episodes)
+            from persona_profile import diary_system_prompt
+            persona_prompt = diary_system_prompt()
+            signature = self._episode_signature(episodes,
+                persona_version=hashlib.sha256(persona_prompt.encode("utf-8")).hexdigest())
             if self._diary_is_current(job["scope"], day, signature):
                 return None
             payload = {**job["payload"], **signature}
             self.repo.update_job_payload(job["id"], payload)
             job["payload"] = payload
             nodes = [self.graph.register_memory(e["id"]) for e in episodes]
-            nodes = [n for n in nodes if n]
+            # A failed registration means the episode or one of its sources is
+            # invalid. Never freeze a smaller graph while still showing every
+            # episode to the writer (an empty graph would pass vacuously).
+            if any(not self.graph.valid(n) for n in nodes):
+                return None
             snapshot = self.retention.freeze(job, episodes, nodes, self.settings.episode_protect_k)
             if snapshot is False:
                 return False
             if snapshot is None:
                 return None
+            from .diary_materials import select_materials
+            selected = select_materials(self.repo, episodes, job["scope"], day)
+            expression_notes = self.expression_learning.snapshot(job["scope"], limit=3)
+            state = self._diary_state(job["scope"], day)
+            life = self.life.day_summary(day, job["scope"])
+            from .attribution import digest as attribution_digest, evidence
+            payload = {**job["payload"], "diary_material_selection": selected["material_selection"],
+                       "expression_notes": expression_notes,
+                       "diary_review_materials_hash": attribution_digest(evidence({**selected, "scope": job["scope"],
+                           "day_key": day, "state": state, "life": life}))}
+            self.repo.update_job_payload(job["id"], payload)
+            job["payload"] = payload
             return {
                 "scope": job["scope"],
                 "day_key": day,
-                "episodes": [e["content"] for e in episodes],
+                "diary_persona_prompt": persona_prompt,
+                "expression_notes": expression_notes,
+                **selected,
                 **signature,
-                "state": self._diary_state(job["scope"], day),
-                "life": self.life.day_summary(day, job["scope"]),
+                "state": state,
+                "life": life,
                 "retention": snapshot,
             }
         return None
@@ -1319,7 +1374,7 @@ class MemoryService:
             fresh.append({**fact, "content": text})
         return fresh
 
-    def complete_diary(self, job_id: int, text: str, expected_attempt=None) -> Dict[str, Any]:
+    def complete_diary(self, job_id: int, text: str, expected_attempt=None, attribution_review=None) -> Dict[str, Any]:
         job = self._running_job(job_id, JOB_DIARY, expected_attempt)
         if job is None:
             return {"status": "ignored"}
@@ -1328,9 +1383,13 @@ class MemoryService:
             raise ValueError("diary is empty")
         day = job["payload"]["day_key"]
         with self.repo.transaction():
+            from .diary_materials import archive_diary_revision, selection_is_current
             episodes = self._diary_episodes(job["scope"], day)
             signature = self._episode_signature(episodes)
             if (not episodes or not self.retention.valid(job_id, episodes)
+                    or not self.expression_learning.valid_snapshot(job["scope"], job["payload"].get("expression_notes", []))
+                    or any(not self.graph.valid(self.graph.for_memory(e["id"])) for e in episodes)
+                    or not selection_is_current(self.repo, job["payload"].get("diary_material_selection", {}), job["scope"], day)
                     or any(job["payload"].get(key) != value for key, value in signature.items())):
                 self.repo.finish_job(job["id"], release_dedupe=True)
                 self.diary_queue.mark(job["scope"], day)
@@ -1340,14 +1399,25 @@ class MemoryService:
             if self._diary_is_current(job["scope"], day, signature):
                 self.repo.finish_job(job["id"], release_dedupe=True)
                 return {"status": "done", "diary_id": None}
+            from .corrections import validate_corrected_text
+            validate_corrected_text(text, job["payload"].get("diary_material_selection", {}).get("corrections", []))
+            from .attribution import validate_receipt
+            validate_receipt(attribution_review, text, job["payload"].get("diary_review_materials_hash"))
             diaries = self.repo.list_memories(kinds=[KIND_DIARY], scopes=[job["scope"]], day_key=day, limit=100000)
             meta = {**(diaries[0]["meta"] if diaries else {}), **signature}
+            meta["diary_attribution_review"] = dict(attribution_review)
+            meta.pop("repair_pending", None)
+            if job["payload"].get("diary_material_selection"):
+                meta["diary_material_selection"] = job["payload"]["diary_material_selection"]
+            meta["expression_notes"] = job["payload"].get("expression_notes", [])
             for key in ("source_message_ids", "source_memory_ids"):
                 meta[key] = list(dict.fromkeys(
                     source for e in episodes for source in (e["meta"].get(key) or [])
                 ))
             if diaries:
                 diary_id = diaries[0]["id"]
+                for old in diaries:
+                    archive_diary_revision(self.repo, old, job["id"])
                 self.repo.update_memory(diary_id, content=text, meta=meta, importance=8)
                 for duplicate in diaries[1:]:
                     self.delete_memory(duplicate["id"])
@@ -1360,14 +1430,15 @@ class MemoryService:
             self._index_ids([diary_id])
         return {"status": "done", "diary_id": diary_id, "protected_episodes": protected}
 
-    def fail_job(self, job_id: int, error: str, expected_attempt=None) -> Dict[str, Any]:
+    def fail_job(self, job_id: int, error: str, expected_attempt=None, failure=None) -> Dict[str, Any]:
         with self.repo.transaction():
             job = self.repo.get_job(int(job_id))
             if job and job["status"] != "running" and expected_attempt is None:
                 return {"status": job["status"]}
             if not job or not self._running_job(job_id, job["kind"], expected_attempt):
                 return {"status": "ignored"}
-            status = self.repo.fail_job(int(job_id), error or "unknown error", self.settings.job_max_attempts)
+            status = self.repo.fail_job(int(job_id), error or "unknown error", self.settings.job_max_attempts,
+                                        failure=failure)
             if status == "failed" and job["kind"] == "summarize_experience":
                 row = self.repo.conn.execute("SELECT memory_id,revision FROM experiences WHERE source_ref=?",
                                             (job["payload"]["source_ref"],)).fetchone()
@@ -1378,6 +1449,12 @@ class MemoryService:
                     self.graph.register_memory(memory["id"])
             return {"status": status}
 
+    def retry_failed_job(self, job_id, *, scope, kind, expected_attempt, expected_updated_at,
+                         expected_error_type, reason):
+        """Administrative single-job recovery; never exposed as a conversation tool."""
+        return self.maintenance.retry_failed(job_id, scope=scope, kind=kind, expected_attempt=expected_attempt,
+            expected_updated_at=expected_updated_at, expected_error_type=expected_error_type, reason=reason)
+
     def record_model_call(self, job_id, event, expected_attempt):
         with self.repo.transaction():
             job = self.repo.get_job(int(job_id))
@@ -1386,7 +1463,13 @@ class MemoryService:
                 raise ValueError("模型调用缺少有效任务领取凭据")
             if event.get("status") == "started" and not self._running_job(job_id, job["kind"], expected_attempt):
                 raise ValueError("模型调用所属任务租约已失效")
-            return self.model_costs.record(job, expected_attempt, event)
+            recorded = self.model_costs.record(job, expected_attempt, event)
+            if job["kind"] == JOB_DIARY and event.get("status") == "started" and recorded["status"] == "recorded":
+                # A draft/review/rewrite sequence can exceed the initial lease.
+                # Only a new measured request on a still-valid attempt renews it.
+                self.repo.conn.execute("UPDATE jobs SET lease_until=MAX(lease_until,?) WHERE id=?",
+                                       (self.clock() + self.settings.job_lease_seconds, job["id"]))
+            return recorded
 
     @staticmethod
     def _clamp_importance(value: Any) -> float:

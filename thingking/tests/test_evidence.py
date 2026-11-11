@@ -270,7 +270,8 @@ class EvidenceStoreTest(unittest.TestCase):
         row.update(content="伪造原文", scope="secret", message_id=999)
         self.assertEqual(self.store.evidence(row, ["owner"]), [{
             "source_type": "message", "source_id": message_id, "source_ref": "qq:message:555",
-            "role": "observed", "actor_id": "qq:123", "content": "  实际发言\n保留换行  ",
+            "role": "observed", "actor_id": "qq:123", "actor_name": "检索昵称",
+            "content": "  实际发言\n保留换行  ",
             "ts": 42, "scope": "owner",
         }])
         self.assertEqual(self.store.evidence(row, []), [])

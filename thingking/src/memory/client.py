@@ -69,9 +69,11 @@ class MemoryClient:
         return self.call("get_state", scope=scope)
 
     def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
-                  source_ref: Optional[str] = None) -> Dict[str, Any]:
+                  source_ref: Optional[str] = None, changes: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Apply explicit operations when supplied; otherwise replace the legacy snapshot."""
         return self.call("put_state", scope=scope, data=data, expected_version=expected_version,
-                         **({"source_ref": source_ref} if source_ref else {}))
+                         **({"source_ref": source_ref} if source_ref else {}),
+                         **({"changes": changes} if changes is not None else {}))
 
     def activity_snapshot(self, limit: int = 10) -> Dict[str, Any]:
         return self.call("activity_snapshot", limit=limit, timeout_ms=5000)
@@ -107,6 +109,12 @@ class MemoryClient:
     def fail_job(self, job_id: int, error: str, **claim) -> Dict[str, Any]:
         return self.call("fail_job", job_id=job_id, error=error, **claim)
 
+    def retry_failed_job(self, job_id, *, scope, kind, expected_attempt, expected_updated_at,
+                         expected_error_type, reason):
+        return self.call("retry_failed_job", job_id=job_id, scope=scope, kind=kind,
+                         expected_attempt=expected_attempt, expected_updated_at=expected_updated_at,
+                         expected_error_type=expected_error_type, reason=reason)
+
     # ---------- admin ----------
     def stats(self) -> Dict[str, Any]:
         return self.call("stats")
@@ -136,6 +144,10 @@ class MemoryClient:
 
     def read_memory_source(self, source_id, scope, offset=0, limit=1024):
         return self.call("read_memory_source", source_id=source_id, scope=scope, offset=offset, limit=limit)
+
+    def learn_expression(self, scope, source, quote, technique, situation):
+        return self.call("learn_expression", scope=scope, source=source, quote=quote,
+                         technique=technique, situation=situation)
 
     def state_history(self, scope="owner", as_of=None, limit=20):
         return self.call("state_history", scope=scope, as_of=as_of, limit=limit)

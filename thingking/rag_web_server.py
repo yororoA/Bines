@@ -205,7 +205,13 @@ class QuietHealthRequestHandler(WSGIRequestHandler):
 
 def _run(stop):
     global client
-    if not client.ping(timeout_ms=2000):
+    backend = os.environ.get("BINES_MEMORY_BACKEND", "auto").strip().lower()
+    remote = backend == "remote" or (backend != "embedded" and
+                                      ZMQ_HOST.strip().lower() not in {"127.0.0.1", "localhost", "::1"})
+    # A configured remote server may still be loading its embedding model.
+    # Keep its retryable RPC client; a failed startup probe must not permanently
+    # redirect Docker requests to a nonexistent gateway on container loopback.
+    if not remote and not client.ping(timeout_ms=2000):
         from chatBot.memory_hub import GatewayMemoryClient
         client = GatewayMemoryClient()
     server = make_server(HTTP_HOST, HTTP_PORTS["RAG_MEMORY"], app, threaded=True,

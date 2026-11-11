@@ -178,9 +178,9 @@ class QQProactive:
             ).fetchall()
             if not rows:
                 return
-            checkpoint = json.loads(rows[-1]["checkpoint"])
-            policy.state.activity = {} if checkpoint.get("mode") == "finish" else checkpoint
-            policy.state.next_decision = checkpoint.get("next_at", now)
+            for row in rows:
+                checkpoint = json.loads(row["checkpoint"])
+                policy.accept_activity(checkpoint, now)
             # Persist state and acknowledgment in one commit, even across a restart.
             db.execute("INSERT OR REPLACE INTO proactive_sessions VALUES(?,?)",
                        (conversation, json.dumps(policy.dump(), ensure_ascii=False)))
@@ -211,24 +211,77 @@ class QQProactive:
                     db.execute("UPDATE proactive_runs SET status='skipped',error='interrupted_before_queue' WHERE id=?",
                                (candidate["id"],))
                 return
-        delivered = next((op for op in operations if op["status"] == "ok"
-                          and json.loads(op["result"] or "{}").get("retcode", 0) == 0), None)
-        from chatBot.messages import SEND_ACTIONS
-        contacted = any(op["action"] in SEND_ACTIONS for op in operations)
-        if contacted:
-            policy.state.pending["contacted"] = True
-        policy.state.pending["owner_contacted"] = any(
-            owner_contact(op["action"], json.loads(op["params"] or "{}"), self.store.owners)
-            for op in operations)
-        terminal = run and run["status"] != "queued"
-        if (delivered and (terminal or now - candidate["timestamp"] > self.config.expiry)
-                or (run and run["status"] in {"sent", "completed"})):
-            policy.resolve(float(run["delivered_at"] or delivered["created"]) if run else float(delivered["created"]),
-                           delivered=True, reflection=reflection, activity=checkpoint)
-        elif run and run["status"] == "uncertain":
-            policy.resolve(now, uncertain=True, activity=checkpoint)
+        from chatBot.recipients import destinations, send_action
+        from chatBot.quotes import message_id
+        successful, confirmed_sends, unresolved = [], [], []
+        for op in operations:
+            sending = bool(send_action(op["action"]))
+            result = json.loads(op["result"] or "{}")
+            retcode = result.get("retcode")
+            ok = (op["status"] == "ok" and result.get("status") == "ok"
+                  and type(retcode) in (int, str) and retcode in (0, "0"))
+            confirmed = False
+            if ok and sending:
+                try:
+                    message_id((result.get("data") or {}).get("message_id"))
+                    confirmed = True
+                except (AttributeError, ValueError):
+                    pass
+                if confirmed:
+                    confirmed_sends.append(op)
+            if ok and (not sending or confirmed):
+                successful.append(op)
+            if (op["status"] in {"started", "uncertain"}
+                    or op["status"] == "ok" and sending and not confirmed):
+                unresolved.append(op)
+        # A completed exploration or activity_finish is not proof of contact.
+        # Keep these flags explicit, including when a stale candidate had them set.
+        policy.state.pending["contacted"] = bool(confirmed_sends)
+        def confirmed_owner_contact(op):
+            try:
+                targets = destinations(op["action"], json.loads(op["params"] or "{}"))
+            except (TypeError, ValueError):
+                return False
+            # Private sends carrying group_id can fall back to the group. A
+            # message_id proves a send, but not which of those peers received it.
+            return (len(targets) == 1 and targets[0][0] == "private"
+                    and (not self.store.owners or targets[0][1] in self.store.owners))
+
+        policy.state.pending["owner_contacted"] = any(map(confirmed_owner_contact, confirmed_sends))
+        uncertain_owner_send = any(
+            send_action(op["action"])
+            and owner_contact(op["action"], json.loads(op["params"] or "{}"), self.store.owners)
+            for op in unresolved) or any(
+                not confirmed_owner_contact(op)
+                and owner_contact(op["action"], json.loads(op["params"] or "{}"), self.store.owners)
+                for op in confirmed_sends)
+
+        def settle(at, *, delivered=False, uncertain=False):
+            activity = checkpoint
+            previous_uncertain_contact = policy.state.uncertain_contact_ref
+            if uncertain and (not activity or activity.get("mode") == "finish"):
+                from common.activity import activity_checkpoint
+                activity = activity_checkpoint(candidate, {
+                    "mode": "pause", "delay_seconds": 0,
+                    "note": "操作回执不确定，先核查原操作，不重放",
+                }, [])
+            policy.resolve(at, delivered=delivered, uncertain=uncertain,
+                           outcome="uncertain" if uncertain else None,
+                           reflection=reflection, activity=activity)
+            if uncertain or uncertain_owner_send:
+                # Unknown sends still suppress a repeat, without claiming that
+                # the owner was contacted or starting delivered-message feedback.
+                policy.state.uncertain_contact_ref = (candidate["based_on_user"]
+                    if uncertain_owner_send else previous_uncertain_contact)
+
+        terminal = not run or run["status"] != "queued"
+        completed = bool(successful) or bool(run and run["status"] in {"sent", "completed"})
+        uncertain = bool(unresolved) or bool(run and run["status"] == "uncertain")
+        if (terminal or now - candidate["timestamp"] > self.config.expiry) and (completed or uncertain):
+            completed_at = (run["delivered_at"] if run else 0) or (successful[0]["created"] if successful else now)
+            settle(float(completed_at), delivered=completed, uncertain=uncertain)
         elif not run or run["status"] in {"skipped", "failed"}:
-            policy.resolve(now, activity=checkpoint)
+            settle(now)
         elif now - candidate["timestamp"] > self.config.expiry:
             # Dispatch already began but never committed a receipt: don't chase/replay.
             interrupted = bool(self.store.turn_writes(candidate["id"]))
@@ -239,7 +292,7 @@ class QQProactive:
                     "delay_seconds": 0 if interrupted else 15,
                     "note": "批次中断，重新观察；已有操作需先核查回执，禁止重放",
                 }, [])
-            policy.resolve(now, uncertain=interrupted, activity=checkpoint)
+            settle(now, uncertain=interrupted)
             with self.store.connection() as db:
                 db.execute("UPDATE proactive_runs SET status=? WHERE id=?",
                            ("uncertain" if interrupted else "skipped", candidate["id"]))
@@ -286,13 +339,15 @@ class QQProactive:
             memory_context = (snapshot if continuing else self.memory.build_context(
                 identity_envelope(identity), query="近期兴趣、情绪变化与未完成的想法"))
             materials = {
+                "envelope": memory_context.get("envelope") or identity_envelope(identity),
                 "recent": memory_context.get("working", [])[-12:],
                 "memories": memory_context.get("recalled", [])[:5],
                 "profile": memory_context.get("profile") or {},
                 "bridge": memory_context.get("bridge"),
                 "state": memory_context.get("state") or {},
                 "life": compact_life(memory_context.get("life") or snapshot.get("life")),
-                "recent_outcomes": policy.state.recent_outcomes,
+                "activity": dict(policy.state.activity),
+                "waiting_intentions": policy.waiting_intentions(),
                 "planning_only": policy.state.planning_only,
                 **policy.contact_permissions(now, user, activity, last_reply_at=conversation_activity),
             }
@@ -300,7 +355,8 @@ class QQProactive:
                 self.capabilities = capability_summary("QQ")
             materials["available_skills"] = self.capabilities
             needs_appraisal = (policy.appraisal_due(human_ref(user), now)
-                               and (not continuing or bool(policy.state.emotion_at)))
+                               and (not continuing or bool(policy.state.emotion_at)
+                                    or getattr(policy.state, "interest_reappraisal_pending", False)))
             if needs_appraisal:
                 appraisal = self.appraise(materials, policy.state, now)
                 policy.appraise(appraisal, human_ref(user), now)

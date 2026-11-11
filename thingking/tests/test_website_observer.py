@@ -348,7 +348,12 @@ class PerceptionTests(unittest.TestCase):
         self.assertIn("新的视频", str(requests[1].kwargs["messages"]))
         initial = requests[0].kwargs["messages"]
         continuation = requests[1].kwargs["messages"]
-        self.assertEqual(continuation[:len(initial)], initial)
+        # Automatic perception is now a bounded baseline + current sample;
+        # conversation instructions and executed actions still survive intact.
+        for message in initial:
+            if "<website_observations>" not in str(message.get("content")):
+                self.assertIn(message, continuation)
+        self.assertIn("正在展示海鸟", str(continuation))
         observations = [m for m in continuation if "<website_observations>\n" in str(m.get("content"))]
         self.assertIn("新的视频", observations[-1]["content"])
         self.assertIn("以最新采样为准", observations[-1]["content"])

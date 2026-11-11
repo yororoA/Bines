@@ -130,9 +130,12 @@ class PolicyTests(unittest.TestCase):
         next_reply = {**reply, "id": 3, "ts": self.now+80}
         policy.state.activity = {"mode": "continue", "next_at": self.now+200}
         self.assertFalse(policy.tick(self.now+80, next_reply, followup_after_reply=True))
-        self.assertFalse(policy.tick(self.now+120, next_reply, last_reply_at=self.now+100,
-                                     followup_after_reply=True))
-        self.assertEqual(policy.state.followup_review_ref, human_ref(reply))
+        self.assertTrue(policy.tick(self.now+120, next_reply, last_reply_at=self.now+100,
+                                    followup_after_reply=True))
+        # A long activity delay no longer blocks a different conversation goal.
+        self.assertFalse(policy.state.activity)
+        self.assertEqual(next(iter(policy.state.waiting_activities.values()))["next_at"], self.now+200)
+        self.assertEqual(policy.state.followup_review_ref, human_ref(next_reply))
 
     def test_ready_followup_does_not_override_quiet_rest_or_boundary(self):
         for content, now, life in (
@@ -386,7 +389,8 @@ class PolicyTests(unittest.TestCase):
         self.policy.reserve(self.candidate("curiosity"))
         self.policy.resolve(self.now+5, delivered=True, activity={
             "mode": "continue", "topic": "海鸟", "intent": "搜索海鸟如何捕食", "delay_seconds": 5,
-            "decision": {"interest_level": .8}})
+            "decision_source": "model",
+            "decision": {"interest_level": .8, "reason": "观察到海鸟捕食动作后产生了具体疑问"}})
         self.assertEqual(self.policy.state.recent_outcomes[-1]["topic"], "海鸟")
         self.assertEqual(self.policy.state.interests[0], "海鸟")
         self.assertFalse(self.policy.appraisal_due("1", self.now+20))
@@ -734,6 +738,7 @@ class QQTests(unittest.TestCase):
         self.assertEqual(decide.call_count, 2)
 
     def test_owner_private_cooldown_does_not_block_public_or_other_private_targets(self):
+        self.insert(event("2", msg_id=500, time=time.time()-3600, text="其他好友的真实入站"))
         ev = self.prepare("initiative")
         ev["proactive"]["owner_contact_allowed"] = False
         with self.store.connection() as db:

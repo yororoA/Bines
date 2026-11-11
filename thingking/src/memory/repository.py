@@ -690,13 +690,27 @@ class MemoryRepository:
             (self.clock(), release_dedupe, self.clock(), job_id),
         )
 
-    def fail_job(self, job_id: int, error: str, max_attempts: int) -> str:
+    def fail_job(self, job_id: int, error: str, max_attempts: int, failure=None) -> str:
+        from .failures import failure_summary, transient_delay, validate_failure
+        failure = validate_failure(failure)
         job = self.get_job(job_id)
         if not job:
             return "missing"
         if job["status"] != "running":
             return job["status"]  # 撤回或手动更新取消的任务不能因迟到的失败通知复活。
         now = self.clock()
+        if failure is not None:
+            error = failure_summary(failure)
+            job["payload"] = {**job["payload"], "last_failure": failure}
+        if failure is not None and failure["category"] == "model_transient":
+            transient = int(job["payload"].get("transient_failures", 0)) + 1
+            payload = {**job["payload"], "transient_failures": transient}
+            self.update_job_payload(job_id, payload)
+            self.conn.execute(
+                "UPDATE jobs SET status='pending',available_at=?,lease_until=NULL,last_error=?,"
+                "duration_seconds=CASE WHEN started_at IS NOT NULL THEN MAX(0,?-started_at) END,updated_at=? WHERE id=?",
+                (now + transient_delay(transient), error, now, now, job_id))
+            return "pending"
         failures = int(job["payload"].get("generation_failures", 0)) + 1
         self.update_job_payload(job_id, {**job["payload"], "generation_failures": failures})
         if failures >= max_attempts:

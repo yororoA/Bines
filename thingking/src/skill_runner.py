@@ -19,11 +19,14 @@ QQ_ALLOWED_ACTIONS = {
     "get_time", "send_qq_group_msg", "send_qq_private_msg",
     "napcat_call", "napcat_discover", "napcat_catalog", "napcat_send", "napcat_forward",
     "napcat_events", "update_status", "search_memory", "read_memory_source", "cite_memory", "browser_search", "web_fetch",
+    "napcat_collect_sticker", "napcat_search_stickers", "napcat_send_sticker",
+    "learn_expression",
 }
 QQ_GROUP_OWNER_ACTIONS = {"napcat_custom_faces", "napcat_send_custom_face"}
 NAPCAT_ACTIONS = {
     "napcat_call", "napcat_discover", "napcat_catalog", "napcat_operation", "napcat_events",
     "napcat_send", "napcat_forward", "napcat_custom_faces", "napcat_send_custom_face",
+    "napcat_collect_sticker", "napcat_search_stickers", "napcat_send_sticker",
 }
 QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | QQ_GROUP_OWNER_ACTIONS | {
     "napcat_operation", "mcp_discover", "mcp_call",
@@ -301,12 +304,21 @@ class SkillRunner:
                     sections.append(f"Action `{action}` — {first.splitlines()[0]}"
                                     + (f"\nArguments:{signature}" if signature else ""))
         if native:
+            # Lead QQ tool turns with their stable channel style. Otherwise the
+            # long capability preamble can dominate brief conversational cues.
+            # Keep the scoped voice/frame intact for request-budget rebuilding.
+            channel_style = ""
+            if source in {"QQ", "qq"}:
+                from persona_profile import qq_output_rules
+                channel_style = qq_output_rules() + "\n\n"
             return (
-                "通过原生工具调用执行操作，可在一轮中调用多个工具，按返回结果继续组合接口。"
+                channel_style
+                + "通过原生工具调用执行操作，可在一轮中调用多个工具，按返回结果继续组合接口。"
                 "NapCat 原生接口统一使用 napcat_call，参数和消息段由你决定；"
                 "需要参数说明时调用 napcat_discover，无需套用固定 action 模板。"
                 "消息数量、分段、图文组合、引用、@及目标会话由你自主选择。"
-                "已通过接口发送的回复不在最终文本重复；需要继续说话时可以继续发送。\n\n"
+                "已通过接口发送的回复不在最终文本重复；当前话已说完就结束，"
+                "不因收到工具回执而追加收尾、解释或提问。复杂任务仍按实际目标继续。\n\n"
                 "工具回执只报告本次操作结果，不代表对方发来了新消息，也不代表等待时间已经过去。"
                 "普通对话只回应已经收到的消息；可信 [System Event: Will] 允许依据本轮自主意图执行。"
                 "想等待对方回复时直接结束，"

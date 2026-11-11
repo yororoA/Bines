@@ -25,6 +25,12 @@ WEBUI_URL = os.environ.get("BINES_NAPCAT_WEBUI_URL", "http://127.0.0.1:6099")
 WEBUI_TOKEN = os.environ.get("BINES_NAPCAT_WEBUI_TOKEN", "")
 DEBOUNCE = float(os.environ.get("BINES_QQ_DEBOUNCE", "1.5"))
 MAX_WAIT = float(os.environ.get("BINES_QQ_MAX_WAIT", "5"))
+FOLLOWUP_WAIT_SECONDS = float(os.environ.get("BINES_QQ_FOLLOWUP_WAIT_SECONDS", "6"))
+FOLLOWUP_WAIT_TOTAL = float(os.environ.get("BINES_QQ_FOLLOWUP_WAIT_TOTAL", "20"))
+FOLLOWUP_WAIT_REQUESTS = int(os.environ.get("BINES_QQ_FOLLOWUP_WAIT_REQUESTS", "2"))
+if (not 1 <= FOLLOWUP_WAIT_SECONDS <= 10 or not 0 <= FOLLOWUP_WAIT_TOTAL <= 60
+        or not 0 <= FOLLOWUP_WAIT_REQUESTS <= 3):
+    raise ValueError("QQ 连续输入等待需单次1–10秒、总窗口0–60秒、最多0–3次；总窗口或次数为0关闭语义等待")
 WORKERS = int(os.environ.get("BINES_QQ_WORKERS", "4"))
 GROUP_REPLY_MODE = os.environ.get("BINES_QQ_GROUP_REPLY", "mention")
 # Conversation needs more variation than low-temperature extraction/tool tasks.
