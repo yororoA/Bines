@@ -1,4 +1,3 @@
-import json
 import re
 import subprocess
 import sys
@@ -51,7 +50,7 @@ class PersonaSourceTest(unittest.TestCase):
     def test_qq_style_guard_is_brief_with_contextual_punctuation(self):
         guard = persona_profile.qq_style_guard()
         self.assertIn("QQ 回复格式", guard)
-        self.assertIn("按整轮控制篇幅", guard)
+        self.assertIn("篇幅由内容决定", guard)
         self.assertIn("标点跟着语境和情绪", guard)
         self.assertIn("自己决定分段", guard)
         self.assertIn("不按字数拆分", guard)
@@ -295,7 +294,7 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertIn("Bines(role=assistant): 你好呀", transcript[0])
         self.assertFalse(any(m["role"] in ("user", "assistant") for m in messages))
 
-    def test_private_history_preserves_complete_reply_without_voice_examples(self):
+    def test_private_history_keeps_complete_reply_as_native_turns(self):
         from copy import deepcopy
 
         reply = "旧回复的长篇开场。" * 30 + "我们约好周五晚上听这首歌。" + "旧回复的长篇尾声。" * 30
@@ -305,10 +304,10 @@ class PromptBuilderTest(unittest.TestCase):
                 context = self.fx.service.build_context(env)
                 original = deepcopy(context["working"])
                 messages = prompt_builder.build_conversation_messages(context)
-                history = [m for m in messages if m["content"].startswith("<historical_assistant_message>")]
+                history = [m for m in messages if m["role"] == "assistant"]
                 self.assertEqual(len(history), 1)
-                self.assertEqual(json.loads(history[0]["content"].splitlines()[1])["content"], reply)
-                self.assertFalse(any(m["role"] == "assistant" for m in messages))
+                self.assertTrue(history[0]["content"].endswith(reply))
+                self.assertFalse(any("historical_assistant_message" in m["content"] for m in messages))
                 self.assertTrue(any(m["role"] == "user" and "什么时候一起听歌" in m["content"] for m in messages))
                 self.assertEqual(context["working"], original)
                 self.assertEqual(self.fx.service.build_context(env)["working"], original)
@@ -319,8 +318,8 @@ class PromptBuilderTest(unittest.TestCase):
             {"role": "user", "content": "请给我详细内容", "ts": self.fx.clock()},
         ]}
         messages = prompt_builder._working_messages(context, prompt_builder.SCENE_LOCAL)
-        self.assertEqual([m["role"] for m in messages], ["system", "user"])
-        self.assertIn("historical_assistant_message", messages[0]["content"])
+        self.assertEqual([m["role"] for m in messages], ["assistant", "user"])
+        self.assertIn("请给我详细内容", messages[0]["content"])
         self.assertIn("请给我详细内容", messages[1]["content"])
 
     def test_strip_qq_prefix_handles_merged_lines(self):

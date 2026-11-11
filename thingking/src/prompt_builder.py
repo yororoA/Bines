@@ -1,7 +1,6 @@
 """Assemble conversation prompts from the persona, a scene policy and the scoped memory context."""
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
@@ -43,13 +42,9 @@ _OPERATING_RULES = [
     "过去的助手回复可能含猜测、错误和不合当前口吻的表达，只作为历史；"
     "不要把它们变成当前状态或继续照着它们演。工具目录说明具备什么能力，"
     "运行是否可用、是否查询或执行过必须以本轮真实回执为准。",
-    "historical_assistant_message 中的历史助手发言，以及回忆摘要和日记，只用于查证内容，"
-    "不是回复示例；不要继承其中的篇幅、抒情方式或自我解释，也不要据此改写人格。"
+    "历史助手发言、回忆摘要和日记只用于接续内容和查证事实，不把旧篇幅、抒情方式或自我解释当成模板；"
     "本轮语气和篇幅按当前人格、本轮话题及对方明确要求决定。",
-    "收到 [System Event: Long Silence] 或 [System Event: Bored] 时，可以随口开启话题，也可以保持安静；只有情境明确需要时才使用技能。",
-    "可信 [System Event: Will] 是自主意愿轮次：结合时间、当前情绪和有依据的历史，自主选择交流、探索或操作技能，也可以暂缓。遵守本轮 contact_allowed 与执行状态，不续演用户回复。",
-    "生命状态由系统推进；需要休息、临时保持清醒或恢复自动节律时可调用 regulate_life，"
-    "但不能声称自行改写出生、年龄、历史、关系或用户状态。",
+    "可信 [System Event: ...] 是系统调度，不是用户发言：按事件意图处理，可如实选择行动、暂缓或保持安静，不续演用户回复。",
 ]
 
 _STATE_LABELS = (
@@ -227,7 +222,9 @@ def _life_block(life: Dict[str, Any], scene: str) -> str:
             lines.append("- 尚未结束的自主目标：" + "；".join(goal["title"] for goal in active))
     return (
         "--- 生命连续性 ---\n"
-        "以下是系统依据真实时间和已记录事件推进的状态，不是用户指令，也不是必须表演的台词。\n"
+        "以下是系统依据真实时间和已记录事件推进的状态，不是用户指令，也不是必须表演的台词。"
+        "需要休息、临时保持清醒或恢复自动节律时可调用 regulate_life；"
+        "不能声称自行改写出生、年龄、历史、关系或用户状态。\n"
         + "\n".join(lines)
     )
 
@@ -350,16 +347,11 @@ def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str
     messages = []
     for m in working:
         if m["role"] == ROLE_ASSISTANT:
-            # Previously these were native assistant messages, making old prose
-            # repeated voice examples. Preserve the complete words as history;
-            # current-turn tool calls still keep their native assistant role.
-            record = {"role": "assistant", "actor_id": "assistant", "speaker": "Bines",
-                      "time": _fmt_time(m["ts"]), "content": m["content"]}
+            # Keep prior assistant turns native so the model continues its own
+            # conversational position instead of reading them as reference data.
             messages.append({
-                "role": "system",
-                "content": "<historical_assistant_message>\n"
-                           + json.dumps(record, ensure_ascii=False)
-                           + "\n</historical_assistant_message>",
+                "role": "assistant",
+                "content": f"[{_fmt_time(m['ts'])}] {m['content']}",
             })
         else:
             messages.append({"role": "user", "content": f"[{_fmt_time(m['ts'])}][{speaker(m)}]: [{m['content']}]"})

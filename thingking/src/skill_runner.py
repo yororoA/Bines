@@ -304,16 +304,10 @@ class SkillRunner:
                     sections.append(f"Action `{action}` — {first.splitlines()[0]}"
                                     + (f"\nArguments:{signature}" if signature else ""))
         if native:
-            # Lead QQ tool turns with their stable channel style. Otherwise the
-            # long capability preamble can dominate brief conversational cues.
-            # Keep the scoped voice/frame intact for request-budget rebuilding.
-            channel_style = ""
-            if source in {"QQ", "qq"}:
-                from persona_profile import qq_output_rules
-                channel_style = qq_output_rules() + "\n\n"
+            # The final scoped voice guard already carries the channel output
+            # rules. Repeating them here would outweigh the ongoing conversation.
             return (
-                channel_style
-                + "通过原生工具调用执行操作，可在一轮中调用多个工具，按返回结果继续组合接口。"
+                "通过原生工具调用执行操作，可在一轮中调用多个工具，按返回结果继续组合接口。"
                 "NapCat 原生接口统一使用 napcat_call，参数和消息段由你决定；"
                 "需要参数说明时调用 napcat_discover，无需套用固定 action 模板。"
                 "消息数量、分段、图文组合、引用、@及目标会话由你自主选择。"

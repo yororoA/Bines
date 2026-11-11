@@ -141,6 +141,9 @@ def readable(message):
     parts = []
     for segment in segments(message):
         kind, data = segment.get("type"), segment.get("data") or {}
+        if kind == "reply":
+            # 引用关系保存在 message_id / raw 元数据中；正文不保留协议标记。
+            continue
         if kind == "text":
             parts.append(str(data.get("text", "")))
         elif kind == "at":

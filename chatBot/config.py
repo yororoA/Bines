@@ -34,7 +34,7 @@ if (not 1 <= FOLLOWUP_WAIT_SECONDS <= 10 or not 0 <= FOLLOWUP_WAIT_TOTAL <= 60
 WORKERS = int(os.environ.get("BINES_QQ_WORKERS", "4"))
 GROUP_REPLY_MODE = os.environ.get("BINES_QQ_GROUP_REPLY", "mention")
 # Conversation needs more variation than low-temperature extraction/tool tasks.
-REPLY_TEMPERATURE = float(os.environ.get("BINES_QQ_TEMPERATURE", "0.65"))
+REPLY_TEMPERATURE = float(os.environ.get("BINES_QQ_TEMPERATURE", "0.85"))
 if not 0 <= REPLY_TEMPERATURE <= 2:
     raise ValueError("BINES_QQ_TEMPERATURE 必须在 0 到 2 之间")
 
