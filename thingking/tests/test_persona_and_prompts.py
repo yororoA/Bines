@@ -53,7 +53,7 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("篇幅跟着对方走", guard)
         self.assertIn("标点跟着语境和情绪", guard)
         self.assertIn("严禁包含任何换行符", guard)
-        self.assertIn("独立的聊天气泡", guard)
+        self.assertIn("只保留第一行", guard)
         self.assertNotIn("正常使用逗号、顿号、句号", guard)
         self.assertIn("两个空格", persona_profile.output_rules())
 

@@ -178,16 +178,20 @@ class QQThinking:
                     context.journal.turn_message_refs.append(ref)
 
     def reply_actions(self, identity, texts):
-        """Legacy final-text fallback preserves model text without automatic @."""
+        """Legacy final-text fallback preserves model text without automatic @. Splits multiline output."""
         actions = []
         for text in texts:
-            chain = [{"type": "text", "data": {"text": text}}]
-            if identity.group:
-                actions.append({"action": "send_group_msg",
-                                "params": {"group_id": identity.group, "message": chain}})
-            else:
-                actions.append({"action": "send_private_msg",
-                                "params": {"user_id": identity.user, "message": chain}})
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                chain = [{"type": "text", "data": {"text": line}}]
+                if identity.group:
+                    actions.append({"action": "send_group_msg",
+                                    "params": {"group_id": identity.group, "message": chain}})
+                else:
+                    actions.append({"action": "send_private_msg",
+                                    "params": {"user_id": identity.user, "message": chain}})
         return actions
 
     def send_actions(self, identity, turn_id, actions, start=0, *, activity=None, handoff=None):
