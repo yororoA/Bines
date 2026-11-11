@@ -316,7 +316,8 @@ class Integration(unittest.TestCase):
                 class Model:
                     def run_skill_protocol(inner, conversation, runner, **kwargs):
                         self.assertIn('"quoted_message_id": "95"', conversation[-1]["content"])
-                        self.assertIn('"current_message_id": "96"', conversation[-1]["content"])
+                        self.assertIn('"message_id": "96"', str(conversation))
+                        self.assertIn('"kind": "current_input"', str(conversation))
                         self.assertIn('"speaker_type": "human"', conversation[-1]["content"])
                         self.assertIn("不是空@", str(conversation))
                         self.assertIn("小猫举着写有下班的牌子", str(conversation))

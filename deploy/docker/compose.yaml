@@ -167,6 +167,23 @@ services:
       retries: 3
       start_period: 30s
 
+  qdrant:
+    image: ${BINES_QDRANT_IMAGE:-docker.1ms.run/qdrant/qdrant:v1.12.4}
+    logging: *bines-logging
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${BINES_QDRANT_PORT:-6333}:6333"
+    volumes:
+      - bines-qdrant:/qdrant/storage
+    networks:
+      - bines
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   memory-server:
     build:
       context: ../..
@@ -190,12 +207,19 @@ services:
       BINES_DOCKER_MODE: "1"
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_MEMORY_BIND_HOST: 0.0.0.0
+      BINES_QDRANT_URL: http://qdrant:6333
+      BINES_QDRANT_COLLECTION: ${BINES_QDRANT_COLLECTION:-bines_expression}
+      BINES_QDRANT_MIN_SCORE: ${BINES_QDRANT_MIN_SCORE:-0.52}
       HF_HOME: /app/thingking/models/hf-cache
     ports:
       - "127.0.0.1:5560:5560"
     volumes:
       - ../../thingking/memory_data:/app/thingking/memory_data
       - ../../thingking/models:/app/thingking/models
+      - ../../thingking/data:/app/thingking/data:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
     networks:
       - bines
     healthcheck:
@@ -244,3 +268,5 @@ networks:
 volumes:
   bines-gateway:
     name: bines-gateway
+  bines-qdrant:
+    name: bines-qdrant

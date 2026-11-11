@@ -49,6 +49,8 @@ RPC_METHODS = (
     "search_with_trace",
     "read_memory_source",
     "learn_expression",
+    "reindex_expression_corpus",
+    "expression_vector_status",
     "get_memory",
     "add_memory",
     "update_memory",
@@ -82,7 +84,8 @@ def dispatch(service: MemoryService, request: Dict[str, Any], *, token: str | No
 
 
 def build_service() -> MemoryService:
-    from .embedding import load_embedder
+    from .embedding import load_embedder, load_expression_embedder
+    from .expression_vector import ExpressionVectorStore, load_corpus
     from .repository import MemoryRepository
     from .settings import load_settings
     from .vector_index import VectorIndex
@@ -91,8 +94,29 @@ def build_service() -> MemoryService:
     from chatBot.store import prepare_gateway_database
     prepare_gateway_database(settings.data_dir)
     repo = MemoryRepository(settings.db_path)
-    index = VectorIndex(settings.index_dir, load_embedder())
-    service = MemoryService(repo, index, settings)
+    embedder = load_embedder()
+    index = VectorIndex(settings.index_dir, embedder)
+    from config import (EXPRESSION_CORPUS_PATH, QDRANT_COLLECTION, QDRANT_MIN_SCORE,
+                        QDRANT_TIMEOUT, QDRANT_TOP_K, QDRANT_URL)
+    expression_vector = None
+    try:
+        expression_vector = ExpressionVectorStore(
+            QDRANT_URL, QDRANT_COLLECTION, load_expression_embedder(),
+            timeout=QDRANT_TIMEOUT, min_score=QDRANT_MIN_SCORE, top_k=QDRANT_TOP_K)
+    except Exception as exc:
+        logger.warning("expression vector disabled, using lexical fallback: %s", exc)
+    if expression_vector is not None:
+        try:
+            if expression_vector.count("owner") == 0:
+                from pathlib import Path
+                if Path(EXPRESSION_CORPUS_PATH).is_file():
+                    indexed = expression_vector.index(load_corpus(EXPRESSION_CORPUS_PATH), "owner")
+                    logger.info("expression corpus indexed: %s items", indexed)
+        except Exception as exc:
+            # Keep the store alive: Qdrant may come back later and search can
+            # reconnect without restarting the whole memory service.
+            logger.warning("expression corpus bootstrap skipped: %s", exc)
+    service = MemoryService(repo, index, settings, expression_vector=expression_vector)
     from .vector_maintenance import VectorMaintenance
     repo.vector_maintenance = VectorMaintenance(service)
     service.sync_identities()

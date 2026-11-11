@@ -97,9 +97,12 @@ def _compact_text_fragments(fragments):
     return result
 
 
+_TIMESTAMP_PREFIX = re.compile(r"^\[\d{4}/\d{2}/\d{2} \d{2}:\d{2}\]\s*")
+
+
 def _compact_qq_message(message):
     if isinstance(message, str):
-        return _compact_text_fragments([message])[0]
+        return _TIMESTAMP_PREFIX.sub("", _compact_text_fragments([message])[0])
     if isinstance(message, dict):
         return _compact_qq_message([message])[0]
     if not isinstance(message, list):
@@ -109,6 +112,8 @@ def _compact_qq_message(message):
     def flush_text():
         fragments = [result[index]["data"]["text"] for index in text_indices]
         for index, text in zip(text_indices, _compact_text_fragments(fragments)):
+            # Models sometimes copy the history timestamp format into a reply.
+            text = _TIMESTAMP_PREFIX.sub("", text)
             result[index] = {**result[index], "data": {**result[index]["data"], "text": text}}
         text_indices.clear()
 

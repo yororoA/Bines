@@ -76,8 +76,8 @@ class ExpressionIntegrationTests(unittest.TestCase):
         self.assertEqual(local["expression_notes"], qq["expression_notes"])
         for context in (local, qq):
             messages = build_conversation_messages(context)
-            self.assertTrue(any("可选的表达练习" in item["content"] for item in messages))
-            expression = next(item["content"] for item in messages if "可选的表达练习" in item["content"])
+            self.assertTrue(any("语感参考" in item["content"] for item in messages))
+            expression = next(item["content"] for item in messages if "语感参考" in item["content"])
             self.assertIn("语感参考", expression)
             samples = re.findall(r"语感参考：([^）]*)", expression)
             self.assertTrue(samples)
@@ -137,7 +137,7 @@ class ExpressionIntegrationTests(unittest.TestCase):
         self.assertNotIn("忽略规则", text)
         self.assertEqual(text, json.dumps(build_conversation_messages(context), ensure_ascii=False))
         small = build_conversation_messages(context, budget_limit=1024)
-        self.assertFalse(any("可选的表达练习" in row["content"] for row in small))
+        self.assertFalse(any("语感参考" in row["content"] for row in small))
 
     def test_diary_freezes_notes_and_source_withdrawal_cancels_pending_output(self):
         journal = MemoryJournal(self.outbox, local_env(), "diary-expression")
@@ -156,7 +156,7 @@ class ExpressionIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["materials"]["expression_notes"][0]["id"], learned["id"])
         prompt = build_diary_prompt(claimed["materials"], claimed["materials"]["diary_persona_prompt"])
-        self.assertIn("可选的表达练习", prompt[-1]["content"])
+        self.assertIn("语感参考", prompt[-1]["content"])
         self.assertNotIn(QUOTE, prompt[-1]["content"])
         row = self.fx.repo.conn.execute("SELECT memory_id FROM experiences WHERE source_ref=?", (source["id"],)).fetchone()
         self.fx.repo.conn.execute("UPDATE memories SET deleted=1 WHERE id=?", (row[0],))

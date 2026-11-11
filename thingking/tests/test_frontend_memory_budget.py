@@ -263,7 +263,7 @@ class MemoryBudgetTests(unittest.TestCase):
         for i in range(29):
             self.add_message("unrelated " + str(i) + " x" * 500, 101 + i)
         query = "needle " + "z" * 22000
-        current = "请回复 QQ:fixture 本轮消息：\n" + query
+        current = "对方刚刚发来：\n" + query
         context = self.service.build_context(self.env.to_dict(), query)
         journal = MemoryJournal(MemoryOutbox(Path(self.tmp.name) / "long-input.db"), self.env.to_dict(), "long-input")
         tools = [{"type": "function", "function": {"name": "fixture", "description": "t" * 6000}}]

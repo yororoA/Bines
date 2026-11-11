@@ -123,6 +123,24 @@ RAG_EMBEDDING_MODEL = str(_LOCAL_EMBEDDING_DIR) if _LOCAL_EMBEDDING_DIR.is_dir()
 HF_ENDPOINT_DEFAULT = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
 HF_DOWNLOAD_TIMEOUT = int(os.environ.get("HF_DOWNLOAD_TIMEOUT", "300"))
 
+# Dedicated semantic index for the expression corpus.  Kept separate from the
+# main memory database so corpus imports cannot contend with chat writes.
+QDRANT_URL = os.environ.get("BINES_QDRANT_URL", "http://127.0.0.1:6333")
+QDRANT_COLLECTION = os.environ.get("BINES_QDRANT_COLLECTION", "bines_expression")
+QDRANT_TIMEOUT = float(os.environ.get("BINES_QDRANT_TIMEOUT", "2.0"))
+QDRANT_MIN_SCORE = float(os.environ.get("BINES_QDRANT_MIN_SCORE", "0.52"))
+QDRANT_TOP_K = int(os.environ.get("BINES_QDRANT_TOP_K", "12"))
+EXPRESSION_CORPUS_PATH = os.environ.get(
+    "BINES_EXPRESSION_CORPUS",
+    str(ROOT_DIR / "thingking" / "data" / "expression_corpus" / "expression_corpus_1k.jsonl"),
+)
+# The main memory index uses an English sentence model; Chinese expression
+# retrieval needs its own compact Chinese embedding model.
+EXPRESSION_EMBEDDING_MODEL = os.environ.get(
+    "BINES_EXPRESSION_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+EXPRESSION_QUERY_PREFIX = os.environ.get(
+    "BINES_EXPRESSION_QUERY_PREFIX", "为这个句子生成表示以用于检索相关文章：")
+
 VOCU_BASE_URL = os.environ.get("VOCU_BASE_URL", "https://v1.vocu.ai")
 VOCU_API_KEY = os.environ.get("VOCU_API_KEY", "")
 VOCU_MODEL_ID = os.environ.get("VOCU_MODEL_ID", "")

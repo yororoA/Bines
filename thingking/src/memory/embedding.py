@@ -17,6 +17,8 @@ class Embedder(Protocol):
 
 _lock = threading.Lock()
 _cached = None
+_expression_lock = threading.Lock()
+_expression_cached = None
 
 
 def embedding_identity(embedder):
@@ -41,6 +43,17 @@ class _IdentifiedEmbedder:
 
     def embed_query(self, text):
         return self.delegate.embed_query(text)
+
+
+class _QueryPrefixedEmbedder(_IdentifiedEmbedder):
+    """BGE-style Chinese retrieval models expect an instruction on queries."""
+
+    def __init__(self, delegate, prefix):
+        super().__init__(delegate, getattr(delegate, "bines_identity", {}))
+        self.prefix = prefix
+
+    def embed_query(self, text):
+        return self.delegate.embed_query(self.prefix + str(text))
 
 
 def _revision(path):
@@ -117,3 +130,49 @@ def load_embedder() -> Embedder:
             "preprocessing": "langchain_huggingface:newlines-to-spaces:v1",
         })
         return _cached
+
+
+def load_expression_embedder() -> Embedder:
+    """Load the Chinese retrieval model used only by the expression corpus."""
+    global _expression_cached
+    with _expression_lock:
+        if _expression_cached is not None:
+            return _expression_cached
+        from config import (EXPRESSION_EMBEDDING_MODEL, EXPRESSION_QUERY_PREFIX,
+                            HF_DOWNLOAD_TIMEOUT, HF_ENDPOINT_DEFAULT)
+
+        if not os.environ.get("HF_ENDPOINT") and not os.environ.get("HF_MIRROR"):
+            os.environ["HF_ENDPOINT"] = HF_ENDPOINT_DEFAULT
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(HF_DOWNLOAD_TIMEOUT))
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", str(HF_DOWNLOAD_TIMEOUT))
+
+        model_name = os.environ.get("BINES_EXPRESSION_EMBEDDING_MODEL",
+                                    EXPRESSION_EMBEDDING_MODEL)
+        revision = os.environ.get("BINES_EXPRESSION_EMBEDDING_REVISION", "").strip() or None
+        device = _detect_device()
+        print(f"[Expression] Loading embedding model {model_name} on {device}", flush=True)
+        from huggingface_hub import snapshot_download
+        from langchain_huggingface import HuggingFaceEmbeddings
+
+        options = {
+            "encode_kwargs": {"normalize_embeddings": True},
+            "model_kwargs": {"device": device, "trust_remote_code": True},
+        }
+        try:
+            local_model = (model_name if Path(model_name).is_dir() else
+                           snapshot_download(repo_id=model_name, revision=revision,
+                                             local_files_only=True))
+        except Exception:
+            if os.environ.get("BINES_EMBEDDING_OFFLINE", "").lower() in {"1", "true", "yes", "on"}:
+                raise
+            print(f"[Expression] Local model cache is incomplete; downloading {model_name}", flush=True)
+            local_model = snapshot_download(repo_id=model_name, revision=revision)
+        delegate = HuggingFaceEmbeddings(model_name=local_model, **options)
+        base = _IdentifiedEmbedder(delegate, {
+            "model": model_name, "requested_revision": revision or "default",
+            "model_revision": _revision(local_model), "normalize_embeddings": True,
+            "preprocessing": "langchain_huggingface:newlines-to-spaces:v1",
+        })
+        prefix = os.environ.get("BINES_EXPRESSION_QUERY_PREFIX", EXPRESSION_QUERY_PREFIX)
+        _expression_cached = _QueryPrefixedEmbedder(base, prefix) if prefix else base
+        return _expression_cached

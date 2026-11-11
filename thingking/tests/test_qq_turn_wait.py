@@ -263,8 +263,6 @@ class TurnWaitProcessTests(TurnWaitFixture):
         request = self.last_conversation[-1]["content"]
         self.assertIn("if I use this", request)
         self.assertIn("will it work offline?", request)
-        self.assertIn('"current_message_id": "1"', request)
-        self.assertIn('"current_message_id": "2"', request)
         self.assertEqual(len(self.sent), 1)
 
     def test_group_trigger_includes_unaddressed_continuation_but_unaddressed_group_stays_quiet(self):
@@ -335,8 +333,9 @@ class TurnWaitProcessTests(TurnWaitFixture):
         value = message(100)
         value["message"].insert(0, {"type": "reply", "data": {"id": 80}})
         current = self.qq.current_input_text([value])
-        self.assertIn('"current_message_id": "100"', current)
-        self.assertIn('"quoted_message_ids": ["80"]', current)
+        self.assertIn("a complete question", current)
+        self.assertNotIn("current_message_id", current)
+        self.assertNotIn("quoted_message_ids", current)
         quote = message(80, "old bot words", user="99")
         text = self.qq.quoted_input_text(["引用消息 80 内容"], [quote], self.store.identity(value))
         self.assertEqual(len(text), 1)

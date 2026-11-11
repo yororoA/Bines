@@ -102,11 +102,13 @@ class MemoryService:
         index: VectorIndex,
         settings: MemorySettings,
         clock: Callable[[], float] = time.time,
+        expression_vector: Optional[Any] = None,
     ):
         self.repo = repo
         self.index = index
         self.settings = settings
         self.clock = clock
+        self.expression_vector = expression_vector
         self._last_diary_check = 0.0
         self._last_index_check = float("-inf")
         from .dependencies import SourceDependencies
@@ -482,6 +484,39 @@ class MemoryService:
         """Learn a bounded expression feature from a runtime-verified source."""
         return self.expression_learning.learn(scope, source, quote, technique, situation)
 
+    def reindex_expression_corpus(self, path: str, scope: str = "owner") -> Dict[str, Any]:
+        """Re-embed a curated JSONL corpus into the dedicated Qdrant collection."""
+        if self.expression_vector is None:
+            raise ValueError("expression vector store is not configured")
+        from .expression_vector import load_corpus
+        items = load_corpus(path)
+        indexed = self.expression_vector.reindex(items, scope)
+        return {"status": "ok", "indexed": indexed,
+                "collection": self.expression_vector.collection}
+
+    def expression_vector_status(self) -> Dict[str, Any]:
+        if self.expression_vector is None:
+            return {"ready": False, "error": "not configured"}
+        status = dict(self.expression_vector.status())
+        try:
+            status["healthy"] = self.expression_vector.health()
+            status["count"] = self.expression_vector.count("owner")
+        except Exception as exc:
+            status["error"] = f"{type(exc).__name__}: {exc}"
+        return status
+
+    def _expression_notes(self, scope: str, query: str) -> List[Dict[str, Any]]:
+        """Prefer the dedicated semantic corpus; fall back to lexical selection."""
+        if self.expression_vector is not None and scope == OWNER_SCOPE:
+            try:
+                # A successful empty result means "no sufficiently close
+                # sample"; do not fill the prompt with a lexical near-miss.
+                return self.expression_vector.search(scope, query, limit=3)
+            except Exception as exc:
+                logger.warning("expression vector search failed, using lexical fallback: %s", exc)
+        return self.expression_learning.snapshot(
+            scope, limit=3, include_samples=True, query=query)
+
     def build_context(self, envelope: Dict[str, Any], query: str = "") -> Dict[str, Any]:
         env = self.resolve(envelope)
         scopes = scope_policy.recall_scopes(env.scope)
@@ -546,7 +581,7 @@ class MemoryService:
             "retrieval_trace": {"recall": recall_trace, "profile": profile_trace},
             "state": visible_state,
             "life": self.life.snapshot(env.scope),
-            "expression_notes": self.expression_learning.snapshot(env.scope, limit=3, include_samples=True),
+            "expression_notes": self._expression_notes(env.scope, query),
             "last_user_ts": last_user["ts"] if last_user else None,
         }
 

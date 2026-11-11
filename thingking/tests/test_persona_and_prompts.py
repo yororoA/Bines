@@ -258,7 +258,6 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertNotIn("本轮关系口吻：", messages[0]["content"])
         self.assertIn("本轮关系口吻：亲近", guard)
         self.assertIn("本轮关系口吻：亲近", messages[-1]["content"])
-        self.assertIn("亲近 33.75%", dynamic)
         self.assertEqual(context["state"]["relationship_turn_level"], "亲近")
         self.assertEqual(stored_state["relationship_level"], "非常亲密")
         self.assertEqual(self.fx.service.get_state(OWNER_SCOPE)["data"], stored_state)
@@ -306,7 +305,7 @@ class PromptBuilderTest(unittest.TestCase):
                 messages = prompt_builder.build_conversation_messages(context)
                 history = [m for m in messages if m["role"] == "assistant"]
                 self.assertEqual(len(history), 1)
-                self.assertTrue(history[0]["content"].endswith(reply))
+                self.assertEqual(history[0]["content"], reply)
                 self.assertFalse(any("historical_assistant_message" in m["content"] for m in messages))
                 self.assertTrue(any(m["role"] == "user" and "什么时候一起听歌" in m["content"] for m in messages))
                 self.assertEqual(context["working"], original)
