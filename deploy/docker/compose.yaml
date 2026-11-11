@@ -82,6 +82,7 @@ services:
       BINES_NAPCAT_WS_URL: ws://napcat:3001
       BINES_NAPCAT_WEBUI_URL: http://napcat:6099
       BINES_ZMQ_HOST: memory-server
+      BINES_PROACTIVE_FOLLOWUP_DELAY: ${BINES_PROACTIVE_FOLLOWUP_DELAY:-90}
     ports:
       - "127.0.0.1:${BINES_QQ_GATEWAY_PORT:-6102}:6102"
     volumes:
@@ -120,6 +121,7 @@ services:
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_GATEWAY_DIR: /app/gateway_data
       BINES_QQ_GATEWAY_URL: http://chatbot:6102
+      BINES_PROACTIVE_FOLLOWUP_DELAY: ${BINES_PROACTIVE_FOLLOWUP_DELAY:-90}
       BINES_WEBSITE_BRIDGE_TOKEN: ${BINES_WEBSITE_BRIDGE_TOKEN:-}
       BINES_WEBSITE_BRIDGE_SPOOL: /app/thingking/memory_data/website_bridge
     volumes:

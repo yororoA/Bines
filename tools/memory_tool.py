@@ -5,6 +5,7 @@ from .dependencies import deps
 
 OWNER_SCOPE = "owner"
 _MAX_CONFLICT_RETRIES = 3
+_MAX_MEMORY_HIGHLIGHTS = 32
 
 
 def _memory_client():
@@ -196,7 +197,7 @@ def _apply_changes(state, *, current_location=None, relationship_delta=None, add
         highlights.append(add_memory_highlight)
     if remove_memory_highlight and remove_memory_highlight in highlights:
         highlights.remove(remove_memory_highlight)
-    state["memory_highlights"] = highlights
+    state["memory_highlights"] = highlights[-_MAX_MEMORY_HIGHLIGHTS:]
     return state
 
 

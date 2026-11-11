@@ -226,9 +226,11 @@ class MemoryService:
             turn_audit = (record.get("category") == "turn"
                           and (not record.get("result") or record["status"] in {"completed", "sent"}
                                and bool(record.get("source_message_refs"))))
-            audit_only = turn_audit or action in {"search_memory", "cite_memory", "correct_memory", "learn_expression", "get_time", "update_status", "napcat_discover",
-                                    "napcat_catalog", "mcp_discover", "activity_continue", "activity_finish",
-                                    "activity_pause"}
+            audit_only = turn_audit or action in {"search_memory", "cite_memory", "correct_memory", "learn_expression", "get_time", "update_status",
+                                    "send_private_msg", "napcat_send", "send_qq_private_msg", "send_group_msg",
+                                    "napcat_discover", "napcat_catalog", "mcp_discover",
+                                    "activity_continue", "activity_finish", "activity_pause", "activity_decision",
+                                    "autonomous_feedback"}
             meta = {"experience_ref": source_ref, "experience_revision": revision,
                     "source_experience_refs": [source_ref], "turn_id": record.get("turn_id"),
                     "autonomous": bool(record.get("autonomous")), "action": action,

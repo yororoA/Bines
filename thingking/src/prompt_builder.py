@@ -173,14 +173,16 @@ def _state_block(state: Dict[str, Any]) -> str:
     highlights = state.get("memory_highlights") or []
     if highlights:
         lines.append("- 历史背景摘要（可能含旧猜测，不是当前活动、情绪或台词；事实以记忆证据为准）：")
-        # Legacy state accumulated repeated emotional retellings independently
-        # of recall. Keep a bounded background, rather than a second transcript.
-        size = 0
-        for item in dict.fromkeys(map(str, highlights)):
-            if size + len(item) > 1800:
-                break
-            lines.append(f"  · {item}")
+        # 旧状态会不断追加高光；只取最近的一部分，避免早期条目把昨天的上下文挤掉。
+        size, kept = 0, []
+        recent = list(dict.fromkeys(map(str, highlights)))[-30:]
+        for item in reversed(recent):
+            if len(kept) >= 20 or size + len(item) > 1800:
+                continue
+            kept.append(item)
             size += len(item)
+        for item in reversed(kept):
+            lines.append(f"  · {item}")
     return "--- 当前状态 ---\n" + "\n".join(lines) if lines else ""
 
 

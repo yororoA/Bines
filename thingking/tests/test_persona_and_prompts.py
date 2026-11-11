@@ -345,16 +345,18 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertIn("长篇旧台词", quoted)
         self.assertLess(len(quoted), 800)
 
-    def test_legacy_state_background_is_bounded_and_not_live_activity(self):
+    def test_legacy_state_background_keeps_newest_and_stays_bounded(self):
+        highlights = ["最旧背景"] + [f"{i}:" + "历史叙述" * 80 for i in range(30)] + ["最新背景"]
         text = prompt_builder._state_block({
             "npc_state": {"current_activity": "上次聊过的事"},
             "important_thing": "已经结束的反馈",
-            "memory_highlights": ["第一段背景"] * 20 + [f"{i}:" + "历史叙述" * 80 for i in range(30)],
+            "memory_highlights": highlights,
         })
         self.assertIn("上次记录的活动", text)
         self.assertIn("不代表本轮话题仍在继续", text)
         self.assertIn("不是当前活动、情绪或台词", text)
-        self.assertEqual(text.count("第一段背景"), 1)
+        self.assertEqual(text.count("最新背景"), 1)
+        self.assertNotIn("最旧背景", text)
         self.assertLess(len(text), 2100)
 
 

@@ -605,7 +605,8 @@ class StateTest(unittest.TestCase):
             context = self.fx.service.build_context(local_env(), "稳定事实11")
         text = str(prompt_builder.build_conversation_messages(context))
         self.assertIn("稳定事实11", text)
-        self.assertIn("好感度数值（范围 -200 到 200）：0", text)
+        self.assertIn("与当前对话者的关系：普通", text)
+        self.assertNotIn("好感度数值", text)
 
     def test_old_relevant_memory_beats_new_unrelated_fragment(self):
         old = {"kind": "episode", "end_ts": self.fx.clock() - 300 * 86400, "importance": 8}

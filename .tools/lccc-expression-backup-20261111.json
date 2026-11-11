@@ -1,0 +1,112 @@
+[
+ {
+  "id": "expr:7f0082a8c96fa9435fe6970dbfd423a6",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020:v2\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "一定要小心啊！",
+  "technique": "warm_direct",
+  "situation": "casual",
+  "fingerprint": "0628e56c9c00da9ff4fe013bfdb430fe4379842f1e5bed394c9c14084ff62916",
+  "version": "93e675fa50d15a5dffe1a896b577765e003cb38efeb0cff33891ab9d49414ba6",
+  "created_at": 1794390986.2662814
+ },
+ {
+  "id": "expr:8ef1bf9aa48e2cd3d01335a6d5a4c388",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020:v2\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "嗯嗯，我再等等！",
+  "technique": "short_reaction",
+  "situation": "casual",
+  "fingerprint": "0628e56c9c00da9ff4fe013bfdb430fe4379842f1e5bed394c9c14084ff62916",
+  "version": "b1322fbe657e7c0bcde0abfe58ab0621124b6873cff43f4db1a9456f49c36126",
+  "created_at": 1794390986.2507832
+ },
+ {
+  "id": "expr:e1462c1eaa49e68cd10e3b46eee0d198",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020:v2\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "我去年也去转了一圈，还碰见以前的体育老师了，合了个影",
+  "technique": "specific_response",
+  "situation": "casual",
+  "fingerprint": "0628e56c9c00da9ff4fe013bfdb430fe4379842f1e5bed394c9c14084ff62916",
+  "version": "20d05416115ac243263605e6b4c86f2293c4d0221310aef0e46760fc9461073e",
+  "created_at": 1794390986.2352543
+ },
+ {
+  "id": "expr:f0cc6242bb8c4eeb8cfc41691b8dee0b",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020:v2\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "我从虹桥给你带个回去那天瞅到一正宗的",
+  "technique": "specific_response",
+  "situation": "casual",
+  "fingerprint": "0628e56c9c00da9ff4fe013bfdb430fe4379842f1e5bed394c9c14084ff62916",
+  "version": "30e473be19580a94cedf02add8d81e483463ca735e140e4c43149a26334bd084",
+  "created_at": 1794390986.2184384
+ },
+ {
+  "id": "expr:17b06fadfaee8824a12e435227efdbcf",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "最爱你了",
+  "technique": "warm_direct",
+  "situation": "celebration",
+  "fingerprint": "1a70f50485f9072f7015a87fe9136b78469ea60c90e47cf2e87a43bec78be281",
+  "version": "13a64291f38033c46bc5167add2e1a14b03d4171130beb34979be7f044aaa505",
+  "created_at": 1794389409.0841813
+ },
+ {
+  "id": "expr:afc5b2d3bf9ba1cc861b0e9529378776",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "那是必须",
+  "technique": "understated_pride",
+  "situation": "praised",
+  "fingerprint": "1a70f50485f9072f7015a87fe9136b78469ea60c90e47cf2e87a43bec78be281",
+  "version": "683556ab8d9ee8647970729cd4cbba49e02e2409dee3d74e3b830feed082df2f",
+  "created_at": 1794389409.0696862
+ },
+ {
+  "id": "expr:a8ec2e307dc3f2f48b04d770f68b12ca",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "太原就没看见有好吃的兔头",
+  "technique": "specific_response",
+  "situation": "casual",
+  "fingerprint": "1a70f50485f9072f7015a87fe9136b78469ea60c90e47cf2e87a43bec78be281",
+  "version": "2bcfddc86d4f23c784c270e61f557625d64e7a2982bae606570d554504ad10a9",
+  "created_at": 1794389409.0565069
+ },
+ {
+  "id": "expr:04196a4d128910343e97413a8d62d4e9",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "你也是真心找回忆了哦",
+  "technique": "echo_play",
+  "situation": "casual",
+  "fingerprint": "1a70f50485f9072f7015a87fe9136b78469ea60c90e47cf2e87a43bec78be281",
+  "version": "8f02d1b8a12f74ed55e0b5910373f4e89793c0e9700147acd81c0569b52b7eb5",
+  "created_at": 1794389409.0421126
+ },
+ {
+  "id": "expr:c78888c32971ff28f900a473c2d31689",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "对啊，我在家，没事儿。",
+  "technique": "short_reaction",
+  "situation": "casual",
+  "fingerprint": "1a70f50485f9072f7015a87fe9136b78469ea60c90e47cf2e87a43bec78be281",
+  "version": "293d51151807bc030851a503aff504f5766094fe14cf6c3255bdb3fd249a7dac",
+  "created_at": 1794389409.0269623
+ },
+ {
+  "id": "expr:2b346019de17cd3590ff247845fe5c55",
+  "scope": "owner",
+  "source": "{\"id\": \"lccc:public:samples:2020\", \"kind\": \"experience\", \"path\": [\"content\"], \"revision\": 1}",
+  "quote": "哈哈毕业了没去过想去看看啊",
+  "technique": "natural_particles",
+  "situation": "casual",
+  "fingerprint": "1a70f50485f9072f7015a87fe9136b78469ea60c90e47cf2e87a43bec78be281",
+  "version": "b402fac9b93792f40adf288a31977eeed2bf4f783d841a917577573c832da214",
+  "created_at": 1794389409.013352
+ }
+]
