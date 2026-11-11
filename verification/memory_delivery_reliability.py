@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from common.memory_journal import MemoryJournal, MemoryOutbox, delivery_error_ki
 from chatBot.memory_hub import MemoryHub
 from chatBot.store import MemoryStore
 from memory.channels import local_envelope
+from memory.client import MemoryUnavailable
 from memory.lexical_index import LexicalIndex
 from memory.provenance import ProvenanceStore
 from memory.repository import MemoryRepository
@@ -324,6 +326,46 @@ class GatewayForeground(unittest.TestCase):
         self.assertEqual(len(source_calls), 1)
         self.assertTrue(source_calls[0]['recalled'])
         self.assertEqual(self.calls[-1][0], 'build_context')
+
+    def test_transient_sync_failure_waits_for_due_retry_within_turn_budget(self):
+        self.store.ingest(event(1))
+        original = self.hub.client.call
+
+        def failing(method, **params):
+            if method == 'record_message':
+                raise ConnectionError('database is locked')
+            return original(method, **params)
+
+        self.hub.client.call = failing
+        self.hub.sync()
+        with self.store.connection() as db:
+            db.execute("UPDATE memory_outbox_delivery SET next_attempt=? WHERE source_ref=?",
+                       (time.time() + 0.05, self.hub.source + ':1'))
+        self.hub.client.call = original
+        # 退避中的短期失败应在本轮预算内等它到期再试，而不是立即让 QQ 回复失败。
+        started = time.monotonic()
+        self.hub.call(self.store.identity(event(1)), 'build_context', {})
+        self.assertGreaterEqual(time.monotonic() - started, 0.04)
+        self.assertLess(time.monotonic() - started, 2)
+        with self.store.connection() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM messages WHERE memory_synced=0').fetchone()[0], 0)
+
+    def test_quarantined_source_fails_fast_instead_of_blocking_turn(self):
+        self.store.ingest(event(1))
+        original = self.hub.client.call
+
+        def invalid(method, **params):
+            if method == 'record_message':
+                raise ValueError('invalid fixture')
+            return original(method, **params)
+
+        self.hub.client.call = invalid
+        self.hub.sync()
+        self.hub.client.call = original
+        started = time.monotonic()
+        with self.assertRaises(MemoryUnavailable):
+            self.hub.call(self.store.identity(event(1)), 'build_context', {})
+        self.assertLess(time.monotonic() - started, 1)
 
 
 if __name__ == '__main__':

@@ -259,14 +259,25 @@ class MemoryHub:
         while refs:
             self.outbox.sync(self._sync_outbox_record, source_refs=refs)
             with self.store.connection() as db:
-                remaining = db.execute("SELECT o.source_ref,d.attempts FROM memory_outbox o "
+                remaining = db.execute("SELECT o.source_ref,d.next_attempt,d.quarantined FROM memory_outbox o "
                     "LEFT JOIN memory_outbox_delivery d ON d.source_ref=o.source_ref AND d.revision=o.revision "
                     "WHERE o.synced=0 AND o.source_ref IN (" + ",".join("?" for _ in refs) + ")", refs).fetchall()
             if not remaining:
                 return
-            if any(row["attempts"] for row in remaining) or time.monotonic() >= deadline or self.stop.is_set():
+            if self.stop.is_set():
                 raise MemoryUnavailable("当前会话原话正在等待记忆同步恢复")
-            self.stop.wait(0.02)  # Another consumer may already own these exact records.
+            if any(row["quarantined"] for row in remaining):
+                # 验证或鉴权错误已被隔离，短轮内重试不会成功，交给后台按退避恢复。
+                raise MemoryUnavailable("当前会话原话记忆同步已隔离，等待后台重试")
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                raise MemoryUnavailable("当前会话原话正在等待记忆同步恢复")
+            # 上次写库失败会留下 next_attempt 退避时间：剩余预算内等到它到期再试，
+            # 而不是一看到失败记录就立刻让本轮 QQ 回复失败，让短时锁竞争有机会自愈。
+            due = [float(row["next_attempt"] or 0) for row in remaining]
+            delay = min([max(0.0, value - time.time()) for value in due if value > 0] or [0.02])
+            # 无到期时间通常意味着另一个消费者正持有租约，短暂让出后复查。
+            self.stop.wait(max(0.02, min(delay, budget)))
 
     def call(self, identity, method, params, event_id=None):
         params = dict(params)

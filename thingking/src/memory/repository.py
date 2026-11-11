@@ -149,6 +149,9 @@ class MemoryRepository:
         self.conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.create_function("consolidation_candidate", 3, consolidation_candidate, deterministic=True)
+        # Several local workers share one SQLite file; wait briefly instead of failing
+        # the turn with "database is locked" during short write bursts.
+        self.conn.execute("PRAGMA busy_timeout = 10000")
         self.conn.execute("PRAGMA foreign_keys = ON")
         if str(db_path) != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")

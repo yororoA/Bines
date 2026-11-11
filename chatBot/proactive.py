@@ -411,11 +411,18 @@ class QQProactive:
 
     def run(self, stop):
         log.info("自主意愿已启用 · 时间、情绪与交流历史")
+        failures = 0
         while not stop.wait(2):
             try:
                 self.tick()
+                failures = 0
             except Exception as exc:
                 # A failed observation never contributes elapsed time on recovery.
                 for policy in self.policies.values():
                     policy.last_tick = self.clock()
-                log.warning("主动聊天检查待重试 · %s", exc)
+                # 记忆服务短暂不可用时别让检查每两秒刷一屏同样的告警。
+                failures += 1
+                delay = min(60, 2 ** min(failures, 6))
+                log.warning("主动聊天检查待重试 · %s（%ss 后重试）", exc, delay)
+                if stop.wait(delay):
+                    break

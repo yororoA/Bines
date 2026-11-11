@@ -50,7 +50,7 @@ class PersonaSourceTest(unittest.TestCase):
     def test_qq_style_guard_is_brief_with_contextual_punctuation(self):
         guard = persona_profile.qq_style_guard()
         self.assertIn("QQ 回复格式", guard)
-        self.assertIn("篇幅由内容决定", guard)
+        self.assertIn("篇幅跟着对方走", guard)
         self.assertIn("标点跟着语境和情绪", guard)
         self.assertIn("自己决定分段", guard)
         self.assertIn("不按字数拆分", guard)
@@ -68,7 +68,7 @@ class PersonaSourceTest(unittest.TestCase):
         guard = persona_profile.qq_style_guard(state=state)
         self.assertIn("本轮关系口吻：非常亲密", guard)
         self.assertIn("直白表达感谢与关心", guard)
-        self.assertIn("真诚夸奖", guard)
+        self.assertIn("直白表达感谢与关心", guard)
         self.assertIn("日常", guard)
         self.assertIn("自己的喜好", guard)
         self.assertIn("嗯哼", guard)
@@ -88,12 +88,12 @@ class PersonaSourceTest(unittest.TestCase):
     def test_historical_character_and_reaction_constraints_are_preserved(self):
         # The February/May baseline is proud and pouty, while never malicious.
         text = persona_profile.character_prompt()
-        for trait in ("表面高傲", "偶尔有点不耐烦", "嘴硬心软", "内心善良", "活泼", "娇嗔", "电波系"):
+        for trait in ("充满活力", "活泼", "捉摸不透又黏人", "自然"):
             self.assertIn(trait, text)
         reactions = persona_profile.load_persona()["reactions"]
         for scene, requirements in {
-            "praised": ("骄傲", "固定句子"),
-            "teased": ("娇嗔", "不升级成争吵", "明确不喜欢时收住"),
+            "praised": ("开心", "固定句子"),
+            "teased": ("顺着玩笑接下去", "不升级成争吵", "明确不喜欢时收住"),
             "insulted": ("真被冒犯", "绝不恶意或粗鲁"),
             "name_mistaken": ("认真纠正", "明确约定的称呼不当成叫错"),
         }.items():
@@ -104,7 +104,7 @@ class PersonaSourceTest(unittest.TestCase):
     def test_closeness_modulates_character_without_erasing_it_or_pressuring_user(self):
         for renderer in (persona_profile.style_guard, persona_profile.qq_style_guard):
             guard = renderer(state={"relationship_score": 200})
-            for requirement in ("不能替换活泼、骄傲、嘴硬心软和奇趣", "自己的主意",
+            for requirement in ("不能替换活泼、自然和奇趣", "自己的主意",
                                 "不索取回应、施压或让他内疚", "不靠撒娇糊弄反馈",
                                 "坦率承认具体问题", "直接回应原话题或收住",
                                 "调整宣言或承诺尾句", "道歉和关心落在这次具体事情上",
@@ -116,9 +116,9 @@ class PersonaSourceTest(unittest.TestCase):
         diary = persona_profile.diary_system_prompt(persona)
         self.assertIn(persona_profile.character_prompt(persona), diary)
         self.assertIn(persona_profile.diary_voice_prompt(persona), diary)
-        for requirement in ("表面高傲内心温柔", "娇嗔", "不写成第三人称工作报告",
+        for requirement in ("活泼、自然、满怀爱意的声音", "不写成第三人称工作报告",
                             "区分真实互动、工具观察和未执行的想法", "不按调用顺序抄流水账",
-                            "同一件事的得意、娇嗔或嘴硬表达一次就够", "随后写事情的结果或真正的新感受",
+                            "同一件事的得意或撒娇表达一次就够", "随后写事情的结果或真正的新感受",
                             "不要求每篇集齐全部性格或复读口头禅"):
             self.assertIn(requirement, diary)
         for chat_only in ("QQ 回复格式", "两个空格", "本轮关系口吻", "用户：", "发送接口"):
@@ -185,7 +185,7 @@ class PromptBuilderTest(unittest.TestCase):
             with self.subTest(channel=env["channel_type"]):
                 _, messages = self._system_text(env)
                 self.assertIn(character, messages[0]["content"])
-                self.assertIn("活泼、有点高傲、嘴硬心软", messages[-1]["content"])
+                self.assertIn("活泼、自然、满怀爱意", messages[-1]["content"])
                 self.assertIn(expected, messages[-1]["content"])
                 self.assertNotIn(absent, messages[-1]["content"])
         self.assertIn(character, persona_profile.diary_system_prompt())
