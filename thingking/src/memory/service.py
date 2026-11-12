@@ -1255,13 +1255,40 @@ class MemoryService:
             current_plan = self.association_planner.current(job)
             unresolved = [job["payload"]["association_plan"]["aliases"][alias]
                           for alias, value in (resolved or {}).items() if value is None]
-            if current_plan and unresolved and not job["payload"].get("evidence_expanded"):
+            plan = job["payload"].get("association_plan") or {}
+            partial_negatives = [card["id"] for card in plan.get("prompt", {}).get("candidates", [])
+                                 if resolved is not None and resolved.get(card["id"]) == []
+                                 and (card.get("excerpted") or
+                                      plan["prompt"]["source"].get("excerpted"))]
+            if current_plan and (unresolved or partial_negatives) and not job["payload"].get("evidence_expanded"):
                 # One immediate evidence expansion, separate from transport failures.
                 # A genuine ambiguity must never enter the outage recovery loop.
                 self.repo.update_job_payload(job_id, {**job["payload"], "evidence_expanded": True})
                 self.repo.conn.execute("UPDATE jobs SET status='pending',lease_until=NULL WHERE id=?", (job_id,))
                 return {"status": "expanding_evidence"}
             if current_plan and self.graph.submit(job, links, prior):
+                if resolved is not None and job["payload"].get("replace_negative_decisions"):
+                    source_id = job["payload"]["node_id"]
+                    for alias, decision_links in resolved.items():
+                        if decision_links != []:
+                            continue  # Ambiguity never deletes an existing relation.
+                        target_id = plan["aliases"][alias]
+                        chains = [row[0] for row in self.repo.conn.execute(
+                            "SELECT chain_id FROM association_edges WHERE source_node=? AND target_node=?",
+                            (source_id, target_id))]
+                        self.repo.conn.execute(
+                            "DELETE FROM association_edges WHERE source_node=? AND target_node=?",
+                            (source_id, target_id))
+                        for chain_id in chains:
+                            self.repo.conn.execute(
+                                "DELETE FROM chain_memberships WHERE chain_id=? AND NOT EXISTS "
+                                "(SELECT 1 FROM association_edges e WHERE e.chain_id=? AND "
+                                "(e.source_node=chain_memberships.node_id OR e.target_node=chain_memberships.node_id))",
+                                (chain_id, chain_id))
+                            self.repo.conn.execute(
+                                "UPDATE association_chains SET revision=revision+1 WHERE id=?", (chain_id,))
+                        self.graph.invalidate(target_id)
+                    self.graph.invalidate(source_id)
                 if resolved is not None:
                     self.association_planner.remember(job, resolved)
                 more = self.association_planner.advance(job, resolved)
@@ -1690,6 +1717,33 @@ class MemoryService:
             result = self.corrections.apply(**params)
         self.retriever.sync()
         return result
+
+    def recheck_association(self, node_id, scope, expected_digest, operation_id):
+        """Idempotently re-evaluate evidence without rewriting source memory."""
+        from .association_plan import POLICY
+        if not isinstance(scope, str) or not scope:
+            raise ValueError("建联复核必须提供作用域")
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 200:
+            raise ValueError("建联复核必须提供操作编号")
+        with self.repo.transaction():
+            node = self.graph.get(node_id, scope)
+            if not self.settings.associations_enabled or not self.graph.valid(node):
+                raise ValueError("记忆不存在或建联未启用")
+            if not expected_digest or node["digest"] != expected_digest:
+                raise ValueError("记忆版本已变化，请重新读取")
+            key = "association-recheck:" + digest([scope, node_id, expected_digest, POLICY, operation_id])
+            previous = self.repo.conn.execute("SELECT id,status FROM jobs WHERE dedupe_key=?", (key,)).fetchone()
+            active = self.repo.conn.execute(
+                "SELECT id,status FROM jobs WHERE kind='associate' AND status IN ('pending','running') "
+                "AND scope=? AND json_extract(payload,'$.node_id')=? ORDER BY id LIMIT 1",
+                (scope, node_id)).fetchone()
+            if previous or active:
+                return dict(previous or active)
+            jid = self.repo.enqueue_job(JOB_ASSOCIATE, scope,
+                {"node_id": node_id, "revision": node["revision"], "background": True,
+                 "replace_negative_decisions": True}, key)
+            self.repo.conn.execute("UPDATE association_nodes SET ready=0 WHERE id=?", (node_id,))
+            return {"id": jid, "status": "pending"}
 
     def complete_memory_repair(self, job_id, content, expected_attempt=None):
         with self.repo.transaction():

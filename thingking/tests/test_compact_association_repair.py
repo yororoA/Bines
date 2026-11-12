@@ -88,6 +88,10 @@ class CompactAssociationRepairTest(unittest.TestCase):
         prompts = []
 
         def model(messages):
+            from memory.association_plan import VERIFY_SYSTEM
+            if messages[0]["content"] == VERIFY_SYSTEM:
+                return json.dumps({"verdicts": [{"target": d["target"], "supported": True}
+                    for d in json.loads(messages[-1]["content"])["proposed"]]})
             # A rejected full page must not commit even its individually valid links.
             self.assert_uncommitted()
             prompts.append(copy.deepcopy(messages))

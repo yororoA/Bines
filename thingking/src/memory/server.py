@@ -30,6 +30,7 @@ RPC_METHODS = (
     "regulate_life",
     "claim_job",
     "complete_association",
+    "recheck_association",
     "complete_summary",
     "complete_diary",
     "complete_state_update",

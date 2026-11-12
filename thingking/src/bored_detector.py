@@ -117,7 +117,8 @@ def main():
                 from memory.channels import local_envelope
                 continuing = policy.state.activity.get("mode") in {"continue", "review"}
                 memory_context = (snapshot if continuing else memory.build_context(
-                    local_envelope("").to_dict(), query="近期兴趣、情绪变化与未完成想法"))
+                    local_envelope("").to_dict(), query=policy.deliberation_query(
+                        snapshot.get("last_user"), contact_allowed=False, life=snapshot.get("life"))))
                 materials = {"envelope": memory_context.get("envelope") or local_envelope("").to_dict(),
                              "recent": memory_context.get("working", [])[-12:],
                              "memories": memory_context.get("recalled", [])[:5],

@@ -214,7 +214,8 @@ def build_deliberation_messages(system, data, *, max_output_tokens=4096):
 
     current = {key: copy.deepcopy(context[key]) for key in CURRENT_FIELDS if key in context}
     current.update({key: copy.deepcopy(data[key]) for key in (
-        "previous_emotion", "emotion", "willingness", "interests", "previous_topics", "allowed_kinds",
+        "previous_emotion", "emotion", "willingness", "interests", "social_interests", "background_interests",
+        "previous_topics", "allowed_kinds",
     ) if key in data})
     # Hash-keyed recent_intents is only a server-side duplicate guard. Outcomes
     # carry the actual goals/statuses once, so the evaluator can reason about them.

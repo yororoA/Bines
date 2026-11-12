@@ -7,7 +7,9 @@ from helpers import MemoryFixture, local_env
 from chatBot.proactive import QQProactive, dispatch_allowed, guard
 from chatBot.store import MemoryStore
 from common.deliberation_context import build_deliberation_messages
-from common.proactive import ProactiveConfig, ProactivePolicy, draft_decision, human_ref, inspect_decision
+from common.proactive import (
+    ProactiveConfig, ProactivePolicy, draft_decision, human_ref, inspect_decision, parse_appraisal,
+)
 from memory.expression_learning import render_expression_notes
 from memory.expression_vector import ExpressionVectorStore
 from prompt_builder import build_conversation_messages
@@ -194,6 +196,47 @@ class ContactWaitPolicyTest(unittest.TestCase):
         self.assertEqual(self.policy.state.last_gate["allowed_kinds"], ["curiosity", "initiative"])
         self.assertEqual(self.policy.state.contact_wait_until, self.now + 900)
         self.assertIn("connection", self.policy.eligible_kinds(self.now + 900, self.user))
+
+    def test_repeated_contact_wait_keeps_absolute_deadline_and_stops_empty_minute_reviews(self):
+        self.policy.defer(self.now, 900, wait_scope="contact")
+        self.policy.defer(self.now + 60, 900, wait_scope="contact")
+        self.assertEqual(self.policy.state.contact_wait_until, self.now + 900)
+        self.assertEqual(self.policy.state.next_decision, self.now + 900)
+        restored = ProactivePolicy(self.now + 61, self.config, self.policy.dump())
+        for offset in (120, 300, 899):
+            self.assertFalse(restored.tick(self.now + offset, self.user, followup_after_reply=True))
+        reply = {**self.user, "id": "owner:2", "ts": self.now + 301}
+        self.assertFalse(restored.tick(self.now + 301, reply))
+        self.assertEqual(restored.state.contact_wait_until, 0)
+        self.assertTrue(restored.tick(self.now + 321, reply, followup_after_reply=True))
+
+    def test_independent_retrieval_uses_real_interests_and_goals_instead_of_old_contact(self):
+        self.policy.state.interests = ["云的形状"]
+        self.policy.state.social_interests = ["等对方吃完饭"]
+        life = {"goals": [{"status": "active", "intent": "读完积云那一段"},
+                          {"status": "completed", "intent": "旧目标"}]}
+        query = self.policy.deliberation_query(self.user, contact_allowed=False, life=life)
+        self.assertIn("云的形状", query)
+        self.assertIn("读完积云", query)
+        self.assertNotIn("旧目标", query)
+        self.assertNotIn(self.user["content"], query)
+        self.assertNotIn("吃完饭", query)
+        self.assertEqual(self.policy.deliberation_query(self.user), self.user["content"])
+
+    def test_social_wishes_are_preserved_without_entering_an_independent_decision(self):
+        appraisal = parse_appraisal(json.dumps({
+            "emotion": {"valence": .2, "arousal": .6, "social": .8, "curiosity": .5},
+            "interests": ["看看云的形状"], "social_interests": ["等对方吃完饭再聊"],
+        }, ensure_ascii=False))
+        self.policy.appraise(appraisal, "owner:1", self.now)
+        self.assertEqual(self.policy.state.social_interests, ["等对方吃完饭再聊"])
+        model = Mock()
+        model.complete_text.return_value = '{"should_act":false,"wait_scope":"all","delay_seconds":900}'
+        draft_decision({}, self.policy.state, self.now, model=model,
+                       allowed_kinds=["curiosity", "initiative"])
+        rendered = json.dumps(model.complete_text.call_args.args[0], ensure_ascii=False)
+        self.assertIn("看看云的形状", rendered)
+        self.assertNotIn("等对方吃完饭再聊", rendered)
 
     def legacy_wait(self, **changes):
         # Emulate the actual pre-upgrade JSON, without the new persisted fields.

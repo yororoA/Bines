@@ -417,6 +417,7 @@ class MemoryWorker:
             except ValueError as exc:
                 validation_error = exc
             else:
+                data = self._verify_compact_association(data, compact)
                 try:
                     self.client.complete_association(job["id"], [], data.get("prior", .5),
                         decisions=data["decisions"], **self._attempt(job))
@@ -439,6 +440,40 @@ class MemoryWorker:
                     "无关系用 links=[]；证据不足用 links=[]、uncertain=true，不能遗漏候选。"
                 )},
             ])
+
+    def _verify_compact_association(self, data, compact):
+        from .association_plan import VERIFY_SYSTEM
+        proposed = [d for d in data["decisions"] if isinstance(d, dict) and d.get("links")]
+        if not proposed:
+            return data
+        targets = {d.get("target") for d in proposed}
+        raw = self._model_call(self.association_complete_text, [
+            {"role": "system", "content": VERIFY_SYSTEM},
+            {"role": "user", "content": json.dumps({
+                "source": compact["source"],
+                "candidates": [c for c in compact["candidates"] if c["id"] in targets],
+                "proposed": proposed,
+            }, ensure_ascii=False, separators=(",", ":"))},
+        ])
+        verified = _state_changes(raw).get("verdicts")
+        if (not isinstance(verified, list) or len(verified) != len(targets)
+                or any(not isinstance(d, dict) or d.get("target") not in targets
+                       or "supported" not in d
+                       or d["supported"] is not None and type(d["supported"]) is not bool for d in verified)
+                or len({d["target"] for d in verified}) != len(targets)):
+            raise ValueError("关联核验必须显式覆盖每个拟议目标")
+        verdicts = {d["target"]: d for d in verified}
+        decisions = []
+        for decision in data["decisions"]:
+            verdict = verdicts.get(decision.get("target"))
+            if verdict is None:
+                decisions.append(decision)
+            elif verdict["supported"] is True:
+                decisions.append(decision)
+            else:
+                decisions.append({**decision, "links": [], **(
+                    {"uncertain": True} if verdict["supported"] is None else {})})
+        return {**data, "decisions": decisions}
 
     @staticmethod
     def _legacy_association_prompt(materials):

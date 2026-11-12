@@ -408,7 +408,10 @@ class QQProactive:
             from chatBot.memory_hub import identity_envelope
             continuing = policy.state.activity.get("mode") in {"continue", "review"}
             memory_context = (snapshot if continuing else self.memory.build_context(
-                identity_envelope(identity), query=user.get("content") or "近期兴趣、情绪变化与未完成的想法"))
+                identity_envelope(identity), query=policy.deliberation_query(user,
+                    contact_allowed=policy.contact_permissions(
+                        now, user, activity, last_reply_at=conversation_activity)["owner_contact_allowed"],
+                    life=snapshot.get("life"))))
             materials = {
                 "envelope": memory_context.get("envelope") or identity_envelope(identity),
                 "recent": memory_context.get("working", [])[-12:],

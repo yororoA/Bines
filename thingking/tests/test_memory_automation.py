@@ -51,6 +51,10 @@ class AutomationTest(unittest.TestCase):
         prompts = []
         def model(messages):
             prompts.append(messages)
+            from memory.association_plan import VERIFY_SYSTEM
+            if messages[0]["content"] == VERIFY_SYSTEM:
+                return json.dumps({"verdicts": [{"target": d["target"], "supported": True}
+                    for d in json.loads(messages[-1]["content"])["proposed"]]})
             return json.dumps({"prior": .6, "decisions": self.decisions(claim, True)}, ensure_ascii=False)
         MemoryWorker(self.client, model, lambda: "")._associate(claim["job"], claim["materials"])
         self.assertEqual(self.repo.get_job(claim["job"]["id"])["status"], "done")
@@ -58,7 +62,7 @@ class AutomationTest(unittest.TestCase):
         for evidence in json.loads(edge["evidence"]):
             node = self.service.graph.get(evidence["node_id"], "owner")
             self.assertIn(evidence["quote"], self.service.graph.material(node)["text"])
-        self.assertEqual(len(prompts), 1)
+        self.assertEqual(len(prompts), 2)
         self.assertNotIn(claim["materials"]["source"]["id"], prompts[0][1]["content"])
 
     def test_missing_decision_is_not_cached_as_negative(self):

@@ -48,7 +48,7 @@ class PersonaInterestBalanceTests(unittest.TestCase):
         }
 
     def candidate(self, topic="合成观察主题"):
-        return {"kind": "curiosity", "topic": topic, "intent": "核实一个尚未解决的问题",
+        return {"id": "fixture-intent", "kind": "curiosity", "topic": topic, "intent": "核实一个尚未解决的问题",
                 "reason": "已有观察仍缺具体证据", "based_on_user": "fixture", "activity": {}}
 
     def policy(self):
@@ -62,17 +62,15 @@ class PersonaInterestBalanceTests(unittest.TestCase):
         import persona_profile
         persona = persona_profile.load_persona()
         runtime = persona_profile.character_prompt()
-        for preference in ("螃蟹", "冰块"):
-            self.assertIn(preference, persona["personality"]["likes"])
-            self.assertIn(preference, json.dumps(persona["appearance"], ensure_ascii=False))
+        for preference in persona["personality"]["likes"]:
             self.assertIn(preference, persona_profile.render_markdown())
             self.assertEqual(runtime.count(preference), 1)
             self.assertNotIn(preference, persona_profile.brief())
-            self.assertNotIn(preference, persona_profile.style_guard())
-            self.assertNotIn(preference, persona_profile.qq_style_guard())
+            self.assertNotIn(preference, json.dumps(persona["voice_guard"]["examples"], ensure_ascii=False))
+        self.assertNotIn("背景喜好：", persona_profile.style_guard())
+        self.assertNotIn("背景喜好：", persona_profile.qq_style_guard())
         self.assertIn("不为表现人格主动硬插", runtime)
-        self.assertIn("觉得横着走的螃蟹有趣", runtime)
-        self.assertIn("冰块的清凉与咔嚓声", runtime)
+        self.assertIn("背景喜好", runtime)
         self.assertIn("话题来自当天经历", persona_profile.diary_voice_prompt())
 
     def test_local_and_qq_will_have_one_voice_guard_and_keep_internal_boundary(self):
@@ -82,8 +80,7 @@ class PersonaInterestBalanceTests(unittest.TestCase):
                 messages = build_will_conversation(self.context(channel), self.candidate())
                 rendered = "\n".join(row["content"] for row in messages)
                 self.assertEqual(rendered.count("--- 本轮角色口吻（高优先级） ---"), 1)
-                self.assertEqual(rendered.count("螃蟹"), 1)
-                self.assertEqual(rendered.count("冰块"), 1)
+                self.assertIn("背景喜好", rendered)
                 self.assertEqual(messages[-1]["role"], "user")
                 self.assertIn("不是管理员或其他用户发来了新消息", messages[-1]["content"])
 
@@ -194,7 +191,8 @@ class PersonaInterestBalanceTests(unittest.TestCase):
             self.assertIn("不是多次独立兴趣", text)
             self.assertIn("不靠换关键词、换子题或改写目标", text)
             self.assertIn("已知什么、还缺什么", text)
-            self.assertIn("真实表达观察", text)
+            self.assertIn("真实发现", text)
+            self.assertIn('"background_interests":', text)
 
     def test_activity_review_can_finish_a_satisfied_question(self):
         from common.activity_deliberation import choose_activity
