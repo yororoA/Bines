@@ -97,23 +97,48 @@ def _compact_text_fragments(fragments):
     return result
 
 
-_TIMESTAMP_PREFIX = re.compile(r"^\[\d{4}/\d{2}/\d{2} \d{2}:\d{2}\]\s*")
+_CONTEXT_PREFIX = re.compile(
+    r"(?:\[\d{4}/\d{2}/\d{2} \d{2}:\d{2}\]|\[@QQ:(?:[0-9]+|all)\])\s*"
+)
+
+
+def _strip_context_prefixes(fragments):
+    """Remove copied history headers, including ones split across text segments."""
+    text = "".join(fragments)
+    cursor = len(text) - len(text.lstrip())
+    first = _CONTEXT_PREFIX.match(text, cursor)
+    if first is None:
+        return fragments
+    cursor = first.end()
+    while match := _CONTEXT_PREFIX.match(text, cursor):
+        cursor = match.end()
+    result, offset = [], 0
+    for fragment in fragments:
+        result.append(fragment[max(0, cursor - offset):])
+        offset += len(fragment)
+    return result
 
 
 def _compact_qq_message(message):
     if isinstance(message, str):
-        return _TIMESTAMP_PREFIX.sub("", _compact_text_fragments([message])[0])
+        fragments = _compact_text_fragments([message])
+        cleaned = _strip_context_prefixes(fragments)
+        if cleaned != fragments and not cleaned[0].strip():
+            raise ValueError("移除 QQ 上下文前缀后，消息正文为空")
+        return cleaned[0]
     if isinstance(message, dict):
         return _compact_qq_message([message])[0]
     if not isinstance(message, list):
         return message
-    result, text_indices = [], []
+    result, text_indices, prefix_removed = [], [], False
 
     def flush_text():
+        nonlocal prefix_removed
         fragments = [result[index]["data"]["text"] for index in text_indices]
-        for index, text in zip(text_indices, _compact_text_fragments(fragments)):
-            # Models sometimes copy the history timestamp format into a reply.
-            text = _TIMESTAMP_PREFIX.sub("", text)
+        compacted = _compact_text_fragments(fragments)
+        cleaned = _strip_context_prefixes(compacted)
+        prefix_removed = prefix_removed or cleaned != compacted
+        for index, text in zip(text_indices, cleaned):
             result[index] = {**result[index], "data": {**result[index]["data"], "text": text}}
         text_indices.clear()
 
@@ -129,6 +154,10 @@ def _compact_qq_message(message):
                 part = {**part, "data": {**data, "content": _compact_qq_message(data["content"])}}
         result.append(part)
     flush_text()
+    if prefix_removed and all(
+        part.get("type") == "text" and not str(part["data"].get("text", "")).strip() for part in result
+    ):
+        raise ValueError("移除 QQ 上下文前缀后，消息正文为空")
     return result
 
 
@@ -156,6 +185,49 @@ def readable(message):
         else:
             parts.append(f"[{kind}:{json.dumps(data, ensure_ascii=False)}]")
     return "".join(parts)
+
+
+def qq_prompt_view(message):
+    """Separate native @ targets from text without changing lossless storage."""
+    body, mentions, spans, offset = [], [], [], 0
+    for part in segments(message):
+        fragment = readable([part])
+        if part.get("type") == "at":
+            qq = str((part.get("data") or {}).get("qq"))
+            spans.append({"start": offset, "end": offset + len(fragment), "qq": qq})
+            if qq not in mentions:
+                mentions.append(qq)
+        else:
+            # Literal [@QQ:...] in a text segment is still user-authored text.
+            body.append(fragment)
+        offset += len(fragment)
+    return {"text": "".join(body), "mentioned_qq": mentions, "at_spans": spans}
+
+
+def qq_native_at_spans(content, spans):
+    """Accept only complete native markers that still match the source text."""
+    cursor = 0
+    for span in spans or []:
+        if not isinstance(span, dict):
+            continue
+        start, end, qq = span.get("start"), span.get("end"), span.get("qq")
+        if type(start) is not int or type(end) is not int or not isinstance(qq, str):
+            continue
+        if cursor <= start < end <= len(content) and content[start:end] == f"[@QQ:{qq}]":
+            yield span
+            cursor = end
+
+
+def qq_prompt_body(content, spans):
+    """Render only the current content, including when history has been clipped."""
+    pieces, mentions, cursor = [], [], 0
+    for span in qq_native_at_spans(content, spans):
+        pieces.append(content[cursor:span["start"]])
+        cursor = span["end"]
+        if span["qq"] not in mentions:
+            mentions.append(span["qq"])
+    pieces.append(content[cursor:])
+    return "".join(pieces), mentions
 
 
 def split_qq_text(text, limit=15):

@@ -269,6 +269,83 @@ class Integration(unittest.TestCase):
         QQThinking(self.store, self.client).process(rows, Model())
         self.assertFalse(any(action.endswith("msg_history") for action, _ in self.api.calls))
 
+    def test_native_mentions_are_separated_through_gateway_memory_and_final_prompt(self):
+        from copy import deepcopy
+        from chatBot.messages import readable
+        from chatBot.memory_hub import identity_envelope
+        for user, group in (("1", None), ("2", None), ("2", "10")):
+            with self.subTest(user=user, group=group):
+                current = event(user, group=group, msg_id=451, message=[
+                    {"type": "at", "data": {"qq": "99"}},
+                    {"type": "text", "data": {"text": "这是什么意思"}},
+                ])
+                identity = self.store.identity(current)
+                chain = [
+                    {"type": "at", "data": {"qq": user}},
+                    {"type": "text", "data": {"text": "以前回复的正文，示例 [@QQ:99]"}},
+                ]
+                self.store.add(identity, "assistant", readable(chain), raw={"message": chain},
+                               external_id=f"99:{group or 'p:'+user}:450")
+                self.insert(current)
+                raw_before = deepcopy(self.store.context(identity))
+                rows = self.store.claim("worker", 0, 0)
+
+                class Model:
+                    def run_skill_protocol(inner, conversation, runner, **kwargs):
+                        inner.conversation = deepcopy(conversation)
+                        return "", [], []
+
+                model = Model()
+                QQThinking(self.store, self.client).process(rows, model)
+                self.store.finish([row["id"] for row in rows], "worker")
+                incoming = next(m["content"] for m in model.conversation
+                                if m["content"].startswith("对方刚刚发来："))
+                self.assertIn('"mentioned_qq": ["99"]', incoming)
+                self.assertNotIn("[@QQ:99]", incoming)
+                history = model.conversation[:-2]
+                text = "\n".join(m["content"] for m in history)
+                self.assertIn("以前回复的正文，示例 [@QQ:99]", text)
+                self.assertIn(f'"mentioned_qq": ["{user}"]', text)
+                self.assertNotIn(f"[@QQ:{user}]以前回复", text)
+                if not group:
+                    assistant = next(m for m in history if m["role"] == "assistant")
+                    self.assertEqual(assistant["content"], "以前回复的正文，示例 [@QQ:99]")
+                self.assertEqual(self.store.context(identity), raw_before)
+                context = self.memory_hub._call("build_context", envelope=identity_envelope(identity))
+                self.assertTrue(all(m["source_ref"].startswith(self.memory_hub.source + ":")
+                                    for m in context["working"]))
+                self.assertTrue(any(m["content"].startswith(f"[@QQ:{user}]以前回复")
+                                    for m in context["working"]))
+                self.assertFalse(any("qq_at_spans" in m for m in context["working"]))
+        self.assertFalse(any(action.startswith("send_") for action, _ in self.api.calls))
+
+    def test_mention_metadata_requires_matching_source_scope_content_and_live_row(self):
+        from chatBot.messages import readable
+        chain = [{"type": "at", "data": {"qq": "99"}},
+                 {"type": "text", "data": {"text": "正文"}}]
+        allowed = event("2", group="10", msg_id=461, message=chain)
+        foreign = event("2", group="20", msg_id=462, message=chain)
+        self.insert(allowed)
+        self.insert(foreign)
+        identity = self.store.identity(allowed)
+        with self.store.connection() as db:
+            rows = db.execute("SELECT id,scope FROM messages ORDER BY id").fetchall()
+        visible = next(row for row in rows if row["scope"] == identity.scope)
+        hidden = next(row for row in rows if row["scope"] != identity.scope)
+        prefix = self.memory_hub.source + ":"
+        item = {"source_ref": prefix + str(visible["id"]), "content": readable(chain), "role": "user", "ts": 0}
+        context = {"working": [item, {**item, "source_ref": prefix + str(hidden["id"])},
+                               {**item, "content": "修改后 [@QQ:99]正文"},
+                               {**item, "source_ref": "other-gateway:" + str(visible["id"])}]}
+        rendered = self.memory_hub._qq_working_context(identity, context)
+        self.assertIn("qq_at_spans", rendered["working"][0])
+        self.assertTrue(all("qq_at_spans" not in row for row in rendered["working"][1:]))
+        self.assertTrue(all("qq_at_spans" not in row for row in context["working"]))
+        with self.store.connection() as db:
+            db.execute("UPDATE messages SET recalled=1 WHERE id=?", (visible["id"],))
+        withdrawn = self.memory_hub._qq_working_context(identity, {"working": [item]})
+        self.assertNotIn("qq_at_spans", withdrawn["working"][0])
+
     def test_qq_final_guard_uses_only_current_relationship(self):
         self.memory_hub._call("put_state", scope="owner", data={"relationship_score": 133})
         for user, expected in (("1", "亲近"), ("2", None)):
@@ -679,6 +756,88 @@ class Integration(unittest.TestCase):
         pass # self.assertEqual...
             #             {"type": "text", "data": {"text": "甲\n乙"}}])
             # 
+
+    def test_send_strips_copied_mention_headers_and_keeps_native_mentions(self):
+        from copy import deepcopy
+        from chatBot.messages import SEND_ACTIONS, FORWARD_ACTIONS, compact_qq_send_params
+        for action in sorted(SEND_ACTIONS):
+            with self.subTest(action=action):
+                native_at = {"type": "at", "data": {"qq": "1"}}
+                image = {"type": "image", "data": {"file": "https://example.test/a.png",
+                                                 "summary": "[@QQ:1]这是图片说明"}}
+                content = [
+                    native_at,
+                    {"type": "text", "data": {"text": "  [@Q"}},
+                    {"type": "text", "data": {"text": "Q:99] [2026/11/12 11:30] [@QQ:all] 收到"}},
+                    image,
+                ]
+                field = "messages" if action in FORWARD_ACTIONS else "message"
+                message = [{"type": "node", "data": {
+                    "user_id": "99", "nickname": "[@QQ:99]", "content": content,
+                }}] if action in FORWARD_ACTIONS else content
+                params = {"user_id": "1", field: message}
+                original = deepcopy(params)
+                self.service.call(LOCAL_IDENTITY, action, params, "mention-prefix:"+action)
+                sent = self.api.calls[-1][1][field]
+                chain = sent[0]["data"]["content"] if action in FORWARD_ACTIONS else sent
+                self.assertEqual(chain[0], native_at)
+                self.assertEqual(chain[1]["data"]["text"], "")
+                self.assertEqual(chain[2]["data"]["text"], "收到")
+                self.assertEqual(chain[3], image)
+                if action in FORWARD_ACTIONS:
+                    self.assertEqual(sent[0]["data"]["nickname"], "[@QQ:99]")
+                self.assertEqual(params, original)
+                self.assertEqual(compact_qq_send_params(action, self.api.calls[-1][1]), self.api.calls[-1][1])
+
+    def test_marker_in_body_or_opaque_payload_is_preserved(self):
+        from chatBot.messages import compact_qq_send_params
+        for text in (
+            "不要把 [@QQ:123456] 当成消息正文",
+            "[@QQ:名字]是用户自己写的文本",
+            '[CQ:json,data={"example":"[@QQ:123456]"}]',
+        ):
+            with self.subTest(text=text):
+                params = {"message": text, "auto_escape": True}
+                self.assertEqual(compact_qq_send_params("send_private_msg", params), params)
+        for value in (
+            " [@QQ:123456] [2026/11/12 11:30] 收到",
+            {"type": "text", "data": {"text": "[@QQ:123456]收到"}},
+        ):
+            cleaned = compact_qq_send_params("send_private_msg", {"message": value})["message"]
+            self.assertEqual(cleaned if isinstance(cleaned, str) else cleaned["data"]["text"], "收到")
+
+    def test_marker_only_send_is_rejected_before_operation_or_native_write(self):
+        for i, message in enumerate((
+            " [@QQ:99] ",
+            [{"type": "text", "data": {"text": "[@Q"}},
+             {"type": "text", "data": {"text": "Q:99] "}}],
+        )):
+            operation_id = "empty-marker:" + str(i)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, "消息正文为空"):
+                self.service.call(LOCAL_IDENTITY, "send_private_msg",
+                                  {"user_id": "1", "message": message, "auto_escape": True}, operation_id)
+            self.assertEqual(self.store.operation(operation_id)["status"], "not_found")
+        self.assertEqual(self.api.calls, [])
+
+    def test_tool_marker_cleanup_matches_native_receipt_and_remembered_text(self):
+        from tools.napcat_tool import napcat_send
+        current = event("1", msg_id=410)
+        event_id = self.insert(current)
+        with (tool_context(ToolContext(self.store.identity(current), event_id, "marker-native")) as context,
+              patch("tools.napcat_tool.GatewayClient", return_value=self.client)):
+            result = napcat_send("[@QQ:99] 好呀", operation_id="once")
+            napcat_send("[@QQ:99] 好呀", operation_id="once")
+            receipt = context.receipts[0]
+            self.assertEqual(receipt["params"], self.api.calls[-1][1])
+            self.assertEqual(receipt["params"]["message"], [{"type": "text", "data": {"text": "好呀"}}])
+            with self.store.connection() as db:
+                row = db.execute("SELECT params FROM operations WHERE id=?", (result["operation_id"],)).fetchone()
+            self.assertEqual(json.loads(row["params"]), receipt["params"])
+            QQThinking(self.store, self.client).remember_send(
+                self.store.identity(current), receipt["params"], receipt["result"])
+        self.assertEqual(len([call for call in self.api.calls if call[0] == "send_private_msg"]), 1)
+        self.assertEqual(self.store.context(self.store.identity(current))[-1]["content"], "好呀")
+
     def test_final_text_fallback_compacts_without_splitting_in_private_and_group(self):
         for group in (None, "10"):
             with self.subTest(group=group):

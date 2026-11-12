@@ -17,7 +17,7 @@ from memory.lexical_index import LexicalIndex
 from memory.repository import MemoryRepository
 from memory.service import MemoryService
 from memory.settings import MemorySettings
-from prompt_builder import _allocate_context, _memory_recall_block, build_conversation_messages
+from prompt_builder import _allocate_context, _memory_recall_block, _working_messages, build_conversation_messages
 from tools.memory_tool import search_memory
 
 
@@ -117,6 +117,57 @@ class SharedMemoryPresentationTests(unittest.TestCase):
         self.assertNotIn(0, ids)
         self.assertEqual(ids, sorted(ids))
         self.assertLessEqual(sum(spent.values()), 1000)
+
+    def test_native_at_positions_preserve_identical_literal_text_and_media(self):
+        from chatBot.messages import qq_prompt_body, qq_prompt_view, readable
+        chain = [
+            {"type": "at", "data": {"qq": "99"}},
+            {"type": "text", "data": {"text": "字面例子 [@QQ:99]；"}},
+            {"type": "at", "data": {"qq": "all"}},
+            {"type": "image", "data": {"file": "https://example.test/a.png"}},
+            {"type": "reply", "data": {"id": "7"}},
+        ]
+        view = qq_prompt_view(chain)
+        body, mentions = qq_prompt_body(readable(chain), view["at_spans"])
+        self.assertEqual(mentions, ["99", "all"])
+        self.assertEqual(body, view["text"])
+        self.assertIn("字面例子 [@QQ:99]", body)
+        self.assertIn("[image:", body)
+        self.assertNotIn("[reply:", body)
+        edited = "改过的正文 " + readable(chain)
+        self.assertEqual(qq_prompt_body(edited, view["at_spans"]), (edited, []))
+        cq = "前文[CQ:at,qq=99]后文&#91;@QQ:99&#93;"
+        cq_view = qq_prompt_view(cq)
+        self.assertEqual(cq_view["text"], "前文后文[@QQ:99]")
+        self.assertEqual(cq_view["mentioned_qq"], ["99"])
+
+    def test_mention_presentation_respects_history_budget_and_marker_boundaries(self):
+        from copy import deepcopy
+        from chatBot.messages import qq_prompt_view, readable
+        counter = ContextTokenCounter()
+        chain = [
+            {"type": "text", "data": {"text": "前文" * 60}},
+            {"type": "at", "data": {"qq": "123456"}},
+            {"type": "text", "data": {"text": "后文" * 1000 + "END_OF_FULL_SOURCE"}},
+        ]
+        item = {"id": 1, "role": "assistant", "ts": 100, "content": readable(chain),
+                "qq_at_spans": qq_prompt_view(chain)["at_spans"]}
+        context = {"working": [item]}
+        original = deepcopy(context)
+        for scene in ("qq_private", "qq_group"):
+            for quota in (180, 256, 400, 800):
+                with self.subTest(scene=scene, quota=quota):
+                    selected, spent, _ = _allocate_context(context, scene, counter, {"working": quota})
+                    self.assertTrue(selected["working"])
+                    self.assertTrue(selected["working"][0]["_partial"])
+                    rendered = _working_messages(selected, scene)
+                    self.assertLessEqual(counter.messages(rendered), quota)
+                    self.assertLessEqual(spent["working"], quota)
+                    text = "\n".join(m["content"] for m in rendered)
+                    self.assertNotIn("END_OF_FULL_SOURCE", text)
+                    self.assertNotIn("[@", text)
+                    self.assertIn("[历史节选]", text)
+        self.assertEqual(context, original)
 
     def test_recalled_corrections_and_source_deduplication_survive_presentation(self):
         source = {"source_type": "message", "source_id": 1, "source_ref": "message:1",

@@ -76,7 +76,7 @@ def _association_excerpt(text: str, query: str, limit: int = 1400) -> str:
 
 
 def _message_view(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: row.get(key) for key in ("id", "role", "actor_id", "actor_name", "content", "ts")}
+    return {key: row.get(key) for key in ("id", "role", "actor_id", "actor_name", "content", "ts", "source_ref")}
 
 
 def _memory_view(row: Dict[str, Any], **extra: Any) -> Dict[str, Any]:

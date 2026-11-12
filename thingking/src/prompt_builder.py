@@ -1,12 +1,14 @@
 """Assemble conversation prompts from the persona, a scene policy and the scoped memory context."""
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from common.clock import clock_message, now
+from chatBot.messages import qq_native_at_spans, qq_prompt_body
 
 import persona_profile
 from memory.attribution import RULE as ATTRIBUTION_RULE, speaker
@@ -340,19 +342,28 @@ def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str
     if scene == SCENE_QQ_GROUP:
         if not working:
             return []
-        lines = [
-            f"[{_fmt_time(m['ts'], with_date=False)}] "
-            f"{speaker(m)}"
-            f"{'' if m['role'] != ROLE_OBSERVED else '(未@你)'}: {m['content']}"
-            for m in working
-        ]
+        lines = []
+        for m in working:
+            content, mentions = qq_prompt_body(str(m["content"]), m.get("qq_at_spans"))
+            if mentions:
+                lines.append("QQ 消息元数据：" + json.dumps(
+                    {"speaker": speaker(m), "mentioned_qq": mentions}, ensure_ascii=False))
+            lines.append(f"[{_fmt_time(m['ts'], with_date=False)}] "
+                         f"{speaker(m)}"
+                         f"{'' if m['role'] != ROLE_OBSERVED else '(未@你)'}: {content}")
         return [{"role": "system", "content": "--- 群聊近况 ---\n" + "\n".join(lines)}]
     messages = []
     for m in working:
         # Message IDs belong to the separate reference table in the QQ prompt.
         # Do not render timestamps or IDs inside historical assistant turns:
         # the model otherwise copies that format into its own reply.
-        content = _MESSAGE_ID_PREFIX.sub("", str(m["content"]))
+        content, mentions = qq_prompt_body(str(m["content"]), m.get("qq_at_spans"))
+        content = _MESSAGE_ID_PREFIX.sub("", content)
+        if mentions:
+            messages.append({"role": "system", "content": "QQ 历史消息元数据：" + json.dumps(
+                {"speaker": speaker(m), "mentioned_qq": mentions}, ensure_ascii=False)})
+        if not content.strip() and mentions:
+            continue
         if m["role"] == ROLE_ASSISTANT:
             messages.append({"role": "assistant", "content": content})
         else:
@@ -489,7 +500,14 @@ def _allocate_context(context, scene, counter, quotas, item_quotas=None):
                         mid = (low + high) // 2
                         trial = dict(item)
                         if section in {"working", "other_channels"}:
-                            trial["content"] = str(item.get("content") or "")[:mid] + "…[历史节选]"
+                            end = mid
+                            source = str(item.get("content") or "")
+                            # Never expose half a protocol marker at a budget boundary.
+                            for span in qq_native_at_spans(source, item.get("qq_at_spans")):
+                                if span["start"] < end < span["end"]:
+                                    end = span["start"]
+                                    break
+                            trial["content"] = source[:end] + "…[历史节选]"
                             trial["_partial"] = True
                         else:
                             trial["_display_limit"] = mid

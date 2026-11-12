@@ -11,7 +11,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 from chatBot.config import DEBOUNCE, MAX_WAIT, WORKERS, GROUP_REPLY_MODE, REPLY_TEMPERATURE
-from chatBot.messages import Identity, segments, readable, SEND_ACTIONS, sent_message, compact_qq_send_params
+from chatBot.messages import (
+    Identity, segments, readable, SEND_ACTIONS, sent_message, compact_qq_send_params, qq_prompt_view,
+)
 from chatBot.store import MemoryStore
 from chatBot.turn_wait import FollowupRunner, FollowupArrived, TurnDeferred
 from chatBot.gateway_client import GatewayClient
@@ -26,11 +28,16 @@ log = logging.getLogger("bines.qq.thinking")
 
 
 def current_input_text(events):
-    """Render incoming text naturally; message IDs stay in the prompt's ID table."""
+    """Keep native @ metadata outside incoming prose and preserve batch order."""
     rows = []
     for event in events:
-        chain = segments(event.get("message", event.get("raw_message", "")))
-        text = readable([part for part in chain if part.get("type") != "reply"]).strip()
+        view = qq_prompt_view(event.get("message", event.get("raw_message", "")))
+        text = view["text"].strip()
+        if view["mentioned_qq"]:
+            metadata = json.dumps({"kind": "current_input_metadata", "mentioned_qq": view["mentioned_qq"]},
+                                  ensure_ascii=False)
+            rows.append("QQ 消息元数据：\n" + metadata + "\n消息正文：\n" + (text or "（无文字正文）"))
+            continue
         if text:
             rows.append(text)
     return "\n".join(rows)
@@ -44,10 +51,13 @@ def quoted_input_text(quotes, quoted_events, identity):
         actor = str(event.get("user_id") or sender.get("user_id") or "")
         mid = str(event.get("message_id") or "")
         known[mid] = event
-        rows.append(json.dumps({"quoted_message_id": mid,
-                                "speaker_type": "Bines" if actor == identity.account else "human" if actor else "unknown",
-                                "speaker_qq": actor, "kind": "quoted_history"}, ensure_ascii=False)
-                    + "\n" + readable(event.get("message", event.get("raw_message", ""))))
+        view = qq_prompt_view(event.get("message", event.get("raw_message", "")))
+        metadata = {"quoted_message_id": mid,
+                    "speaker_type": "Bines" if actor == identity.account else "human" if actor else "unknown",
+                    "speaker_qq": actor, "kind": "quoted_history"}
+        if view["mentioned_qq"]:
+            metadata["mentioned_qq"] = view["mentioned_qq"]
+        rows.append(json.dumps(metadata, ensure_ascii=False) + "\n" + view["text"])
     # Preserve the explicit unavailable markers produced by the scoped resolver.
     for quote in quotes:
         if not any(quote.startswith(f"引用消息 {mid} ") for mid in known):

@@ -5,7 +5,7 @@ import os
 import threading
 from pathlib import Path
 
-from chatBot.messages import Identity
+from chatBot.messages import Identity, readable, qq_prompt_view
 from memory.channels import local_envelope, qq_envelope
 from memory.client import MemoryClient
 from memory.server import dispatch
@@ -279,6 +279,47 @@ class MemoryHub:
             # 无到期时间通常意味着另一个消费者正持有租约，短暂让出后复查。
             self.stop.wait(max(0.02, min(delay, budget)))
 
+    def _qq_working_context(self, identity, context):
+        """Attach native @ positions only to unchanged, visible gateway sources."""
+        if not isinstance(context, dict):
+            return context
+        working = context.get("working") or []
+        prefix = self.source + ":"
+        refs = {}
+        for item in working:
+            ref = item.get("source_ref")
+            if not isinstance(ref, str) or not ref.startswith(prefix):
+                continue
+            row_id = ref[len(prefix):]
+            valid_row_id = row_id.isascii() and row_id.isdigit()
+            if valid_row_id:
+                refs[ref] = row_id
+        if not refs:
+            return context
+        with self.store.connection() as db:
+            rows = db.execute(
+                "SELECT id,content,raw FROM messages WHERE scope=? AND recalled=0 AND raw IS NOT NULL AND id IN ("
+                + ",".join("?" for _ in refs) + ")",
+                (identity.scope, *refs.values()),
+            ).fetchall()
+        sources = {prefix + str(row["id"]): row for row in rows}
+        rendered = []
+        for item in working:
+            source = sources.get(item.get("source_ref"))
+            if source is not None and source["content"] == item.get("content"):
+                try:
+                    event = json.loads(source["raw"])
+                except (TypeError, ValueError):
+                    event = None
+                if isinstance(event, dict) and ("message" in event or "raw_message" in event):
+                    message = event.get("message", event.get("raw_message", ""))
+                    if readable(message) == item["content"]:
+                        view = qq_prompt_view(message)
+                        if view["at_spans"]:
+                            item = {**item, "qq_at_spans": view["at_spans"]}
+            rendered.append(item)
+        return {**context, "working": rendered}
+
     def call(self, identity, method, params, event_id=None):
         params = dict(params)
         if method == "retry_failed_job" and not identity.local:
@@ -339,7 +380,8 @@ class MemoryHub:
                     ).fetchone()
                 if row:
                     params["source_ref"] = self.source + ":" + str(row["id"])
-        return self._call(method, **params)
+        result = self._call(method, **params)
+        return self._qq_working_context(identity, result) if method == "build_context" else result
 
     def start(self):
         import logging

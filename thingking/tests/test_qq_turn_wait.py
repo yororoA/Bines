@@ -342,6 +342,38 @@ class TurnWaitProcessTests(TurnWaitFixture):
         self.assertIn('"quoted_message_id": "80"', text[0])
         self.assertIn('"speaker_type": "Bines"', text[0])
 
+    def test_current_native_mentions_are_metadata_and_literal_examples_stay_in_body(self):
+        value = message(100, "你好 [@QQ:99] 是文字示例", addressed=True)
+        original = copy.deepcopy(value)
+        current = self.qq.current_input_text([value, message(101, "第二条消息")])
+        self.assertIn('"mentioned_qq": ["99"]', current)
+        self.assertIn("消息正文：\n你好 [@QQ:99] 是文字示例\n第二条消息", current)
+        self.assertEqual(current.count("[@QQ:99]"), 1)
+        self.assertEqual(value, original)
+        self.assertEqual(self.qq.current_input_text([message(102, "普通文字")]), "普通文字")
+
+    def test_at_with_quoted_image_remains_a_response_trigger_without_native_markers_in_body(self):
+        value = message(100, "", group="10", addressed=True)
+        value["message"].insert(0, {"type": "reply", "data": {"id": "80"}})
+        quote = message(80, "旧话", user="99", addressed=True)
+        quote["message"].append({"type": "image", "data": {"file": "https://example.test/a.png"}})
+        current = self.qq.current_input_text([value])
+        quoted = self.qq.quoted_input_text(["引用消息 80 内容"], [quote], self.store.identity(value))
+        self.assertIn("（无文字正文）", current)
+        self.assertNotIn("[@QQ:", current)
+        self.assertIn('"quoted_message_id": "80"', quoted[0])
+        self.assertIn('"speaker_type": "Bines"', quoted[0])
+        self.assertIn('"mentioned_qq": ["99"]', quoted[0])
+        self.assertIn("[image:", quoted[0])
+        self.assertNotIn("[@QQ:", quoted[0])
+        self.store.ingest(value)
+        with patch("chatBot.media.resolve_replies", return_value=(["引用消息 80 内容"], [quote])):
+            self.process(self.claim(), lambda *_: "回应引用内容")
+        self.assertEqual(self.sent[-1][1]["message"][0]["data"]["text"], "回应引用内容")
+        incoming = next(m["content"] for m in self.last_conversation
+                        if m["content"].startswith("对方刚刚发来："))
+        self.assertIn("本轮引用内容", incoming)
+
 
 class TurnWaitGatewayTests(TurnWaitFixture):
     def test_last_gateway_fence_rejects_new_send_but_allows_existing_receipt(self):
