@@ -350,6 +350,7 @@ def main():
     parser.add_argument("--token", required=True)
     parser.add_argument("--spool", default="")
     parser.add_argument("--parent-pid", type=int, default=0)
+    parser.add_argument("--keep-browser-on-exit", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or len(args.token) < 32:
         raise SystemExit("port 或 token 无效")
@@ -395,7 +396,8 @@ def main():
         if spool:
             spool.close()
         server.server_close()
-        service.browser.close()
+        if not args.keep_browser_on_exit:
+            service.browser.close()
 
 
 if __name__ == "__main__":

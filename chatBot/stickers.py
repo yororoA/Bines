@@ -64,7 +64,7 @@ def _public_addresses(host, port, timeout):
     return ips
 
 
-def download_image(url, *, max_bytes=MAX_BYTES, timeout=DOWNLOAD_TIMEOUT):
+def download_image(url, *, max_bytes=MAX_BYTES, timeout=DOWNLOAD_TIMEOUT, accept="image/*"):
     """No proxies; validate every redirect and use the checked IP, not a second DNS lookup."""
     deadline = time.monotonic() + timeout
     for _ in range(4):
@@ -109,7 +109,7 @@ def download_image(url, *, max_bytes=MAX_BYTES, timeout=DOWNLOAD_TIMEOUT):
             if parsed.scheme == "https":
                 conn.sock.do_handshake()
             conn.request("GET", (parsed.path or "/") + ("?" + parsed.query if parsed.query else ""),
-                         headers={"Accept": "image/*", "Accept-Encoding": "identity"})
+                         headers={"Accept": accept, "Accept-Encoding": "identity"})
             response = conn.getresponse()
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.getheader("Location")

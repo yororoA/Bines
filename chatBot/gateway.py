@@ -13,6 +13,8 @@ class GatewayServer(ThreadingHTTPServer):
         self.memory_hub = memory_hub
         from chatBot.sticker_service import StickerService
         self.stickers = StickerService(service, library=sticker_library)
+        from chatBot.video import VideoService
+        self.videos = VideoService(service)
         service.sticker_library = self.stickers.library
         self.token = token or gateway_token()
         super().__init__(address or (GATEWAY_HOST, GATEWAY_PORT), GatewayHandler)
@@ -125,6 +127,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     self.server.memory_hub.remember_receipt(identity, data["action"], data.get("params", {}), result)
             elif self.path == "/quoted_message":
                 result = service.quoted_message(identity, event_id, data.get("message_id"))
+            elif self.path == "/video":
+                result = self.server.videos.call(identity, data["method"], data.get("params", {}),
+                                                  event_id=event_id)
             elif self.path == "/stickers":
                 sync_allowed = data.get("sync_qq", True) is True
                 before_sync = None

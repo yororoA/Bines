@@ -156,12 +156,12 @@ def main():
         except Exception as exc:
             print(f"Docker 清理失败：{exc}", file=sys.stderr, flush=True)
             return 1
-    from website_runtime import WebsiteBridgeProcess
-    website_bridge = WebsiteBridgeProcess()
+    from website_runtime import WebsiteBridgeSupervisor
+    website_bridge = WebsiteBridgeSupervisor()
     try:
         try:
             if website_bridge.start():
-                print("网站浏览器 · 已就绪", flush=True)
+                print("网站浏览器 · 已启用自动连接恢复", flush=True)
         except Exception as exc:
             print(f"网站浏览器不可用：{exc}", file=sys.stderr, flush=True)
         if not options.host and not options.external_napcat and docker_launcher.available():

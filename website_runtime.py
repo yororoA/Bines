@@ -12,6 +12,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import threading
 import time
 from urllib.request import Request, build_opener, ProxyHandler
 
@@ -282,11 +283,12 @@ class WebsiteBridgeProcess:
         self.port = 0
         self.owner_lock = None
 
-    def start(self):
+    def start(self, *, managed=False):
         if os.environ.get("BINES_WEBSITE_ENABLED", "true").lower() in {"0", "false", "no"}:
             return False
         from common.website_spool import acquire_bridge_lock
-        self.owner_lock = acquire_bridge_lock(WEBSITE_SPOOL_ROOT / ".runtime.lock")
+        if not managed:
+            self.owner_lock = acquire_bridge_lock(WEBSITE_SPOOL_ROOT / ".runtime.lock")
         try:
             return self._start()
         except BaseException:
@@ -348,6 +350,7 @@ class WebsiteBridgeProcess:
                 sys.executable, str(ROOT / "website_bridge.py"),
                 "--host", "127.0.0.1", "--port", str(self.port), f"--token={self.token}",
                 "--spool", str(WEBSITE_SPOOL_ROOT),
+                "--keep-browser-on-exit", "--parent-pid", str(os.getpid()),
             ],
             cwd=ROOT,
             env=env,
@@ -375,6 +378,7 @@ class WebsiteBridgeProcess:
                     os.environ["BINES_WEBSITE_BRIDGE_HOST_URL"] = host_url
                     os.environ["BINES_WEBSITE_BRIDGE_URL"] = host_url
                     os.environ["BINES_WEBSITE_BRIDGE_TOKEN"] = self.token
+                    os.environ["BINES_WEBSITE_BRIDGE_SPOOL"] = str(WEBSITE_SPOOL_ROOT)
                     return True
             except Exception as exc:
                 last_error = str(exc)
@@ -410,3 +414,131 @@ class WebsiteBridgeProcess:
 
     def __exit__(self, _exc_type, _exc, _traceback):
         self.close()
+
+
+class WebsiteBridgeSupervisor:
+    """Retry bridge startup independently of the QQ chain, preserving live Chrome."""
+
+    def __init__(self, *, root=None, emit=None, retry_seconds=2, max_retry_seconds=60,
+                 check_seconds=2, stale_seconds=15):
+        self.root = Path(root) if root is not None else WEBSITE_SPOOL_ROOT
+        self.emit = emit or (lambda message: print(message, flush=True))
+        self.retry_seconds = retry_seconds
+        self.max_retry_seconds = max_retry_seconds
+        self.check_seconds = check_seconds
+        self.stale_seconds = stale_seconds
+        self.cancel = threading.Event()
+        self.thread = None
+        self.owner_lock = None
+        self.bridge = None
+        self.ready = False
+
+    def _healthy(self):
+        from common.website_spool import read_bridge_token, read_json, verify_envelope
+        try:
+            token = read_bridge_token(self.root)
+            pulse = read_json(self.root / "heartbeat.json")
+            age = time.time() - float(pulse["ts"])
+            return bool(token and verify_envelope(token, "heartbeat", pulse)
+                        and -5 <= age <= self.stale_seconds)
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
+
+    def start(self):
+        if os.environ.get("BINES_WEBSITE_ENABLED", "true").lower() in {"0", "false", "no"}:
+            return False
+        if self.thread and self.thread.is_alive():
+            return True
+        from common.website_spool import acquire_bridge_lock
+        self.owner_lock = acquire_bridge_lock(self.root / ".supervisor.lock")
+        # Consumers read live credentials on every call, including after rotation.
+        os.environ["BINES_WEBSITE_BRIDGE_SPOOL"] = str(self.root)
+        self.cancel.clear()
+        self.thread = threading.Thread(target=self._run, name="WebsiteBridgeSupervisor", daemon=True)
+        self.thread.start()
+        return True
+
+    def _tick(self):
+        own_exited = self.bridge and self.bridge.process and self.bridge.process.poll() is not None
+        if not own_exited and self._healthy():
+            if not self.ready:
+                self.emit("网站浏览器 · 连接已就绪")
+            self.ready = True
+            return True
+        if self.ready:
+            self.emit("网站浏览器 · 连接中断，正在自动恢复")
+        self.ready = False
+        if self.bridge:
+            self.bridge.close()
+        self.bridge = WebsiteBridgeProcess()
+        # The worker lock is acquired before creating the browser service. It
+        # prevents a second bridge even when an older launcher holds runtime.lock.
+        self.bridge.start(managed=True)
+        if not self._healthy():
+            raise RuntimeError("网站浏览器桥尚未发布有效心跳")
+        self.ready = True
+        self.emit("网站浏览器 · 连接已恢复")
+        return True
+
+    def _run(self):
+        delay = self.retry_seconds
+        try:
+            while not self.cancel.is_set():
+                try:
+                    self._tick()
+                    delay = self.retry_seconds
+                    wait = self.check_seconds
+                except Exception as exc:
+                    # Do not log command lines, credentials or network URLs.
+                    self.emit(f"网站浏览器 · 暂不可用（{type(exc).__name__}），{delay:g} 秒后自动重试")
+                    if self.bridge:
+                        self.bridge.close()
+                        self.bridge = None
+                    wait = delay
+                    delay = min(delay * 2, self.max_retry_seconds)
+                self.cancel.wait(wait)
+        finally:
+            if self.bridge:
+                self.bridge.close()
+                self.bridge = None
+            if self.owner_lock:
+                self.owner_lock.close()
+                self.owner_lock = None
+
+    def close(self):
+        self.cancel.set()
+        if self.thread:
+            self.thread.join(timeout=25)
+        self.ready = False
+
+
+def main():
+    """Attach a supervisor to an already-running launcher without restarting QQ."""
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--supervise", action="store_true", required=True)
+    parser.add_argument("--parent-pid", type=int, default=0)
+    args = parser.parse_args()
+    from common.env import load_env
+    load_env()
+    supervisor = WebsiteBridgeSupervisor()
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: supervisor.cancel.set())
+    signal.signal(signal.SIGINT, lambda *_: supervisor.cancel.set())
+    try:
+        supervisor.start()
+        while supervisor.thread and supervisor.thread.is_alive():
+            if args.parent_pid:
+                try:
+                    os.kill(args.parent_pid, 0)
+                except OSError:
+                    break
+            supervisor.cancel.wait(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        supervisor.close()
+
+
+if __name__ == "__main__":
+    main()
