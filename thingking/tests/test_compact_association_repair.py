@@ -126,9 +126,34 @@ class CompactAssociationRepairTest(unittest.TestCase):
 
     def test_two_rejections_do_not_write_or_cache_any_partial_decisions(self):
         worker, prompts = self.worker([self.answer(self.decisions()[:1]), self.answer(self.wrong_evidence())])
-        with self.assertRaisesRegex(RuntimeError, "建联证据必须且只能来自双方授权材料"):
+        with self.assertRaisesRegex((RuntimeError, ValueError), "建联证据必须且只能来自双方授权材料"):
             self.run_worker(worker)
         self.assertEqual(len(prompts), 2)
+        self.assert_uncommitted()
+
+    def test_nonexistent_evidence_gets_explicit_pair_ids_before_fact_review(self):
+        invalid = self.decisions()
+        invalid[0]["links"][0]["evidence_ids"][1] = "t1e999"
+        worker, prompts = self.worker([self.answer(invalid), self.answer(self.decisions())])
+        self.run_worker(worker)
+        self.assert_repaired(prompts, "建联证据编号无效")
+        self.assertIn("逐候选可用证据编号", prompts[1][-1]["content"])
+        compact = self.claim["materials"]["compact"]
+        self.assertIn(compact["candidates"][0]["evidence"][0]["id"], prompts[1][-1]["content"])
+
+    def test_excess_valid_evidence_gets_count_feedback_and_completes(self):
+        invalid = self.decisions()
+        invalid[0]["links"][0]["evidence_ids"] *= 3
+        worker, prompts = self.worker([self.answer(invalid), self.answer(self.decisions())])
+        self.run_worker(worker)
+        self.assert_repaired(prompts, "建联证据数量无效")
+        self.assertIn("2到4", prompts[1][-1]["content"])
+
+    def test_server_rejects_excess_valid_evidence_with_count_error(self):
+        invalid = self.decisions()
+        invalid[0]["links"][0]["evidence_ids"] *= 3
+        with self.assertRaisesRegex(RuntimeError, "建联证据数量无效.*2到4"):
+            self.client.complete_association(self.claim["job"]["id"], [], decisions=invalid)
         self.assert_uncommitted()
 
     def test_feedback_requires_only_uncached_targets(self):

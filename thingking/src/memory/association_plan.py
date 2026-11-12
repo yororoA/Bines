@@ -34,7 +34,9 @@ SYSTEM = (
     "\"relation_type\":\"support|similar|event|cause|contradicts\","
     "\"direction\":\"bidirectional|source_to_target|target_to_source\","
     "\"confidence\":0.7,\"evidence_ids\":[\"se0\",\"t1e0\"]}。"
-    "evidence_ids必须分别来自source和该target；只返回编号，不复述证据。"
+    "每条关联的evidence_ids必须包含2到4个编号，分别来自source和该target。"
+    "通常双方各选一条最直接的证据；必要时最多4条，不把所有片段都列入。"
+    "只返回编号，不复述证据。"
     "共同词汇、相同工具动作、未知内容的图片、泛泛闲聊不足以关联；"
     "不同事件需有具体事实或明确变化。因果须有明确证据，冲突用contradicts。"
     "原文与其摘要不是独立支持。遵守corrections，reject_reason不得重建。"
@@ -72,6 +74,43 @@ def snippets(text, query, budget, count=2):
         if len(chosen) >= count or remaining <= 0:
             break
     return [part for _, part in sorted(chosen)]
+
+
+def validate_compact_decisions(data, compact):
+    """Catch malformed references before fact review; the server still authorizes."""
+    cards = {card["id"]: card for card in compact["candidates"]}
+    decisions = data.get("decisions")
+    if not isinstance(decisions, list):
+        raise ValueError("紧凑建联必须逐项返回 decisions 列表")
+    seen = set()
+    source_ids = {row["id"] for row in compact["source"]["evidence"]}
+    catalog = source_ids | {row["id"] for card in cards.values() for row in card["evidence"]}
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            raise ValueError("每个建联判断必须是对象")
+        alias = decision.get("target")
+        if not isinstance(alias, str) or alias not in cards or alias in seen:
+            raise ValueError("建联候选缺失、重复或越界")
+        seen.add(alias)
+        links = decision.get("links")
+        if not isinstance(links, list) or len(links) > 1:
+            raise ValueError("建联关联数量无效")
+        if decision.get("uncertain"):
+            if decision["uncertain"] is not True or links:
+                raise ValueError("未决关系不得同时提供关联")
+        target_ids = {row["id"] for row in cards[alias]["evidence"]}
+        for link in links:
+            ids = link.get("evidence_ids") if isinstance(link, dict) else None
+            allowed = source_ids | target_ids
+            if isinstance(ids, list) and not 2 <= len(ids) <= 4:
+                raise ValueError("建联证据数量无效；每条关联必须引用2到4条证据，分别来自source和当前target")
+            if (not isinstance(ids, list)
+                    or any(not isinstance(eid, str) or eid not in catalog for eid in ids)):
+                raise ValueError(f"建联证据编号无效；{alias} 可用 source={sorted(source_ids)}，target={sorted(target_ids)}")
+            if any(eid not in allowed for eid in ids) or not source_ids.intersection(ids) or not target_ids.intersection(ids):
+                raise ValueError("建联证据必须且只能来自双方授权材料")
+    if seen != set(cards):
+        raise ValueError("每个候选必须显式判断，遗漏不能视为无关联")
 
 
 class AssociationPlanner:
@@ -230,9 +269,15 @@ class AssociationPlanner:
                 if not isinstance(link, dict):
                     raise ValueError("建联关系必须是对象")
                 ids = link.get("evidence_ids")
-                if not isinstance(ids, list) or not 2 <= len(ids) <= 4 or any(
+                if isinstance(ids, list) and not 2 <= len(ids) <= 4:
+                    raise ValueError("建联证据数量无效；每条关联必须引用2到4条证据，分别来自source和当前target")
+                if not isinstance(ids, list) or any(
                         not isinstance(eid, str) or eid not in plan["catalog"] for eid in ids):
-                    raise ValueError("建联证据编号无效")
+                    source_ids = [eid for eid, entry in plan["catalog"].items()
+                                  if entry["node_id"] == plan["aliases"]["s"]]
+                    target_ids = [eid for eid, entry in plan["catalog"].items()
+                                  if entry["node_id"] == plan["aliases"][alias]]
+                    raise ValueError(f"建联证据编号无效；{alias} 可用 source={source_ids}，target={target_ids}")
                 evidence = [plan["catalog"][eid] for eid in ids]
                 if {e["node_id"] for e in evidence} != {plan["aliases"]["s"], plan["aliases"][alias]}:
                     raise ValueError("建联证据必须且只能来自双方授权材料")

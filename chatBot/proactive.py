@@ -15,7 +15,14 @@ from common.proactive import (
 log = logging.getLogger("bines.qq.proactive")
 
 _GATE_LABELS = {
-    "unavailable": "会话忙碌或连接不可用",
+    "unavailable": "通道暂不可用",
+    "disconnected": "QQ 连接断开",
+    "user_messages_pending": "用户消息待处理",
+    "autonomous_running": "自主任务执行中",
+    "autonomous_queued": "自主任务待执行",
+    "event_pending": "其他事件待处理",
+    "self_rest": "自主整体休息",
+    "generation_cooldown": "等待下次意图生成",
     "owner_paused": "主人暂停了自主活动",
     "activity_paused": "活动已暂停",
     "pending": "已有意图等待执行",
@@ -160,6 +167,7 @@ class QQProactive:
         self.policies = {}
         self.capabilities = None
         self._gate_logs = {}
+        self.states = store.autonomy_store()
 
     def _clock_text(self, timestamp):
         return datetime.fromtimestamp(timestamp, ZoneInfo(self.config.timezone)).strftime("%H:%M:%S")
@@ -168,9 +176,17 @@ class QQProactive:
         """门控变化时报告一次；持久化的等待在重启后也可见。"""
         state, gate = policy.state, policy.state.last_gate
         reason = gate.get("reason", "")
-        next_at = state.next_decision if reason == "decision_cooldown" else (
-            state.activity.get("next_at", 0) if reason == "model_selected_delay" else 0)
-        key = (reason, gate.get("planning_only"), tuple(gate.get("allowed_kinds") or []), next_at)
+        next_at = min((at for at in (state.next_decision, state.next_intention_at) if at > 0),
+                      default=0) if reason == "decision_cooldown" else (
+            state.activity.get("next_at", 0) if reason == "model_selected_delay" else
+            state.next_intention_at if reason == "generation_cooldown" else
+            state.intention_wait_until if reason == "self_rest" else 0)
+        availability = gate.get("availability") or {}
+        # Durations are displayed once, but do not make an unchanged gate noisy.
+        key = (reason, gate.get("planning_only"), tuple(gate.get("allowed_kinds") or []), next_at,
+               len(state.intention_queue), availability.get("connected"), tuple(
+                   (name, tuple((row["id"], row["status"]) for row in availability.get(name, [])))
+                   for name in ("user_messages", "autonomous_tasks", "other_events")))
         if self._gate_logs.get(conversation) == key:
             return
         self._gate_logs[conversation] = key
@@ -181,8 +197,17 @@ class QQProactive:
                 detail += " · " + _log_text(state.last_decision["reason"])
         elif reason == "startup_grace":
             detail = f" · {self.config.startup_grace:g}s 启动缓冲"
+        for name, label in (("user_messages", "用户消息"), ("autonomous_tasks", "自主任务"),
+                            ("other_events", "其他事件")):
+            rows = availability.get(name) or []
+            if rows:
+                working = sum(row["status"] == "working" for row in rows)
+                oldest = max(0, gate["at"] - min(row["received"] for row in rows))
+                detail += f" · {label} {working}执行/{len(rows) - working}排队 · 已等 {oldest:.0f}s"
         if state.contact_wait_until > gate.get("at", 0):
             detail += f" · 联系等待至 {self._clock_text(state.contact_wait_until)}"
+        if state.intention_queue:
+            detail += f" · 新意图待执行 {len(state.intention_queue)}"
         log.info("自主意图门控 · %s%s", _GATE_LABELS.get(reason, reason), detail)
 
     def _log_decision(self, policy, decision):
@@ -198,15 +223,18 @@ class QQProactive:
         if result.get("status") == "quiet" and result.get("wait_scope") == "contact" and not policy.state.planning_only:
             log.info("自主意图取舍 · 暂缓联系至 %s · %s · 其他活动下次 %s",
                      self._clock_text(policy.state.contact_wait_until),
-                     _log_text(result.get("reason")), self._clock_text(policy.state.next_decision))
+                     _log_text(result.get("reason")), self._clock_text(
+                         policy.state.next_intention_at or policy.state.next_decision))
             return
         log.info("自主意图取舍 · %s · %s · 下次 %s", label,
-                 _log_text(result.get("reason")), self._clock_text(policy.state.next_decision))
+                 _log_text(result.get("reason")), self._clock_text(
+                     policy.state.next_intention_at or policy.state.next_decision))
 
     def save(self, conversation, policy):
-        with self.store.connection() as db:
-            db.execute("INSERT OR REPLACE INTO proactive_sessions VALUES(?,?)",
-                       (conversation, json.dumps(policy.dump(), ensure_ascii=False)))
+        if not hasattr(policy, "_storage_revision"):
+            policy._storage_revision = self.store.proactive_state(conversation)[1]
+        policy._storage_revision = self.states.put(
+            "qq:" + conversation, policy.dump(), policy._storage_revision)
         from common.memory_journal import MemoryOutbox, MemoryJournal
         from chatBot.messages import Identity
         from chatBot.memory_hub import identity_envelope
@@ -238,23 +266,30 @@ class QQProactive:
         if policy.state.pending:
             return
         with self.store.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
             rows = db.execute(
                 "SELECT * FROM activity_handoffs WHERE conversation=? AND consumed=0 ORDER BY created,rowid",
                 (conversation,),
             ).fetchall()
             if not rows:
                 return
-            for row in rows:
+            remaining = rows
+            for index, row in enumerate(rows):
+                if row["turn_id"] == policy.state.handoff_ref:
+                    remaining = rows[index + 1:]
+                    break
+            for row in remaining:
                 checkpoint = json.loads(row["checkpoint"])
                 policy.accept_activity(checkpoint, now)
-            # Persist state and acknowledgment in one commit, even across a restart.
-            db.execute("INSERT OR REPLACE INTO proactive_sessions VALUES(?,?)",
-                       (conversation, json.dumps(policy.dump(), ensure_ascii=False)))
+            policy.state.handoff_ref = rows[-1]["turn_id"]
+        # Redis must commit first. A crash before SQLite acknowledgment is
+        # recovered using the persisted handoff_ref, without applying it twice.
+        self.save(conversation, policy)
+        with self.store.connection() as db:
             db.executemany("UPDATE activity_handoffs SET consumed=1 WHERE turn_id=?",
                            [(row["turn_id"],) for row in rows])
-        log.info("活动进度已接手 · %s · 第%s批", checkpoint.get("topic", ""),
-                 checkpoint.get("sequence", 0))
+        if remaining:
+            log.info("活动进度已接手 · %s · 第%s批", checkpoint.get("topic", ""),
+                     checkpoint.get("sequence", 0))
 
     def _recover(self, policy, now):
         candidate = policy.state.pending
@@ -365,32 +400,105 @@ class QQProactive:
                            ("uncertain" if interrupted else "skipped", candidate["id"]))
 
     def tick(self):
+        with self.states.scheduler("qq"):
+            self._tick()
+
+    def _generate_intention(self, policy, snapshot, identity, user, now, activity, conversation_activity):
+        """Only deliberate and persist a description; worker execution stays serial."""
+        from chatBot.memory_hub import identity_envelope
+        policy.defer_generation(now)
+        self.save(identity.conversation, policy)
+        permissions = policy.contact_permissions(now, user, activity, last_reply_at=conversation_activity)
+        memory_context = self.memory.build_context(
+            identity_envelope(identity), query=policy.deliberation_query(
+                user, contact_allowed=permissions["owner_contact_allowed"], life=snapshot.get("life")))
+        materials = {
+            "envelope": memory_context.get("envelope") or identity_envelope(identity),
+            "recent": memory_context.get("working", [])[-12:],
+            "memories": memory_context.get("recalled", [])[:5],
+            "profile": memory_context.get("profile") or {},
+            "bridge": memory_context.get("bridge"),
+            "expression_notes": memory_context.get("expression_notes") or [],
+            "state": memory_context.get("state") or {},
+            "life": compact_life(memory_context.get("life") or snapshot.get("life")),
+            "activity": dict(policy.state.activity),
+            "ongoing_intention": {key: policy.state.pending.get(key) for key in ("kind", "topic", "intent")},
+            "queued_intentions": policy.queued_intentions(),
+            "waiting_intentions": policy.waiting_intentions(),
+            "planning_only": policy.state.planning_only, **permissions,
+        }
+        if self.capabilities is None:
+            self.capabilities = capability_summary("QQ")
+        materials["available_skills"] = self.capabilities
+        if policy.appraisal_due(human_ref(user), now):
+            policy.appraise(self.appraise(materials, policy.state, now), human_ref(user), now)
+            self.save(identity.conversation, policy)
+        kinds = policy.eligible_kinds(now, user, activity, last_reply_at=conversation_activity)
+        decision = self.decide(materials, policy.state, now, capabilities="QQ", allowed_kinds=kinds)
+        decision = policy.record_decision(decision, now)
+        if decision and decision["kind"] not in kinds:
+            policy.state.last_decision.update(status="disallowed_kind", proposed=decision)
+            decision = None
+        if decision and policy.enqueue_intention(decision, self.clock()):
+            self._log_decision(policy, decision)
+            log.info("自主意图已入队 · %s · 只保存目标，等待执行通道", decision["topic"])
+        else:
+            result = policy.state.last_decision
+            policy.defer_generation(self.clock(), result.get("delay_seconds", self.config.decision_interval),
+                                    wait_scope=result.get("wait_scope", "review"))
+            self._log_decision(policy, None)
+        policy.state.next_intention_at = max(policy.state.next_intention_at,
+                                            self.clock() + self.config.decision_interval)
+        self.save(identity.conversation, policy)
+
+    def _tick(self):
         now = self.clock()
         snapshot = self.memory.activity_snapshot()
         central = snapshot.get("last_owner_activity") or {}
         activity = max(owner_activity(self.store), float(central.get("ts") or 0))
-        health = self.client.request("/health", {})
+        try:
+            health = self.client.request("/health", {})
+        except Exception:
+            health = {}
         connected = isinstance(health, dict) and health.get("connected") is True
         for user, original, identity in latest_private(self.store):
             conversation = identity.conversation
             policy = self.policies.get(conversation)
-            if policy is None:
-                with self.store.connection() as db:
-                    row = db.execute("SELECT value FROM proactive_sessions WHERE conversation=?", (conversation,)).fetchone()
+            saved, revision = self.store.proactive_state(conversation)
+            if policy is None or getattr(policy, "_storage_revision", revision) != revision:
                 policy = self.policies[conversation] = ProactivePolicy(
-                    now, self.config, json.loads(row["value"]) if row else None,
+                    now, self.config, saved,
                 )
+                policy._storage_revision = revision
+            else:
+                policy._storage_revision = revision
             self.recover(policy, now)
             self.consume_handoffs(conversation, policy, now)
             with self.store.connection() as db:
-                busy = db.execute(
-                    "SELECT 1 FROM events WHERE conversation=? AND status IN ('pending','working')",
+                queued = db.execute(
+                    "SELECT id,raw,status,received FROM events WHERE conversation=? AND status IN ('pending','working')",
                     (conversation,),
-                ).fetchone() is not None
+                ).fetchall()
                 last = db.execute("SELECT MAX(ts) ts FROM messages WHERE conversation=?", (conversation,)).fetchone()
             conversation_activity = max(activity, float(last["ts"] or 0))
+            availability = {"connected": connected, "user_messages": [],
+                            "autonomous_tasks": [], "other_events": []}
+            for row in queued:
+                kind = json.loads(row["raw"]).get("post_type")
+                name = ("user_messages" if kind == "message" else
+                        "autonomous_tasks" if kind == "bines_proactive" else "other_events")
+                availability[name].append({"id": row["id"], "status": row["status"],
+                                           "received": float(row["received"] or now)})
+            busy = bool(queued)
+            running = any(row["status"] == "working" for row in availability["autonomous_tasks"])
+            reason = ("disconnected" if not connected else
+                      "user_messages_pending" if availability["user_messages"] else
+                      "autonomous_running" if running else
+                      "autonomous_queued" if availability["autonomous_tasks"] else
+                      "event_pending" if busy else "")
             ready = policy.tick(
                 now, user, available=connected and not busy,
+                availability_reason=reason, availability_details=availability,
                 last_activity=activity, last_reply_at=conversation_activity,
                 followup_after_reply=not busy,
                 relationship_score=(snapshot.get("state") or {}).get("relationship_score", 0),
@@ -398,63 +506,21 @@ class QQProactive:
             )
             self.save(conversation, policy)  # Save observation even during cooldown/quiet.
             self._log_gate(conversation, policy)
-            if not ready:
+            if policy.generation_due(now, available=connected, user_pending=bool(availability["user_messages"])):
+                log.info("自主意图生成开始 · %s · 执行通道%s",
+                         "内部思考" if policy.state.planning_only else "独立取舍",
+                         "占用中，目标可排队" if busy or policy.state.pending else "空闲")
+                self._generate_intention(policy, snapshot, identity, user, now, activity, conversation_activity)
+            if not ready or self.clock() < policy.state.intention_wait_until:
                 continue
-            log.info("自主意图取舍开始 · %s · 可选 %s",
-                     "内部思考" if policy.state.planning_only else "自主行动",
-                     "/".join(policy.state.last_gate.get("allowed_kinds") or []))
-            policy.defer(now)  # Failed model calls also back off, rather than retrying every tick.
-            self.save(conversation, policy)
-            from chatBot.memory_hub import identity_envelope
-            continuing = policy.state.activity.get("mode") in {"continue", "review"}
-            memory_context = (snapshot if continuing else self.memory.build_context(
-                identity_envelope(identity), query=policy.deliberation_query(user,
-                    contact_allowed=policy.contact_permissions(
-                        now, user, activity, last_reply_at=conversation_activity)["owner_contact_allowed"],
-                    life=snapshot.get("life"))))
-            materials = {
-                "envelope": memory_context.get("envelope") or identity_envelope(identity),
-                "recent": memory_context.get("working", [])[-12:],
-                "memories": memory_context.get("recalled", [])[:5],
-                "profile": memory_context.get("profile") or {},
-                "bridge": memory_context.get("bridge"),
-                "expression_notes": memory_context.get("expression_notes") or [],
-                "state": memory_context.get("state") or {},
-                "life": compact_life(memory_context.get("life") or snapshot.get("life")),
-                "activity": dict(policy.state.activity),
-                "waiting_intentions": policy.waiting_intentions(),
-                "planning_only": policy.state.planning_only,
-                **policy.contact_permissions(now, user, activity, last_reply_at=conversation_activity),
-            }
-            if self.capabilities is None:
-                self.capabilities = capability_summary("QQ")
-            materials["available_skills"] = self.capabilities
-            needs_appraisal = (policy.appraisal_due(human_ref(user), now)
-                               and (not continuing or bool(policy.state.emotion_at)
-                                    or getattr(policy.state, "interest_reappraisal_pending", False)))
-            if needs_appraisal:
-                appraisal = self.appraise(materials, policy.state, now)
-                policy.appraise(appraisal, human_ref(user), now)
-                self.save(conversation, policy)
-            kinds = policy.eligible_kinds(now, user, activity, last_reply_at=conversation_activity)
-            saved_activity = policy.state.activity
-            continuing = saved_activity.get("mode") in {"continue", "review"}
-            if continuing:
-                decision = {"kind": saved_activity["kind"], "topic": saved_activity["topic"],
-                            "intent": saved_activity["intent"], "reason": saved_activity["reason"]}
-            else:
-                decision = self.decide(materials, policy.state, now, capabilities="QQ", allowed_kinds=kinds)
-                decision = policy.record_decision(decision, now)
-            if decision and not continuing and decision["kind"] not in kinds:
-                policy.state.last_decision.update(status="disallowed_kind", proposed=decision)
-                decision = None
+            decision, saved_activity = policy.select_intention(
+                self.clock(), user, activity, last_reply_at=conversation_activity)
+            continuing = bool(saved_activity)
             if not decision:
-                policy.defer(self.clock(), policy.state.last_decision.get("delay_seconds"),
-                             wait_scope=policy.state.last_decision.get("wait_scope", "all"))
                 self.save(conversation, policy)
-                self._log_decision(policy, None)
                 continue
-            self._log_decision(policy, decision)
+            if continuing:
+                self._log_decision(policy, decision)
             event_id = "proactive:" + uuid.uuid4().hex
             candidate = {**decision, "id": event_id, "based_on_user": human_ref(user),
                          "activity_at": activity, "reply_at": conversation_activity, "timestamp": self.clock(),
@@ -462,10 +528,11 @@ class QQProactive:
                          "planning_only": policy.state.planning_only,
                          "activity": dict(saved_activity) if continuing else {},
                          "emotion": dict(policy.state.emotion), "willingness": dict(policy.state.drives),
-                         "life": materials["life"]}
+                         "life": compact_life(snapshot.get("life"))}
             event = {"post_type": "bines_proactive", "self_id": original["self_id"],
                      "user_id": original["user_id"], "message_type": "private",
                      "sender": original.get("sender") or {}, "event_id": event_id, "proactive": candidate}
+            self.states.assert_lease()
             with self.store.connection() as db:
                 db.execute("INSERT INTO proactive_runs(id,conversation,candidate) VALUES(?,?,?)",
                            (event_id, conversation, json.dumps(candidate, ensure_ascii=False)))
@@ -482,6 +549,7 @@ class QQProactive:
             else:
                 policy.reserve(candidate)
                 self.save(conversation, policy)  # Reserve durably before exposing the event.
+                self.states.assert_lease()
                 with self.store.connection() as db:
                     db.execute("INSERT INTO events(id,conversation,raw,received) VALUES(?,?,?,?)",
                                (event_id, conversation, json.dumps(event, ensure_ascii=False), self.clock()))
@@ -500,6 +568,9 @@ class QQProactive:
                 # A failed observation never contributes elapsed time on recovery.
                 for policy in self.policies.values():
                     policy.last_tick = self.clock()
+                from common.autonomy_store import AutonomyStoreError
+                if isinstance(exc, AutonomyStoreError):
+                    self.policies.clear()
                 # 记忆服务短暂不可用时别让检查每两秒刷一屏同样的告警。
                 failures += 1
                 delay = min(60, 2 ** min(failures, 6))

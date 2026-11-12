@@ -408,12 +408,20 @@ class MemoryWorker:
         # Retry a rejected model answer once, never an ambiguous RPC outcome.
         remote_validation = ("Memory Server complete_association failed: ValueError:", "ValueError:")
         targets = json.dumps([card["id"] for card in compact["candidates"]], ensure_ascii=False)
+        from .association_plan import validate_compact_decisions
+        evidence_map = json.dumps({
+            card["id"]: {
+                "source": card.get("source_evidence_ids") or [row["id"] for row in compact["source"]["evidence"]],
+                "target": [row["id"] for row in card["evidence"]],
+            } for card in compact["candidates"]
+        }, ensure_ascii=False)
         for attempt in range(2):
             raw = self._model_call(self.association_complete_text, messages)
             try:
                 data = _state_changes(raw)
                 if not isinstance(data.get("decisions"), list):
                     raise ValueError("紧凑建联必须逐项返回 decisions 列表，links 不能代替候选判断")
+                validate_compact_decisions(data, compact)
             except ValueError as exc:
                 validation_error = exc
             else:
@@ -437,6 +445,8 @@ class MemoryWorker:
                     "本次必须判断的 target：" + targets + "。"
                     "decisions 必须覆盖上方 candidates 的每个 target，且各有一条判断。"
                     "evidence_ids 必须且只能引用 source 和对应 target 展示的真实编号。"
+                    "每条关联只引用2到4个编号，通常双方各选一条最直接证据；不能列出全部片段。"
+                    "逐候选可用证据编号：" + evidence_map + "。"
                     "无关系用 links=[]；证据不足用 links=[]、uncertain=true，不能遗漏候选。"
                 )},
             ])

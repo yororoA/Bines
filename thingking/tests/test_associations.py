@@ -276,7 +276,8 @@ class AssociationTest(unittest.TestCase):
 
     def test_worker_association_real_dispatch_and_idempotency(self):
         self.raw("蓝色围巾")
-        self.raw("蓝色围巾赠送约定")
+        self.drain_associations()
+        source = self.raw("蓝色围巾赠送约定")
         class Client:
             def claim_job(inner, **params):
                 return self.service.claim_job(**params)
@@ -289,11 +290,16 @@ class AssociationTest(unittest.TestCase):
             return json.dumps({"prior": .7, "decisions": [
                 {"target": card["id"], "links": []} for card in materials["candidates"]]})
         worker = MemoryWorker(Client(), model, lambda: "")
-        self.assertTrue(worker.run_once())
-        self.assertEqual(self.repo.conn.execute("SELECT ready,prior FROM association_nodes").fetchone()[1], .7)
+        self.assertTrue(worker.run_once(kinds=[JOB_ASSOCIATE]))
+        # A negative decision on excerpted evidence first requests expansion.
+        self.assertTrue(worker.run_once(kinds=[JOB_ASSOCIATE]))
+        row = self.repo.conn.execute("SELECT ready,prior FROM association_nodes WHERE id=?",
+                                    (source["id"],)).fetchone()
+        self.assertEqual(tuple(row), (1, .7))
         self.repo.conn.execute("UPDATE jobs SET status='done' WHERE kind='summarize'")
-        self.assertTrue(worker.run_once())
         self.assertFalse(worker.run_once())
+        self.assertEqual(tuple(self.repo.conn.execute(
+            "SELECT ready,prior FROM association_nodes WHERE id=?", (source["id"],)).fetchone()), (1, .7))
 
     def test_prompt_budget_records_only_presented_spans(self):
         import prompt_builder

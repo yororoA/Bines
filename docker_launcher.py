@@ -26,10 +26,10 @@ IMAGE_HASH_LABEL = "io.bines.source-hash"
 BUILD_SERVICES = {"chatbot": "bines-launcher:local", "memory-server": "bines-thinking:local"}
 
 REQUIRED_SERVICES = {
-    "chatbot": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
-    "full": ("napcat", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
+    "chatbot": ("napcat", "redis", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
+    "full": ("napcat", "redis", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
 }
-HEALTH_REQUIRED = {"chatbot", "memory-server", "rag-web", "napcat", "qq-thinking", "memory-worker"}
+HEALTH_REQUIRED = {"redis", "chatbot", "memory-server", "rag-web", "napcat", "qq-thinking", "memory-worker"}
 
 
 class DockerError(RuntimeError):
@@ -440,6 +440,8 @@ def cleanup_images() -> None:
 
 
 def up(profile: str) -> None:
+    from common.autonomy_store import prepare_redis
+    prepare_redis(ROOT / "thingking" / "memory_data")
     stale = _stale_services()
     if stale:
         print("源码有更新，正在构建：" + ", ".join(stale), flush=True)

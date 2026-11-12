@@ -651,7 +651,9 @@ class Integration(unittest.TestCase):
                 [{"role": "user", "content": "测试"}], bot.runner, source="QQ", allowed_skills=["napcat"],
             )
         self.assertEqual(text, "重新说明一下")
-        self.assertIn("有效的 JSON", seen[1][-1]["content"])
+        tool_result = next(message for message in seen[1]
+                           if message.get("role") == "tool" and message.get("tool_call_id") == "invalid")
+        self.assertIn("有效的 JSON", tool_result["content"])
         self.assertFalse(self.api.calls)
 
     def test_owner_group_raw_api_preserves_all_native_media_segments(self):

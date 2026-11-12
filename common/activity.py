@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 import re
 import time
+from functools import lru_cache
 
-from common.website_spool import atomic_write_json
+from common.autonomy_store import AutonomyStore, legacy_json
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,18 +19,40 @@ def control_path():
 
 
 def activity_control():
-    try:
-        data = json.loads(control_path().read_text())
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    # An unavailable store must never be interpreted as the owner's permission.
+    return activity_store().get("control", seed=lambda: legacy_json(control_path()))[0]
+
+
+def activity_store():
+    return _activity_store(
+        str(control_path().parent), os.getenv("BINES_AUTONOMY_BACKEND", "redis"),
+        os.getenv("BINES_AUTONOMY_REDIS_URL", ""), os.getenv("BINES_AUTONOMY_PREFIX", "bines:autonomy:"),
+        os.getenv("BINES_AUTONOMY_SQLITE_PATH", ""),
+    )
+
+
+@lru_cache(maxsize=16)
+def _activity_store(directory, backend, url, prefix, sqlite_path):
+    return AutonomyStore(directory=directory, backend=backend, url=url or None,
+                         prefix=prefix, sqlite_path=sqlite_path or None)
+
+
+def desktop_state():
+    return activity_store().get(
+        "desktop", seed=lambda: legacy_json(control_path().parent / "proactive_desktop.json"))
+
+
+def desktop_handoff():
+    return activity_store().get(
+        "desktop_handoff", seed=lambda: legacy_json(control_path().parent / "desktop_activity_handoff.json"))[0]
 
 
 def set_owner_control(mode, reason=""):
     if mode not in {"pause", "resume", "stop"}:
         raise ValueError("mode 必须是 pause、resume 或 stop")
     data = {"mode": mode, "reason": str(reason)[:500], "updated_at": time.time()}
-    atomic_write_json(control_path(), data)
+    activity_store().update("control", lambda old: data,
+                            seed=lambda: legacy_json(control_path()))
     return data
 
 
@@ -107,43 +130,18 @@ def complete_activity(context, candidate, outcomes, text="", *, ordinary=False):
 
 
 def desktop_activity():
-    directory = control_path().parent
-    def read(name):
-        try:
-            return json.loads((directory / name).read_text())
-        except (OSError, ValueError):
-            return {}
-    state = read("proactive_desktop.json")
-    handoff = read("desktop_activity_handoff.json")
+    state = desktop_state()[0]
+    handoff = desktop_handoff()
     if handoff.get("id") and handoff["id"] != state.get("handoff_ref"):
         return handoff.get("activity") or {}
     return state.get("activity") or {}
 
 
 def save_desktop_handoff(turn_id, checkpoint):
-    directory = control_path().parent
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "desktop_activity_handoff.json"
-    # The desktop scheduler and conversation process have separate lifetimes.
-    # Keep every unacknowledged goal, including across two quick owner turns.
-    with (directory / "desktop_activity_handoff.lock").open("a+b") as lock:
-        if os.name == "nt":
-            import msvcrt
-            lock.write(b"\0"); lock.flush(); lock.seek(0)
-            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            saved = json.loads(path.read_text())
-        except (OSError, ValueError):
-            saved = {}
-        try:
-            acknowledged = json.loads((directory / "proactive_desktop.json").read_text()).get("handoff_ref")
-        except (OSError, ValueError):
-            acknowledged = None
+    def append(saved):
+        acknowledged = desktop_state()[0].get("handoff_ref")
         if turn_id == acknowledged:
-            return
+            return saved
         entries = saved.get("handoffs") or ([{"id": saved["id"], "activity": saved["activity"]}] if saved.get("id") else [])
         for index, entry in enumerate(entries):
             if entry["id"] == acknowledged:
@@ -151,14 +149,13 @@ def save_desktop_handoff(turn_id, checkpoint):
                 break
         if not any(entry["id"] == turn_id for entry in entries):
             entries.append({"id": turn_id, "activity": checkpoint})
-        atomic_write_json(path, {**entries[-1], "handoffs": entries})
+        return {**entries[-1], "handoffs": entries}
+    activity_store().update("desktop_handoff", append,
+                            seed=lambda: legacy_json(control_path().parent / "desktop_activity_handoff.json"))
 
 
 def consume_desktop_handoff(policy):
-    try:
-        handoff = json.loads((control_path().parent / "desktop_activity_handoff.json").read_text())
-    except (OSError, ValueError):
-        return False
+    handoff = desktop_handoff()
     if policy.state.pending or not handoff.get("id") or handoff["id"] == policy.state.handoff_ref:
         return False
     entries = handoff.get("handoffs") or [handoff]

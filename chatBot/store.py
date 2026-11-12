@@ -407,6 +407,7 @@ class MemoryStore:
 
     def current_activity(self, conversation):
         """Include a finished owner turn that the scheduler has not consumed yet."""
+        state = self.proactive_state(conversation)[0]
         with self.connection() as db:
             row = db.execute(
                 "SELECT checkpoint FROM activity_handoffs WHERE conversation=? AND consumed=0 "
@@ -415,8 +416,6 @@ class MemoryStore:
             if row:
                 checkpoint = json.loads(row["checkpoint"])
                 return {} if checkpoint.get("mode") == "finish" else checkpoint
-            row = db.execute("SELECT value FROM proactive_sessions WHERE conversation=?", (conversation,)).fetchone()
-            state = json.loads(row["value"]) if row else {}
             pending = state.get("pending") or {}
             turn = db.execute("SELECT payload FROM turns WHERE id=? AND status='done'",
                               (pending.get("id"),)).fetchone() if pending else None
@@ -427,6 +426,20 @@ class MemoryStore:
                 return {**checkpoint, "kind": pending["kind"], "topic": pending["topic"],
                         "reason": pending["reason"], "contact_allowed": pending.get("contact_allowed", True)}
         return state.get("activity") or {}
+
+    def autonomy_store(self):
+        from common.autonomy_store import AutonomyStore
+        if not hasattr(self, "_autonomy_store"):
+            self._autonomy_store = AutonomyStore(sqlite_path=Path(self.path).with_suffix(".autonomy.db"))
+        return self._autonomy_store
+
+    def proactive_state(self, conversation):
+        def legacy():
+            with self.connection() as db:
+                row = db.execute("SELECT value FROM proactive_sessions WHERE conversation=?",
+                                 (conversation,)).fetchone()
+            return json.loads(row["value"]) if row else {}
+        return self.autonomy_store().get("qq:" + conversation, seed=legacy)
 
     def drop_turn(self, turn_id):
         """Forget an interrupted turn that never dispatched a write."""

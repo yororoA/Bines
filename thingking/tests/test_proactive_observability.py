@@ -72,7 +72,7 @@ class ProactiveObservabilityTest(unittest.TestCase):
             scheduler.tick()
         self.assertTrue(any("选择等待" in line and "刚说完" in line and "下次" in line
                             for line in captured.output))
-        waits = [line for line in captured.output if "等待下次取舍" in line]
+        waits = [line for line in captured.output if "等待下次意图生成" in line]
         self.assertEqual(len(waits), 1)
 
     def test_restart_reports_persisted_wait_without_calling_decision_provider(self):
@@ -82,12 +82,13 @@ class ProactiveObservabilityTest(unittest.TestCase):
         policy.state.next_decision = self.fx.clock() + 900
         policy.state.followup_review_ref = human_ref(self.user)
         policy.state.last_decision = {"status": "quiet", "reason": "上一轮选择等待", "wait_scope": "all"}
+        policy.defer_generation(self.fx.clock(), 900, wait_scope="all")
         scheduler.save(self.identity.conversation, policy)
         scheduler.policies.clear()
         with self.assertLogs("bines.qq.proactive", level="INFO") as captured:
             scheduler.tick()
         decide.assert_not_called()
-        self.assertTrue(any("等待下次取舍" in line and "上一轮选择等待" in line
+        self.assertTrue(any("自主整体休息" in line and "上一轮选择等待" in line
                             for line in captured.output))
 
     def test_selected_intent_reports_goal_and_forwards_samples_to_deliberation(self):
@@ -275,7 +276,11 @@ class ContactWaitPolicyTest(unittest.TestCase):
             with self.subTest(options=options, changes=changes):
                 policy = ProactivePolicy(self.now, self.config, self.legacy_wait(**changes))
                 self.assertFalse(policy.tick(self.now + 60, self.user, **options))
-                self.assertEqual(policy.state.next_decision, self.now + 900)
+                if changes.get("activity"):
+                    self.assertTrue(any(a.get("mode") == "pause" for a in policy.state.waiting_activities.values()))
+                    self.assertLessEqual(policy.state.next_decision, self.now + 120)
+                else:
+                    self.assertEqual(policy.state.next_decision, self.now + 900)
                 self.assertEqual(policy.state.contact_wait_until, 0)
                 self.assertTrue(policy.state.wait_scope_review_pending)
         policy = ProactivePolicy(self.now, self.config, self.legacy_wait())
@@ -366,7 +371,7 @@ class ContactWaitPolicyTest(unittest.TestCase):
             parsed = inspect_decision(json.dumps({"should_act": False, "wait_scope": scope,
                                                  "reason": "等一会", "delay_seconds": 900}))
             self.assertEqual(parsed["wait_scope"], scope)
-        self.assertEqual(inspect_decision('{"should_act":false}')["wait_scope"], "all")
+        self.assertEqual(inspect_decision('{"should_act":false}')["wait_scope"], "review")
         self.assertEqual(inspect_decision('{"should_act":false,"wait_scope":"whatever"}')["status"], "invalid")
         self.policy.defer(self.now, 900)
         self.assertFalse(self.policy.tick(self.now + 60, self.user))

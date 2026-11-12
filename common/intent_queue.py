@@ -49,9 +49,8 @@ def advance(state, now, interval):
     if state.pending:
         return  # Never change focus while a worker owns the candidate.
     current = state.activity
-    # Zero-delay pauses are manual/uncertain-result barriers, not timers.
-    if current.get("mode") == "pause" and not current.get("delay_seconds"):
-        return
+    # A manual/uncertain pause protects this goal, not every other intention.
+    # It remains parked until explicit permission or a resolved receipt.
     due_waiting = any(now >= float(a.get("next_at") or 0)
                       and not (a.get("mode") == "pause" and not a.get("delay_seconds"))
                       for a in state.waiting_activities.values())
@@ -89,3 +88,48 @@ def cards(state, limit=8):
                   key=lambda a: (float(a.get("next_at") or 0), identity(a)))
     return [{k: a.get(k) for k in ("id", "kind", "topic", "intent", "mode", "next_at")}
             for a in rows[:limit]]
+
+
+def same_goal(first, second):
+    """A broad interest can contain different goals; only equal intents collide."""
+    from common.proactive import topic_key
+    intent = topic_key(str(first.get("intent") or ""))
+    return bool(intent) and first.get("kind") == second.get("kind") and (
+        intent == topic_key(str(second.get("intent") or "")))
+
+
+def proposals(state, now, user_ref, ttl=21600):
+    state.intention_queue = [
+        row for row in state.intention_queue
+        if now - float(row.get("created_at") or 0) < ttl
+        and (row.get("kind") != "connection" or row.get("user_ref") == user_ref)
+    ]
+    return state.intention_queue
+
+
+def enqueue(state, decision, now):
+    if any(same_goal(decision, existing) for existing in [
+        state.pending, state.activity, *state.waiting_activities.values(), *state.intention_queue,
+    ]):
+        return False
+    if len(state.intention_queue) >= 8:
+        return False
+    state.intention_queue.append({
+        **decision, "created_at": now, "user_ref": state.user_ref,
+    })
+    return True
+
+
+def take(state, kinds, now):
+    """Only descriptions are queued; actual tool authority is rebuilt at dispatch."""
+    from common.proactive import inspect_decision
+    for row in list(state.intention_queue):
+        inspected = inspect_decision(json.dumps({**row, "should_act": True}),
+                                     recent_intents=state.recent_intents, now=now)
+        if inspected.get("status") != "selected":
+            state.intention_queue.remove(row)
+            continue
+        if row.get("kind") in kinds:
+            state.intention_queue.remove(row)
+            return inspected["decision"]
+    return None

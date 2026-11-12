@@ -10,14 +10,52 @@ x-timezone: &bines-timezone
   TZ: ${BINES_MEMORY_TIMEZONE:-Asia/Shanghai}
   BINES_MEMORY_TIMEZONE: ${BINES_MEMORY_TIMEZONE:-Asia/Shanghai}
 
+x-autonomy: &bines-autonomy
+  BINES_AUTONOMY_BACKEND: ${BINES_AUTONOMY_BACKEND:-redis}
+  BINES_AUTONOMY_REDIS_URL: redis://redis:6379/0
+  BINES_AUTONOMY_PREFIX: ${BINES_AUTONOMY_PREFIX:-bines:autonomy:}
+
 services:
   gateway-init:
     image: bines-launcher:local
     user: "0:0"
-    command: ["sh", "-c", "chown -R ${BINES_UID:-1000}:${BINES_GID:-1000} /app/gateway_data && chmod -R u+rwX,go-rwx /app/gateway_data"]
+    command: ["sh", "-c", "chown -R ${BINES_UID:-1000}:${BINES_GID:-1000} /app/gateway_data /data && chmod -R u+rwX,go-rwx /app/gateway_data /data"]
     restart: "no"
     volumes:
       - bines-gateway:/app/gateway_data
+      - type: volume
+        source: bines-autonomy
+        target: /data
+        volume:
+          nocopy: true
+
+  redis:
+    image: ${BINES_REDIS_IMAGE:-docker.m.daocloud.io/library/redis:7.4-alpine}
+    logging: *bines-logging
+    restart: unless-stopped
+    user: "${BINES_UID:-1000}:${BINES_GID:-1000}"
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "127.0.0.1:${BINES_AUTONOMY_REDIS_PORT:-6380}:6379"
+    volumes:
+      - type: volume
+        source: bines-autonomy
+        target: /data
+        volume:
+          nocopy: true
+      - ../../thingking/memory_data/autonomy_redis.conf:/usr/local/etc/redis/redis.conf:ro
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
+    networks:
+      - bines
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "export REDISCLI_AUTH=$$(awk '/^requirepass / {print $$2}' /usr/local/etc/redis/redis.conf); test \"$$(redis-cli ping)\" = PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   napcat:
     image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
@@ -71,7 +109,7 @@ services:
       - path: ../../.env
         required: false
     environment:
-      <<: *bines-timezone
+      <<: [*bines-timezone, *bines-autonomy]
       PYTHONFAULTHANDLER: "1"
       BINES_PROFILE: ${BINES_PROFILE:-chatbot}
       BINES_MEMORY_BACKEND: ${BINES_MEMORY_BACKEND:-remote}
@@ -97,6 +135,8 @@ services:
         condition: service_healthy
       gateway-init:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     networks:
       - bines
     healthcheck:
@@ -116,7 +156,7 @@ services:
       - path: ../../.env
         required: false
     environment:
-      <<: *bines-timezone
+      <<: [*bines-timezone, *bines-autonomy]
       BINES_PROFILE: ${BINES_PROFILE:-chatbot}
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_GATEWAY_DIR: /app/gateway_data
@@ -150,7 +190,7 @@ services:
       - path: ../../.env
         required: false
     environment:
-      <<: *bines-timezone
+      <<: [*bines-timezone, *bines-autonomy]
       BINES_PROFILE: ${BINES_PROFILE:-chatbot}
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_QQ_GATEWAY_URL: http://chatbot:6102
@@ -205,7 +245,7 @@ services:
       - path: ../../.env
         required: false
     environment:
-      <<: *bines-timezone
+      <<: [*bines-timezone, *bines-autonomy]
       BINES_DOCKER_MODE: "1"
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_MEMORY_BIND_HOST: 0.0.0.0
@@ -221,6 +261,8 @@ services:
       - ../../thingking/data:/app/thingking/data:ro
     depends_on:
       qdrant:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - bines
@@ -241,7 +283,7 @@ services:
       - path: ../../.env
         required: false
     environment:
-      <<: *bines-timezone
+      <<: [*bines-timezone, *bines-autonomy]
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_ZMQ_HOST: memory-server
       BINES_HTTP_HOST: 0.0.0.0
@@ -272,3 +314,5 @@ volumes:
     name: bines-gateway
   bines-qdrant:
     name: bines-qdrant
+  bines-autonomy:
+    name: bines-autonomy

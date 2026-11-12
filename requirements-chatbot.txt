@@ -4,6 +4,7 @@ openai>=1.50,<3
 requests>=2.32,<3
 PyYAML>=6,<7
 tzdata>=2025.1
+redis>=5,<7
 Pillow>=12.1,<13
 # Optional generic MCP + NapCat stdio; matches existing Ark adapter.
 mcp==2.3.0

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from common.activity import complete_activity, save_desktop_handoff, consume_desktop_handoff
+from common.activity import complete_activity, save_desktop_handoff, consume_desktop_handoff, activity_store, desktop_handoff
 from common.proactive import ProactiveConfig, ProactivePolicy
 from tools.context import ToolContext
 
@@ -112,8 +112,9 @@ class IntentQueueTest(unittest.TestCase):
 
     def test_manual_verification_still_requires_owner_resume(self):
         self.policy.accept_activity(self.checkpoint(delay_seconds=0), self.now)
-        self.assertFalse(self.policy.tick(self.now+10000, self.user))
-        self.assertEqual(self.policy.state.activity["mode"], "pause")
+        self.assertTrue(self.policy.tick(self.now+10000, self.user))
+        self.assertFalse(self.policy.state.activity)
+        self.assertEqual(next(iter(self.policy.state.waiting_activities.values()))["mode"], "pause")
         with patch("common.activity.activity_control", return_value={"mode": "resume", "updated_at": self.now+10001}):
             self.assertTrue(self.policy.tick(self.now+10002, self.user))
         self.assertEqual(self.policy.state.activity["mode"], "review")
@@ -157,9 +158,9 @@ class IntentQueueTest(unittest.TestCase):
             self.assertTrue(consume_desktop_handoff(self.policy))
             self.assertEqual(self.policy.state.activity["id"], "B")
             self.assertIn("A", self.policy.state.waiting_activities)
-            (Path(temp)/"proactive_desktop.json").write_text(json.dumps(self.policy.dump()))
+            activity_store().update("desktop", lambda old: self.policy.dump())
             save_desktop_handoff("turn:C", self.checkpoint("C"))
-            stored = json.loads((Path(temp)/"desktop_activity_handoff.json").read_text())
+            stored = desktop_handoff()
             self.assertEqual([h["id"] for h in stored["handoffs"]], ["turn:C"])
             restored = ProactivePolicy(self.now, self.config, self.policy.dump())
             self.assertTrue(consume_desktop_handoff(restored))

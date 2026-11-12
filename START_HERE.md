@@ -128,6 +128,10 @@ python bines.py --console
 
 - 无论完整模式还是纯 QQ 模式，**RAG Server** 都独占 `thingking/memory_data/memory.db` 和 `index/`（可重建的 Chroma 索引），桌面客户端直接使用 `5560`；QQ 客户端经 ChatBot 网关转发到同一个 RAG Server。Docker 中 ChatBot 显式使用 `BINES_MEMORY_BACKEND=remote`，即使 Memory Server 仍在加载模型也不会回退到内置检索，避免两个进程同时写同一个库；启动最多等待 `BINES_MEMORY_READY_TIMEOUT`（默认 300 秒）。`--host --profile chatbot` 且本机没有 RAG Server 时才使用内置词面检索。
 - QQ 原始消息、事件队列和发送回执保存在独立的 `gateway.db`，提交成功后同步到记忆库。Docker 中该数据库位于独立命名卷 `bines-gateway`（`BINES_GATEWAY_DIR=/app/gateway_data`），避免多个容器在 macOS bind mount 上并发访问 SQLite 导致 Bus error；宿主机模式仍默认放在 `thingking/memory_data`。启动时自动识别旧 NapCat `memory.db` 的表结构并迁移到 `gateway.db`，不会覆盖新版库；同步可恢复且去重。
+- 自主意图状态（冷却、权重、兴趣、待执行意图、活动进度、桌面交接和主人暂停控制）在 Docker 模式使用 Redis，数据保存在独立的 `bines-autonomy` 卷，启用 AOF 与逐次同步。启动器自动生成私有凭据并迁移旧 `proactive_sessions` 和 JSON 文件；旧资料保留但不再写入。QQ 事件与回执继续使用 `gateway.db` 的事务。Redis 不可用时暂停自主调度，恢复后重新加载；不会静默切换后端或重放不确定操作。
+- Redis 宿主端口默认为 `127.0.0.1:6380`，容器内为 `redis:6379`。完整 Docker 模式下宿主桌面调度也连接此 Redis。纯 `--host` 模式未配置时使用 SQLite 数据库；可通过 `BINES_AUTONOMY_BACKEND=redis` 和 `BINES_AUTONOMY_REDIS_URL` 指定 Redis。直接使用 Compose 前先运行 `python -m common.autonomy_store` 准备配置，并将 `BINES_UID` / `BINES_GID` 设置为数据文件的属主；统一启动器自动完成这些步骤。
+- QQ 自主门控日志分别显示“自主任务执行中”“自主任务待执行”“用户消息待处理”“QQ 连接断开”；同时有多种阻塞时保留队列数量和持续时间，只有状态变化才再次打印。
+- 自主意图生成与执行使用独立时钟：执行某个活动时仍可产生其他目标，最多保存 8 个待执行意图；执行通道空闲后，新目标与未完成活动在批次边界轮流获得机会。暂停、人工验证和不确定回执只保留对应目标的障碍。模型本轮没有新目标使用 `review`，仅等联系使用 `contact`，明确整体休息才使用 `all`；主人暂停/停止、安静时段、联系权限和回执保护仍生效。
 - 本机与 `BINES_OWNER_QQ_IDS` 显式绑定的主人私聊共享 owner 记忆和状态；其他私聊按机器人账号与用户隔离，群聊按账号与群号隔离，个人状态再按发言人区分。群管理员角色不赋予主人身份。
 - 动态状态按真实新消息由独立 Memory Worker 在后台更新，不再等到累计 40 条消息触发摘要。普通问候、记忆查询和假设不改变好感度；明确情感事件才使用小幅增量。状态任务完成和写库在同一事务中提交，重试不重复加分；消息撤回或同消息手动更新后取消自动任务。群聊个人状态按群和用户保存，不改主人私聊状态。
 - 记忆召回采用“原始事件＋派生检索键”：`messages`/`memories` 保存原文，`retrieval_keys` 保存可重建的片段、上下文、实体和关键词；中文 FTS5 与向量通道分别排名，再用 RRF 融合并按主题覆盖重排。每个结果带 `evidence`，优先回指原始消息；只有找不到原文的旧数据才标记为摘要或旧版记忆。`BINES_MEMORY_CANDIDATES` 控制候选数，`BINES_MEMORY_RERANKER` 可挂载本地 CrossEncoder。

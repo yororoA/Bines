@@ -38,12 +38,12 @@ DOCKER_DESKTOP_MAC_URLS = {
 }
 PROFILES = {"chatbot": ("launcher",), "full": tuple(ENVIRONMENTS)}
 IMPORTS = {
-    "launcher": ("flask", "zmq", "requests", "websocket", "openai", "yaml", "mcp"),
+    "launcher": ("flask", "zmq", "requests", "websocket", "openai", "yaml", "mcp", "redis"),
     "server": ("PyQt6.QtCore", "PyQt6.QtWidgets", "zmq", "requests", "PIL"),
     # PyAutoGUI opens a display at import time: check its distribution separately.
     "thinking": ("flask", "zmq", "websocket", "openai", "mcp", "PIL", "numpy",
                  "cv2", "mss", "imagehash", "pytesseract", "chromadb", "langchain_huggingface",
-                 "sentence_transformers", "torch"),
+                 "sentence_transformers", "torch", "redis"),
     "visual": ("cv2", "numpy", "PIL", "zmq", "requests", "insightface", "onnxruntime"),
     "hearing": ("funasr", "pyaudio", "numpy", "zmq", "librosa", "resemblyzer", "torch", "torchaudio"),
     "singing": ("audio_separator.separator", "pedalboard", "pyloudnorm", "soundfile", "imageio_ffmpeg",
@@ -786,6 +786,8 @@ class Installer:
         from docker_launcher import (
             _environment, build_command, cleanup_build_cache, cleanup_images, ensure_builder, ensure_engine,
         )
+        from common.autonomy_store import prepare_redis
+        prepare_redis(self.root / "thingking" / "memory_data")
 
         try:
             ensure_engine(timeout=self.options.docker_download_timeout)

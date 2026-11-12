@@ -219,6 +219,12 @@ class ProactiveState:
     next_decision: float = 0
     contact_wait_until: float = 0  # Model-selected contact wait, independent of activity reviews.
     wait_scope_review_pending: bool = False  # One review when upgrading an unscoped legacy wait.
+    next_intention_at: float = 0  # Model cadence is independent of execution/waiting goals.
+    intention_queue: list = field(default_factory=list)
+    intention_wait_until: float = 0  # Only an explicit whole-self rest blocks generation.
+    intention_wait_revision: int = 0
+    intention_wait_user_ref: str = ""
+    last_intention_origin: str = ""  # Alternate existing activity and fresh queued goals.
     sent_user_ref: str = ""
     sent_at: float = 0
     feedback_done: bool = True
@@ -319,6 +325,70 @@ class ProactivePolicy:
         from common.intent_queue import cards
         return cards(self.state)
 
+    def queued_intentions(self):
+        return [{key: row.get(key) for key in ("kind", "topic", "intent", "reason", "created_at")}
+                for row in self.state.intention_queue]
+
+    def generation_due(self, now, *, available=True, user_pending=False):
+        from common.activity import activity_control
+        state, config = self.state, self.config
+        control = activity_control()
+        if control.get("mode") in {"pause", "stop"} or not available or user_pending:
+            return False
+        if state.last_gate.get("reason") == "new_user_observed":
+            return False
+        if now - self.started < config.startup_grace or now < state.next_intention_at:
+            return False
+        if now < state.intention_wait_until:
+            return False
+        if (state.planning_only and state.rest_review_at > 0
+                and now < state.rest_review_at + config.rest_interval):
+            return False
+        return len(state.intention_queue) < 8
+
+    def defer_generation(self, now, delay=None, *, wait_scope="review"):
+        state = self.state
+        state.next_intention_at = now + self.config.decision_interval
+        if delay is None:
+            return  # Persist the model cadence before I/O, without pausing execution.
+        if wait_scope == "all":
+            self.defer(now, delay, wait_scope="all")
+            state.intention_wait_until = state.next_decision
+            state.intention_wait_revision = state.outcome_revision
+            state.intention_wait_user_ref = state.user_ref
+            state.next_intention_at = state.next_decision
+        elif wait_scope == "contact":
+            execution_at = state.next_decision
+            self.defer(now, delay, wait_scope="contact")
+            if state.activity or state.pending:
+                state.next_decision = execution_at
+            # Repeating a contact wait cannot turn into an independent-thinking wait.
+            state.next_intention_at = now + self.config.decision_interval
+        elif state.planning_only:
+            self.defer(now, delay)
+            state.next_intention_at = state.next_decision
+
+    def enqueue_intention(self, decision, now):
+        from common.intent_queue import enqueue
+        return enqueue(self.state, decision, now)
+
+    def take_intention(self, now, user, last_activity=0, *, last_reply_at=0):
+        from common.intent_queue import take
+        kinds = self.eligible_kinds(now, user, last_activity, last_reply_at=last_reply_at)
+        return take(self.state, kinds, now)
+
+    def select_intention(self, now, user, last_activity=0, *, last_reply_at=0):
+        active = self.state.activity
+        active_due = (active.get("mode") in {"continue", "review"}
+                      and now >= float(active.get("next_at") or 0))
+        if not (active_due and self.state.last_intention_origin == "new"):
+            decision = self.take_intention(now, user, last_activity, last_reply_at=last_reply_at)
+            if decision:
+                return decision, {}
+        if active_due:
+            return {key: active[key] for key in ("kind", "topic", "intent", "reason")}, dict(active)
+        return None, {}
+
     def appraise(self, appraisal, ref, now):
         if not appraisal:
             return
@@ -388,10 +458,10 @@ class ProactivePolicy:
         """Validate injected decision providers as well as the default model parser."""
         previous = self.state.last_decision
         if decision:
-            for waiting in self.state.waiting_activities.values():
-                if (waiting.get("kind") == decision.get("kind") and any(
-                        topic_key(str(waiting.get(key) or "")) == topic_key(str(decision.get(key) or ""))
-                        and topic_key(str(waiting.get(key) or "")) for key in ("topic", "intent"))):
+            from common.intent_queue import same_goal
+            for waiting in [self.state.pending, self.state.activity,
+                            *self.state.waiting_activities.values(), *self.state.intention_queue]:
+                if same_goal(waiting, decision):
                     self.state.last_decision = {"status": "waiting_duplicate", "at": now,
                         "reason": "该意图已保存并等待唤醒，不重复创建", "activity_id": waiting.get("id")}
                     return None
@@ -400,8 +470,8 @@ class ProactivePolicy:
             self.state.last_decision = {**result, "at": now}
             return result.get("decision")
         if previous.get("at") != now:
-            self.state.last_decision = {"status": "quiet_or_unavailable",
-                                        "reason": "未产生候选意图", "at": now}
+            self.state.last_decision = {"status": "quiet_or_unavailable", "delay_seconds": self.config.decision_interval,
+                                        "wait_scope": "review", "reason": "未产生候选意图", "at": now}
         return None
 
     def _feedback(self, delay):
@@ -428,7 +498,8 @@ class ProactivePolicy:
         return (["connection"] if contact else []) + (["curiosity", "initiative"] if independent else [])
 
     def tick(self, now, user, *, last_activity=0, last_reply_at=0, available=True,
-             followup_after_reply=False, relationship_score=0, life=None):
+             followup_after_reply=False, relationship_score=0, life=None,
+             availability_reason="", availability_details=None):
         state, config = self.state, self.config
         delta = max(0, min(30, now - self.last_tick))
         self.last_tick = now
@@ -440,6 +511,11 @@ class ProactivePolicy:
         if control.get("mode") == "stop":
             state.activity = {}
             state.waiting_activities = {}
+            state.intention_queue = []
+        if control.get("mode") == "resume":
+            for saved in state.waiting_activities.values():
+                if (saved.get("mode") == "pause" and control.get("updated_at", 0) > saved.get("updated_at", 0)):
+                    saved.update(mode="review", next_at=now)
         if (state.activity.get("mode") == "pause" and control.get("mode") == "resume"
                 and control.get("updated_at", 0) > state.activity.get("updated_at", 0)):
             state.activity.update(mode="review", next_at=now)
@@ -467,6 +543,14 @@ class ProactivePolicy:
                 review_at = max(now + config.followup_delay,
                                 state.last_review_at + config.decision_interval)
                 state.next_decision = min(state.next_decision or review_at, review_at)
+        from common.intent_queue import proposals
+        proposals(state, now, ref)
+        changed_rest_context = (state.intention_wait_revision != state.outcome_revision
+                                or state.intention_wait_user_ref != ref)
+        if state.intention_wait_until and changed_rest_context:
+            state.intention_wait_until = 0
+            state.next_intention_at = min(state.next_intention_at, now + config.decision_interval)
+            state.next_decision = min(state.next_decision, now + config.decision_interval)
         if state.sent_at and not state.feedback_done and now - state.sent_at >= 3600:
             self._feedback(3600)
         # Emotions relax towards neutral over four hours, including across restart.
@@ -499,6 +583,8 @@ class ProactivePolicy:
         kinds = self.eligible_kinds(now, user, float(last_activity or 0), last_reply_at=last_reply_at)
         if (state.wait_scope_review_pending and not state.planning_only
                 and not state.activity and not state.pending
+                and not any(a.get("mode") == "pause" and not a.get("delay_seconds")
+                            for a in state.waiting_activities.values())
                 and control.get("mode") not in {"pause", "stop"}):
             state.wait_scope_review_pending = False
             if now < state.next_decision:
@@ -518,22 +604,31 @@ class ProactivePolicy:
         followup_due = (followup_after_reply and not state.activity and not state.planning_only
                         and ref != state.followup_review_ref and "connection" in kinds
                         and recent_conversation(now, user, config))
+        if (followup_due and available and not state.pending and now >= state.intention_wait_until
+                and control.get("mode") not in {"pause", "stop"}):
+            state.next_intention_at = min(state.next_intention_at, now)
         reason = next((label for blocked, label in (
-            (not available, "unavailable"),
+            (not available, availability_reason or "unavailable"),
             (control.get("mode") in {"pause", "stop"}, "owner_paused"),
             (state.activity.get("mode") == "pause", "activity_paused"),
             (bool(state.pending), "pending"),
             (changed, "new_user_observed"),
             (now - idle_since < (0 if continuing else config.thinking_idle), "not_idle"),
             (not continuing and now - self.started < config.startup_grace, "startup_grace"),
-            (now < state.next_decision and not followup_due, "decision_cooldown"),
+            (now < state.intention_wait_until, "self_rest"),
+            (not continuing and not state.intention_queue and now < state.next_intention_at,
+             "generation_cooldown"),
+            (now < state.next_decision and not followup_due
+             and not state.intention_queue, "decision_cooldown"),
             (state.planning_only and state.rest_review_at > 0
              and now < state.rest_review_at + config.rest_interval, "rest_review_cooldown"),
-            (continuing and now < state.activity.get("next_at", 0), "model_selected_delay"),
+            (continuing and now < state.activity.get("next_at", 0)
+             and not state.intention_queue, "model_selected_delay"),
             (not continuing and not kinds, "no_allowed_kind"),
         ) if blocked), "")
         state.last_gate = {"reason": reason or ("planning_opportunity" if state.planning_only else "opportunity"),
-                           "at": now, "planning_only": state.planning_only, "allowed_kinds": kinds}
+                           "at": now, "planning_only": state.planning_only, "allowed_kinds": kinds,
+                           "availability": availability_details or {}}
         if not reason and followup_due:
             # Persist before calling the model so silence/restarts do not turn
             # the same inbound message into repeated follow-up evaluations.
@@ -563,6 +658,9 @@ class ProactivePolicy:
 
     def reserve(self, candidate):
         self.state.pending = dict(candidate)
+        self.state.last_intention_origin = "activity" if candidate.get("activity") else "new"
+        if not candidate.get("activity") and self.state.activity:
+            self.state.activity["mode"] = "review"  # Another goal may change physical page/app state.
         if candidate.get("planning_only"):
             self.state.rest_review_at = float(candidate["timestamp"])
 
@@ -642,7 +740,9 @@ class ProactivePolicy:
         else:
             from common.intent_queue import adopt
             adopt(state, {"id": (candidate.get("activity") or {}).get("id") or candidate["id"], "mode": "finish"})
-            state.next_decision = now + self.config.decision_interval
+            # A finished behavior releases the executor. The separate model
+            # clock still prevents tight loops when no queued goal exists.
+            state.next_decision = now if delivered else now + self.config.decision_interval
 
 
 def parse_decision(text, previous_topics=()):
@@ -664,9 +764,9 @@ def inspect_decision(text, *, recent_intents=None, now=0):
         return {"status": "invalid", "reason": "should_act必须为布尔值"}
     if not data["should_act"]:
         delay = number(data.get("delay_seconds"), 300, 30, 3600)
-        wait_scope = data.get("wait_scope", "all")
-        if wait_scope not in ("all", "contact"):
-            return {"status": "invalid", "reason": "等待范围必须是all或contact"}
+        wait_scope = data.get("wait_scope", "review")
+        if wait_scope not in ("all", "contact", "review"):
+            return {"status": "invalid", "reason": "等待范围必须是all、contact或review"}
         return {"status": "quiet", "reason": str(data.get("reason") or "选择保持安静")[:300],
                 "delay_seconds": delay, "wait_scope": wait_scope}
     kind, topic = data.get("kind"), data.get("topic")
@@ -737,6 +837,9 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
         "也可以自然聊自己的新想法；不要为了补齐上一轮答复继续解释、总结或布置下一步，"
         "也不把吃饭、休息和报平安反复当作催办目标。对方的最新明确说法优先于旧日状态。"
         "waiting_intentions 是独立保存的等待活动，不占用当前思考；不要换措辞重复新建这些目标。"
+        "ongoing_intention 是正在执行的目标，queued_intentions 是已产生而尚未执行的目标。"
+        "执行通道被占用不妨碍产生其他真实意图；当前只选择新的目标，不调用工具或抢占正在执行的动作。"
+        "同一兴趣中可以有不同的具体目标，不因为刚做过一件事就把整类兴趣排除。"
         "等待对方回复时可以考虑其他真实兴趣，也可以安静，不需要守着同一话题反复确认等待。"
         "不继续发消息不等于停止自己的生活；可以读点感兴趣的资料、看内容、整理想法或继续未完成的活动，"
         "有想做的事就选择curiosity或initiative，依据现有能力和精力执行，不需要向对方播报。"
@@ -754,15 +857,17 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
         "输出JSON：{\"should_act\":true或false,\"kind\":\"connection|curiosity|initiative\","
         "\"topic\":\"具体主题\",\"intent\":\"想做的具体目标，执行时可选择工具和消息组合\","
         "\"reason\":\"自身兴趣、观察或时间情绪的具体理由\",\"delay_seconds\":300,"
-        "\"wait_scope\":\"all|contact\"}。"
+        "\"wait_scope\":\"review|all|contact\"}。"
         "不行动时should_act=false，说明原因及等待间隔30–3600秒。"
         "wait_scope=contact表示仅暂缓联系主人：delay_seconds只用于联系等待，其他活动会按正常节奏另作取舍；"
         "只是等回复、让对方忙或想暂停接话时用contact，不因此暂停独立活动。"
-        "wait_scope=all表示自己也想休息、发呆或暂时没有其他兴趣，全部自主取舍等待该间隔。"
+        "wait_scope=review表示这轮没有新的目标，按正常思考节奏下次再看，不暂停已有目标。"
+        "wait_scope=all仅表示明确选择整体休息，暂时暂停所有自主取舍；"
+        "刚完成一个目标、没有想出新的目标、某个工具不可用、等回复都不自动等于整体休息。"
         "owner_contact_wait_until是本轮真实的联系等待截止时间，其他行动不解除它；"
         "联系已在等待或connection不在allowed_kinds时，本次只判断独立活动，"
         "不用重新决定是否等回复，也不要延长原联系截止时间。"
-        "如果这时自己也没有想做的事，用all说明自己的等待间隔；"
+        "如果这时没有新的具体目标，用review；只有自己确实想整体休息才选择all；"
         "到时只是允许重新考虑联系，不要求发消息。planning_only时仍遵守休息阶段的取舍间隔。",
         {"context": context, "willingness": state.drives, "emotion": state.emotion,
          "interests": state.interests, "previous_topics": state.topics,

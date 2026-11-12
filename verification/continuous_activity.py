@@ -75,7 +75,9 @@ class ContinuousPolicyTests(unittest.TestCase):
         }, [])
         self.policy.reserve(self.candidate)
         self.policy.resolve(self.now, delivered=True, activity=checkpoint)
-        self.assertFalse(self.policy.tick(self.now + 5000, self.user))
+        self.assertTrue(self.policy.tick(self.now + 5000, self.user))
+        self.assertEqual(self.policy.select_intention(self.now + 5000, self.user), (None, {}))
+        self.assertTrue(any(a.get("mode") == "pause" for a in self.policy.state.waiting_activities.values()))
         with patch("common.activity.activity_control", return_value={
             "mode": "resume", "updated_at": self.now + 5001,
         }):
@@ -88,9 +90,11 @@ class ContinuousPolicyTests(unittest.TestCase):
         self.policy.reserve(self.candidate)
         self.policy.resolve(self.now, uncertain=True, activity=checkpoint)
         restored = ProactivePolicy(self.now + 5000, self.config, self.policy.dump())
-        self.assertFalse(restored.tick(self.now + 5001, self.user))
-        self.assertEqual(restored.state.activity["intent"], "核对页面和原回执")
-        self.assertEqual(restored.state.activity["delay_seconds"], 0)
+        self.assertTrue(restored.tick(self.now + 5001, self.user))
+        self.assertEqual(restored.select_intention(self.now + 5001, self.user), (None, {}))
+        saved = next(iter(restored.state.waiting_activities.values()))
+        self.assertEqual(saved["intent"], "核对页面和原回执")
+        self.assertEqual(saved["delay_seconds"], 0)
 
 
 class ContinuousToolTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 """Authenticated loopback capability gateway. Only this process owns OneBot."""
 import json
+import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from chatBot.config import GATEWAY_HOST, GATEWAY_PORT, gateway_token
 from chatBot.messages import LOCAL_IDENTITY
@@ -211,8 +212,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def respond(self, code, data):
         payload = json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (ConnectionError, TimeoutError):
+            # The handler may already have committed an operation receipt.
+            # A lost HTTP response is neither a failed action nor a new 503.
+            self.close_connection = True
+            logging.getLogger("bines.gateway").debug("客户端已断开，HTTP %s 回包未送达", code)

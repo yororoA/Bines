@@ -167,6 +167,9 @@ def main():
         if not options.host and not options.external_napcat and docker_launcher.available():
             print(f"Bines · Docker · {options.profile}", flush=True)
             return _run_docker(options)
+        if not os.getenv("BINES_AUTONOMY_BACKEND"):
+            backend = "redis" if os.getenv("BINES_AUTONOMY_REDIS_URL") else "sqlite"
+            os.environ["BINES_AUTONOMY_BACKEND"] = backend
         print(f"Bines · 宿主机 · {options.profile}", flush=True)
         return _run_host(options)
     finally:
