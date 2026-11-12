@@ -216,6 +216,7 @@ class ProactiveState:
     value: float = 0  # Compatibility/status: maximum current willingness, not an elapsed timer.
     next_decision: float = 0
     contact_wait_until: float = 0  # Model-selected contact wait, independent of activity reviews.
+    wait_scope_review_pending: bool = False  # One review when upgrading an unscoped legacy wait.
     sent_user_ref: str = ""
     sent_at: float = 0
     feedback_done: bool = True
@@ -262,6 +263,12 @@ class ProactiveState:
         if (data and "uncertain_contact_ref" not in data and state.sent_user_ref
                 and any(item.get("outcome") == "uncertain" for item in state.recent_outcomes)):
             state.uncertain_contact_ref = state.sent_user_ref
+        if (data and "wait_scope_review_pending" not in data
+                and state.last_decision.get("status") == "quiet"
+                and "wait_scope" not in state.last_decision):
+            # Old silence combined contact and activity waits. Do not infer its
+            # meaning from the model's prose; request one fresh independent review.
+            state.wait_scope_review_pending = True
         return state
 
 
@@ -435,6 +442,7 @@ class ProactivePolicy:
                     self._feedback(reply_ts - state.sent_at)
             state.user_ref = ref
             state.contact_wait_until = 0  # A real incoming message ends this conversational wait.
+            state.wait_scope_review_pending = False
             if ref != state.uncertain_contact_ref:
                 state.uncertain_contact_ref = ""
             # Conversation provides material and engagement instead of draining
@@ -473,6 +481,18 @@ class ProactivePolicy:
         for kind in DRIVES:
             state.drives[kind] += (targets[kind] - state.drives[kind]) * alpha
         kinds = self.eligible_kinds(now, user, float(last_activity or 0), last_reply_at=last_reply_at)
+        if (state.wait_scope_review_pending and not state.planning_only
+                and not state.activity and not state.pending
+                and control.get("mode") not in {"pause", "stop"}):
+            state.wait_scope_review_pending = False
+            if now < state.next_decision:
+                # Preserve the old contact deadline while reopening only the
+                # opportunity to consider other activities under the new policy.
+                state.contact_wait_until = max(state.contact_wait_until, state.next_decision)
+                state.followup_review_ref = state.user_ref
+                state.next_decision = min(state.next_decision, max(
+                    now + config.decision_interval, state.last_review_at + config.decision_interval))
+                kinds = self.eligible_kinds(now, user, float(last_activity or 0), last_reply_at=last_reply_at)
         state.value = max((state.drives[k] for k in kinds), default=0) * 100
         idle_since = max(float((user or {}).get("ts") or 0), float(last_activity or 0), last_reply_at)
         continuing = bool(state.activity) and state.activity.get("mode") in {"continue", "review"}
@@ -507,6 +527,7 @@ class ProactivePolicy:
 
     def defer(self, now, delay=None, *, wait_scope="all"):
         self.state.last_review_at = now
+        self.state.wait_scope_review_pending = False
         delay = self.config.decision_interval if delay is None else delay
         if self.state.planning_only:
             delay = max(delay, self.config.rest_interval)

@@ -79,7 +79,7 @@ class ProactiveObservabilityTest(unittest.TestCase):
         policy = scheduler.policies[self.identity.conversation]
         policy.state.next_decision = self.fx.clock() + 900
         policy.state.followup_review_ref = human_ref(self.user)
-        policy.state.last_decision = {"status": "quiet", "reason": "上一轮选择等待"}
+        policy.state.last_decision = {"status": "quiet", "reason": "上一轮选择等待", "wait_scope": "all"}
         scheduler.save(self.identity.conversation, policy)
         scheduler.policies.clear()
         with self.assertLogs("bines.qq.proactive", level="INFO") as captured:
@@ -194,6 +194,70 @@ class ContactWaitPolicyTest(unittest.TestCase):
         self.assertEqual(self.policy.state.last_gate["allowed_kinds"], ["curiosity", "initiative"])
         self.assertEqual(self.policy.state.contact_wait_until, self.now + 900)
         self.assertIn("connection", self.policy.eligible_kinds(self.now + 900, self.user))
+
+    def legacy_wait(self, **changes):
+        # Emulate the actual pre-upgrade JSON, without the new persisted fields.
+        return {"user_ref": "owner:1", "next_decision": self.now + 900,
+                "last_review_at": self.now - 300,
+                "last_decision": {"status": "quiet", "reason": "没有联系，也暂时没有别的兴趣",
+                                  "delay_seconds": 900, "at": self.now - 300},
+                **changes}
+
+    def test_legacy_wait_gets_one_independent_review_without_reopening_contact(self):
+        policy = ProactivePolicy(self.now, self.config, self.legacy_wait())
+        self.assertFalse(policy.tick(self.now, self.user, followup_after_reply=True))
+        self.assertEqual(policy.state.next_decision, self.now + 60)
+        self.assertEqual(policy.state.contact_wait_until, self.now + 900)
+        for offset in (2, 20, 59):
+            self.assertFalse(policy.tick(self.now + offset, self.user, followup_after_reply=True))
+        restored = ProactivePolicy(self.now + 20, self.config, policy.dump())
+        self.assertFalse(restored.state.wait_scope_review_pending)
+        self.assertFalse(restored.tick(self.now + 59, self.user, followup_after_reply=True))
+        self.assertEqual(restored.state.next_decision, self.now + 60)
+        self.assertTrue(restored.tick(self.now + 60, self.user, followup_after_reply=True))
+        self.assertEqual(restored.state.last_gate["allowed_kinds"], ["curiosity", "initiative"])
+        # A fresh all-activity rest after that review is never migrated again.
+        restored.state.last_decision = {"status": "quiet", "wait_scope": "all", "reason": "想休息"}
+        restored.defer(self.now + 60, 900)
+        again = ProactivePolicy(self.now + 61, self.config, restored.dump())
+        self.assertFalse(again.tick(self.now + 899, self.user, followup_after_reply=True))
+        self.assertEqual(again.state.next_decision, self.now + 960)
+
+    def test_legacy_migration_preserves_sleep_pause_and_worker_lease(self):
+        for options, changes in (
+            ({"life": {"phase": "resting"}}, {}),
+            ({}, {"pending": {"id": "worker-owned"}}),
+            ({}, {"activity": {"mode": "pause", "delay_seconds": 0, "next_at": self.now + 900}}),
+        ):
+            with self.subTest(options=options, changes=changes):
+                policy = ProactivePolicy(self.now, self.config, self.legacy_wait(**changes))
+                self.assertFalse(policy.tick(self.now + 60, self.user, **options))
+                self.assertEqual(policy.state.next_decision, self.now + 900)
+                self.assertEqual(policy.state.contact_wait_until, 0)
+                self.assertTrue(policy.state.wait_scope_review_pending)
+        policy = ProactivePolicy(self.now, self.config, self.legacy_wait())
+        with patch("common.activity.activity_control", return_value={"mode": "pause"}):
+            self.assertFalse(policy.tick(self.now + 60, self.user))
+            self.assertTrue(policy.state.wait_scope_review_pending)
+            self.assertEqual(policy.state.next_decision, self.now + 900)
+
+    def test_scoped_rest_and_completed_legacy_wait_do_not_get_extra_reviews(self):
+        data = self.legacy_wait()
+        data["last_decision"]["wait_scope"] = "all"
+        policy = ProactivePolicy(self.now, self.config, data)
+        self.assertFalse(policy.state.wait_scope_review_pending)
+        self.assertFalse(policy.tick(self.now + 60, self.user))
+        self.assertEqual(policy.state.next_decision, self.now + 900)
+        finished = ProactivePolicy(self.now, self.config, self.legacy_wait(next_decision=self.now - 1))
+        self.assertTrue(finished.tick(self.now, self.user))
+        self.assertEqual(finished.state.contact_wait_until, 0)
+        self.assertFalse(finished.state.wait_scope_review_pending)
+        incoming = ProactivePolicy(self.now, self.config, self.legacy_wait())
+        reply = {**self.user, "id": "owner:2", "ts": self.now}
+        self.assertFalse(incoming.tick(self.now, reply, available=False))
+        self.assertFalse(incoming.state.wait_scope_review_pending)
+        self.assertEqual(incoming.state.contact_wait_until, 0)
+        self.assertTrue(incoming.contact_permissions(self.now + 60, reply)["owner_contact_allowed"])
 
     def test_contact_wait_survives_restart_and_new_reply_reopens_normal_conversation(self):
         self.policy.defer(self.now, 900, wait_scope="contact")
