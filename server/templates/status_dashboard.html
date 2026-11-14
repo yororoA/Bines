@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bines · 状态总览</title>
+  <link rel="stylesheet" href="{{ url_for('status_dashboard.static', filename='status_dashboard.css') }}">
+</head>
+<body>
+  <header><a class="brand" href="/status"><span class="brand-mark">B</span><span>Bines<small>状态与记忆</small></span></a>
+    <nav aria-label="管理导航"><a href="/status" aria-current="page">状态总览</a><a data-port="MODULE_MANAGER" href="/">模块管理 ↗</a><a data-port="RAG_MEMORY" href="/">记忆库 ↗</a><a data-port="RAG_MEMORY" data-path="/constellation" href="/constellation">记忆星图 ↗</a></nav>
+  </header>
+  <main>
+    <section class="page-heading"><div><p class="eyebrow">BINES / OVERVIEW</p><h1>此刻的 Bines</h1><p class="muted">生命节律、运行服务和记忆维护，在一处查看。</p></div>
+      <div class="refresh-area"><button id="refresh" type="button">刷新状态</button><label><input id="auto-refresh" type="checkbox" checked> 每 15 秒更新</label><span class="muted" id="updated-at">正在读取…</span></div></section>
+    <div id="page-error" class="notice" role="alert" hidden></div>
+    <section id="health-cards" class="health-grid" aria-label="连接概况" aria-live="polite"></section>
+    <div class="dashboard-grid">
+      <section class="panel life-panel"><div class="section-heading"><h2>生命与节律</h2><span id="life-phase" class="pill">未知</span></div><div id="life-content" class="placeholder">正在读取生命状态…</div></section>
+      <section class="panel"><div class="section-heading"><h2>动态状态</h2><span class="muted">管理员作用域</span></div><div id="state-content" class="placeholder">正在读取动态状态…</div></section>
+      <section class="panel"><div class="section-heading"><h2>记忆与检索</h2><a data-port="RAG_MEMORY" href="/">打开记忆库 ↗</a></div><div id="memory-content" class="placeholder">正在读取记忆统计…</div></section>
+      <section class="panel"><div class="section-heading"><h2>任务与消息</h2><span class="muted">持久队列</span></div><div id="queue-content" class="placeholder">正在读取任务状态…</div></section>
+      <section class="panel full-width"><div class="section-heading"><h2>模型用量</h2><span class="muted">最近 24 小时 · 服务返回的 token 统计</span></div><div id="usage-content" class="placeholder">正在读取模型用量…</div></section>
+      <section class="panel full-width"><div class="section-heading"><h2>服务运行</h2><a data-port="MODULE_MANAGER" href="/">管理进程与日志 ↗</a></div><div id="services-content" class="placeholder">正在读取服务状态…</div></section>
+      <section id="memory-transfer" class="panel full-width migration-panel"><div class="section-heading"><div><p class="eyebrow">MEMORY / TRANSFER</p><h2>把记忆带到下一台设备</h2></div><button id="download-bundle" class="primary" type="button">下载完整记忆包</button></div>
+        <p>完整记忆包用于备份与迁移，保留数据库里的记忆、会话、关联和状态。记忆库原有的 JSON 导出适合阅读与分析，不能代替完整备份。</p>
+        <p class="muted">迁移包包含私人记忆，请妥善保管。包内不含人格定义、配置、凭据、QQ 网关数据库、自主 Redis 运行状态、媒体及可重建索引；目标设备需另行配置。恢复前先校验，再在停止记忆服务后导入。</p>
+        <div class="transfer-steps"><div><strong>1. 校验迁移包</strong><code id="inspect-command">python thingking/memory_admin.py inspect-bundle bines-memory.zip</code></div><div><strong>2. 导入到新目录</strong><code id="restore-command">python thingking/memory_admin.py import-bundle bines-memory.zip --target-dir /path/to/new-memory</code></div></div>
+        <div class="bundle-inspect"><label for="bundle-file">校验已有迁移包</label><input id="bundle-file" type="file" accept=".zip,application/zip"><button id="inspect-bundle" type="button">校验文件</button><span class="muted">仅校验，最多 512 MiB；不会导入或覆盖当前记忆。</span></div>
+        <pre id="bundle-inspection" hidden></pre>
+        <p id="bundle-message" class="muted" role="status"></p>
+      </section>
+    </div>
+    <footer>连接状态表示本次探测结果；未接入的组件显示“未知”，不会记为正常。</footer>
+  </main>
+  <script id="dashboard-config" type="application/json">{{ ports | tojson }}</script>
+  <script src="{{ url_for('status_dashboard.static', filename='status_dashboard.js') }}"></script>
+</body>
+</html>

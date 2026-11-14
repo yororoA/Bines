@@ -1875,9 +1875,11 @@ class MemoryService:
                 "SELECT e.* FROM experiences e JOIN memories m ON m.id=e.memory_id WHERE m.deleted=0")
             if not scopes or row["scope"] in scopes
         ]
+        include_owner = not scopes or OWNER_SCOPE in scopes
         return {"memories": memories, "experiences": experiences,
-                "life": self.life.snapshot(OWNER_SCOPE),
-                "state": self.repo.get_state(OWNER_SCOPE), "exported_at": self.clock()}
+                "life": self.life.snapshot(OWNER_SCOPE) if include_owner else {},
+                "state": self.repo.get_state(OWNER_SCOPE) if include_owner else {},
+                "exported_at": self.clock()}
 
     def ping(self) -> Dict[str, Any]:
         return {"ok": True, "index_count": self.index.count()}

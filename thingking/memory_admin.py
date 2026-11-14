@@ -1,10 +1,13 @@
-"""Memory maintenance CLI (run with thingking/thinking_venv while the Memory Server is stopped).
+"""Memory maintenance CLI (legacy migration/rebuild require stopped services).
 
   python thingking/memory_admin.py migrate          # snapshot legacy files, import, index, verify, archive originals
   python thingking/memory_admin.py verify           # re-check ledger hashes and recall of migrated memories
   python thingking/memory_admin.py rebuild-index    # drop the Chroma index and rebuild it from SQLite
   python thingking/memory_admin.py stats
   python thingking/memory_admin.py restore-legacy <backup_dir>   # put the legacy files back (rollback)
+  python thingking/memory_admin.py export-bundle <output.zip>   # consistent online memory.db snapshot
+  python thingking/memory_admin.py inspect-bundle <bundle.zip>  # verify bytes, schema and table counts
+  python thingking/memory_admin.py import-bundle <bundle.zip> --target-dir <empty_dir>
 """
 import argparse
 import json
@@ -162,6 +165,25 @@ def cmd_restore(args) -> int:
     return 0
 
 
+def cmd_bundle(args) -> int:
+    """Portable database operations never open a service or load embedding models."""
+    from memory.portability import export_bundle, import_bundle, inspect_bundle
+
+    try:
+        if args.command == "export-bundle":
+            result = export_bundle(args.db or load_settings().db_path, args.archive,
+                                   timeout_seconds=args.timeout)
+        elif args.command == "inspect-bundle":
+            result = inspect_bundle(args.archive)
+        else:
+            result = import_bundle(args.archive, args.target_dir)
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+    print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -177,6 +199,18 @@ def main() -> int:
     restore.add_argument("backup_dir")
     restore.add_argument("--source", help="恢复到的目录，默认 thingking/src")
     restore.set_defaults(func=cmd_restore)
+    bundle_export = sub.add_parser("export-bundle", help="在线导出完整记忆数据库，不含配置/索引/其他应用数据")
+    bundle_export.add_argument("archive", help="新建的 ZIP 文件，不覆盖已有文件")
+    bundle_export.add_argument("--db", help="源 memory.db，默认使用 BINES_MEMORY_DIR")
+    bundle_export.add_argument("--timeout", type=float, default=30, help="SQLite 在线快照超时秒数，默认 30")
+    bundle_export.set_defaults(func=cmd_bundle)
+    bundle_inspect = sub.add_parser("inspect-bundle", help="校验迁移包并查看范围与数据库计数")
+    bundle_inspect.add_argument("archive")
+    bundle_inspect.set_defaults(func=cmd_bundle)
+    bundle_import = sub.add_parser("import-bundle", help="仅导入空目录，不合并、不覆盖、不启动服务")
+    bundle_import.add_argument("archive")
+    bundle_import.add_argument("--target-dir", required=True, help="不存在或为空的目标记忆目录")
+    bundle_import.set_defaults(func=cmd_bundle)
     args = parser.parse_args()
     return args.func(args)
 

@@ -19,8 +19,14 @@ from common.admin_auth import install_admin_guard  # noqa: E402
 
 app = Flask(__name__, static_folder="rag_web_static", static_url_path="")
 app.config["JSON_AS_ASCII"] = False
-install_admin_guard(app, "memory", entrypoints=("/", "/constellation"))
+install_admin_guard(app, "memory", entrypoints=("/", "/constellation", "/status"))
 client = MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
+
+from server.status_dashboard import create_status_blueprint  # noqa: E402
+from common.memory_portability_web import create_portability_blueprint  # noqa: E402
+
+app.register_blueprint(create_status_blueprint(None, HTTP_PORTS))
+app.register_blueprint(create_portability_blueprint())
 
 
 def _ok(result=None, **extra):

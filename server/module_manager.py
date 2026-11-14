@@ -33,7 +33,7 @@ from realtime_screen_config import (
 
 app = Flask(__name__, template_folder=os.path.join(ROOT_DIR, "server", "templates"),
             static_folder=os.path.join(ROOT_DIR, "server", "static"))
-install_admin_guard(app, "manager")
+install_admin_guard(app, "manager", entrypoints=("/", "/status"))
 
 
 # 缓存游戏模式状态（因为我们无法从Thinking进程查询状态，所以只能在管理器本地缓存一份）
@@ -280,6 +280,12 @@ def _legacy_get_process_status(name):
 # Legacy process helpers above are retained for reference; all entry points below
 # use the shared supervisor instead of list-order sleeps and ad-hoc Popen calls.
 supervisor = ServiceSupervisor(PROCESSES)
+
+from server.status_dashboard import create_status_blueprint
+from common.memory_portability_web import create_portability_blueprint
+
+app.register_blueprint(create_status_blueprint(supervisor, HTTP_PORTS))
+app.register_blueprint(create_portability_blueprint())
 
 
 def start_process(config):

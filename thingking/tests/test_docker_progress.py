@@ -194,6 +194,19 @@ class DockerRebuildTests(unittest.TestCase):
                 self.assertNotEqual(memory_change["chatbot"], skill_change["chatbot"])
                 self.assertNotEqual(memory_change["memory-server"], skill_change["memory-server"])
 
+    def test_dashboard_assets_invalidate_launcher_image_hash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            asset = root / "server/dashboard_static/status_dashboard.js"
+            asset.parent.mkdir(parents=True)
+            asset.write_text("before")
+            with patch.object(docker_launcher, "ROOT", root):
+                baseline = docker_launcher.source_hashes({})
+                asset.write_text("after")
+                changed = docker_launcher.source_hashes({})
+                self.assertNotEqual(changed["chatbot"], baseline["chatbot"])
+                self.assertEqual(changed["memory-server"], baseline["memory-server"])
+
     def test_apt_script_and_mirror_changes_invalidate_both_image_hashes(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

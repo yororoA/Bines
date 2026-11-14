@@ -288,6 +288,7 @@ services:
       <<: [*bines-timezone, *bines-autonomy]
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_ZMQ_HOST: memory-server
+      BINES_QQ_GATEWAY_URL: http://chatbot:6102
       BINES_HTTP_HOST: 0.0.0.0
       BINES_ADMIN_LOCAL_PROXY: docker
     ports:

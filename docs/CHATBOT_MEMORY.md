@@ -138,7 +138,7 @@ Memory RPC 默认监听 `127.0.0.1`，所有网络请求校验 `BINES_MEMORY_RPC
 
 ## 历史分支合并与恢复
 
-跨设备导入包与合并历史分支是不同操作。`.tools/memory_transfer.py import` 会替换整个记忆目录，当前设备已有数据库时默认拒绝；只有明确审阅整库替换后才使用 `--replace-existing`。需要保留双方新增历史时，使用 `thingking/scripts/merge_memory_history.py` 的计划、隔离验证、离线应用流程。
+跨设备导入包与合并历史分支是不同操作。推荐使用 `thingking/memory_admin.py export-bundle / inspect-bundle / import-bundle`：在线一致快照、完整性校验，导入仅写新目录或空目录；GUI 入口为 `/status`。完整步骤与不包含的数据见 [记忆导出与迁移](MEMORY_PORTABILITY.md)。历史 `.tools/memory_transfer.py` 的整目录 tar 包不属于新版格式。需要保留双方新增历史时，使用 `thingking/scripts/merge_memory_history.py` 的计划、隔离验证、离线应用流程。
 
 开始前停止所有数据库写入进程，保存完整SQLite备份及其WAL。`plan`只读检查源数据库/WAL/SHM的manifest哈希、候选内容、会话scope和owner身份绑定，并固定目标源数据表的基线；`stage`通过SQLite备份接口复制目标，只向隔离副本写入。审阅计划与副本后，`apply`才写入显式指定的目标。目标发生变化时必须重新生成并审阅计划，不能修改计划文件绕过基线校验。所有输出使用新文件名，工具会拒绝覆盖已有文件、输入数据库及其sidecar，包括新staging数据库的sidecar。
 

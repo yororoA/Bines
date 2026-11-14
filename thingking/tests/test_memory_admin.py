@@ -45,6 +45,15 @@ class MemoryAdminTest(unittest.TestCase):
         self.assertIsNone(self.service.memory_detail(memory_id=mid))
         self.assertEqual(self.service.list_association_nodes()["total"], 0)
 
+    def test_readable_export_honors_scope_for_owner_state_and_life(self):
+        self.service.add_memory("semantic", "owner", "主人私有事实")
+        self.service.add_memory("semantic", "qq_group:example", "群公开事实")
+        exported = self.service.export(["qq_group:example"])
+        self.assertEqual([row["content"] for row in exported["memories"]], ["群公开事实"])
+        self.assertEqual(exported["state"], {})
+        self.assertEqual(exported["life"], {})
+        self.assertTrue(self.service.export()["life"])
+
     def test_old_memory_detail_does_not_require_or_mutate_backfill(self):
         mid = self.repo.add_memory("semantic", "owner", "尚未回建的旧记忆")
         before = self.repo.conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]

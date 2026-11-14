@@ -46,6 +46,7 @@
     <button data-tab="overview">概览</button>
   </nav>
   <a href="/constellation" class="constellation-link">记忆星图 ↗</a>
+  <a href="/status" class="constellation-link">Bines 状态与迁移 ↗</a>
   <span class="header-status" id="service-status">连接中</span>
 </header>
 <main>
@@ -78,7 +79,8 @@
     <div class="card"><div class="section-heading"><h2>后台任务</h2><select id="job-status"><option value="">全部状态</option><option value="pending">等待中</option><option value="running">处理中</option><option value="failed">失败</option><option value="done">完成</option></select></div><div id="jobs-list"></div></div>
     <div class="card"><details><summary>查看完整统计</summary><pre id="stats-json"></pre></details></div>
     <div class="card row">
-      <button class="btn" id="btn-export">导出全部记忆</button>
+      <button class="btn" id="btn-export">导出可读 JSON</button>
+      <a class="btn" href="/status#memory-transfer">完整记忆包与迁移</a>
       <button class="btn danger" id="btn-rebuild">从 SQLite 重建向量索引</button>
       <span id="overview-msg" class="muted"></span>
     </div>
