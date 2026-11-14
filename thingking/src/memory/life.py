@@ -573,9 +573,11 @@ class LifeLedger:
         if cached and cached[0] == signature:
             return [dict(goal) for goal in cached[1]]
         grouped: Dict[str, Dict[str, Any]] = {}
+        # Strip the event-side prefix so the experiences primary key stays searchable.
         rows = self.repo.conn.execute(
             "SELECT le.* FROM life_events le LEFT JOIN experiences e "
-            "ON le.source_ref='life:'||e.source_ref LEFT JOIN memories m ON m.id=e.memory_id "
+            "ON e.source_ref=substr(le.source_ref,6) AND substr(le.source_ref,1,5)='life:' "
+            "LEFT JOIN memories m ON m.id=e.memory_id "
             "WHERE le.kind='experience' AND le.scope=? AND le.ts<=? "
             "AND (e.source_ref IS NULL OR m.deleted=0) ORDER BY le.ts,le.source_ref",
             (viewer_scope, now),

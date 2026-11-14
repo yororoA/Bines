@@ -206,6 +206,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, KeyError) as exc:
             self.respond(400, {"error": str(exc)})
         except RuntimeError as exc:
+            from memory.client import MemoryUnavailable
+            if isinstance(exc, MemoryUnavailable):
+                return self.respond(503, {"error": "记忆服务连接暂时不可用", "error_type": "MemoryUnavailable"})
             self.respond(409 if "StateConflict" in str(exc) else 503, {"error": str(exc)})
         except Exception:
             self.respond(503, {"error": "NapCat 能力入口暂不可用"})

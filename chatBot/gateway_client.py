@@ -33,7 +33,11 @@ class GatewayClient:
                 return json.load(response)["result"]
         except HTTPError as exc:
             with exc:
-                error = json.load(exc).get("error", "gateway error")
+                reply = json.load(exc)
+            error = reply.get("error", "gateway error")
+            if path == "/memory" and exc.code == 503 and reply.get("error_type") == "MemoryUnavailable":
+                from memory.client import MemoryUnavailable
+                raise MemoryUnavailable(error) from None
             raise RuntimeError(error) from None
         except (URLError, TimeoutError, ConnectionError, IncompleteRead):
             # A timeout, reset/RemoteDisconnected, or truncated acknowledgement

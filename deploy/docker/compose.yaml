@@ -190,6 +190,7 @@ services:
       - path: ../../.env
         required: false
     environment:
+      PYTHONFAULTHANDLER: "1"
       <<: [*bines-timezone, *bines-autonomy]
       BINES_PROFILE: ${BINES_PROFILE:-chatbot}
       BINES_MEMORY_DIR: /app/thingking/memory_data
@@ -245,6 +246,7 @@ services:
       - path: ../../.env
         required: false
     environment:
+      PYTHONFAULTHANDLER: "1"
       <<: [*bines-timezone, *bines-autonomy]
       BINES_DOCKER_MODE: "1"
       BINES_MEMORY_DIR: /app/thingking/memory_data
