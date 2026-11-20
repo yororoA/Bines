@@ -9,7 +9,7 @@ from chatBot.messages import Identity, readable, qq_prompt_view
 from memory.channels import local_envelope, qq_envelope
 from memory.client import MemoryClient
 from memory.server import dispatch
-from common.memory_journal import MemoryOutbox, OutboxDependencyPending
+from common.memory_journal import MemoryJournal, MemoryOutbox, OutboxDependencyPending
 
 
 def identity_envelope(identity, content="", timestamp=None):
@@ -205,8 +205,7 @@ class MemoryHub:
                       role=row["role"], content=row["content"], recalled=bool(row["recalled"]),
                       state_update=event_row is not None)
         if event_row and event_row["batch"]:
-            params["turn_ref"] = ("experience:" + hashlib.sha256(str(self.outbox.path.resolve()).encode()).hexdigest()
-                                  + ":" + event_row["batch"] + ":turn")
+            params["turn_ref"] = MemoryJournal.turn_prefix(self.outbox, event_row["batch"]) + ":turn"
         self.outbox.put(ref, "record_message", params, if_changed=True)
         with self.store.connection() as db:
             done = db.execute("SELECT params FROM memory_outbox WHERE source_ref=? AND synced=1", (ref,)).fetchone()
@@ -370,16 +369,25 @@ class MemoryHub:
         if method == "put_state" and not identity.local:
             # 服务端从事件推导消息来源，模型不能指定要跳过哪个状态任务。
             params.pop("source_ref", None)
+            params.pop("autonomous_envelope", None)
             if event_id:
                 self._sync_context(identity, event_id)
                 with self.store.connection() as db:
-                    event = json.loads(db.execute("SELECT raw FROM events WHERE id=?", (event_id,)).fetchone()[0])
-                    external = f"{identity.account}:{identity.group or 'p:'+identity.user}:{event.get('message_id')}"
-                    row = db.execute(
-                        "SELECT id FROM messages WHERE scope=? AND external_id=?", (identity.scope, external),
-                    ).fetchone()
-                if row:
-                    params["source_ref"] = self.source + ":" + str(row["id"])
+                    row = db.execute("SELECT raw FROM events WHERE id=? AND conversation=?",
+                                     (event_id, identity.conversation)).fetchone()
+                    if not row:
+                        raise PermissionError("状态更新缺少当前会话的事件")
+                    event = json.loads(row["raw"])
+                    if event.get("post_type") == "bines_proactive":
+                        params["autonomous_envelope"] = identity_envelope(identity)
+                        params["source_ref"] = MemoryJournal.turn_prefix(self.outbox, event_id) + ":turn"
+                    elif event.get("post_type") == "message" and event.get("message_id") is not None:
+                        external = f"{identity.account}:{identity.group or 'p:'+identity.user}:{event['message_id']}"
+                        message = db.execute(
+                            "SELECT id FROM messages WHERE scope=? AND external_id=?", (identity.scope, external),
+                        ).fetchone()
+                        if message:
+                            params["source_ref"] = self.source + ":" + str(message["id"])
         result = self._call(method, **params)
         return self._qq_working_context(identity, result) if method == "build_context" else result
 

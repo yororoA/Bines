@@ -10,6 +10,7 @@ import json
 import os
 
 from common.context_budget import ContextTokenCounter, context_limit, diagnostic
+from common.memory_highlights import bounded_highlight_state
 
 
 SOURCE_FIELDS = (
@@ -212,7 +213,9 @@ def build_deliberation_messages(system, data, *, max_output_tokens=4096):
     if identity:
         leading.append(_message("identity", identity))
 
-    current = {key: copy.deepcopy(context[key]) for key in CURRENT_FIELDS if key in context}
+    current = {key: context[key] for key in CURRENT_FIELDS if key in context}
+    if current.get("state"):
+        current["state"] = bounded_highlight_state(current["state"])
     current.update({key: copy.deepcopy(data[key]) for key in (
         "previous_emotion", "emotion", "willingness", "interests", "social_interests", "background_interests",
         "previous_topics", "allowed_kinds",

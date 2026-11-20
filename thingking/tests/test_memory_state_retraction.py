@@ -86,6 +86,59 @@ class MemoryStateRetractionTest(unittest.TestCase):
         self.assertEqual(state["inventory"], ["笔"])
         self.assertEqual(self.service.build_context(self.envelope(), "我在哪")['state'], state)
 
+    def test_highlights_survive_new_agreements_and_rebuild_after_withdrawal(self):
+        from memory.repository import StateConflict
+        originals = [f"永久约定-{i:03d}" for i in range(75)]
+        self.service.put_state("owner", {"memory_highlights": originals})
+        self.now += 1
+        old = self.record("new-agreement", "周五一起听歌")
+        self.complete({"add_memory_highlight": "周五一起听歌"})
+        before_edit = self.service.get_state("owner")
+        self.now += 1
+        self.manual_turn("direct-edit", originals[0], remove_memory_highlight=originals[0])
+        with self.assertRaises(StateConflict):
+            self.service.put_state("owner", {}, expected_version=before_edit["version"],
+                                   changes={"add_memory_highlight": "过期写入"})
+        self.assertEqual(self.service.get_state("owner")["data"]["memory_highlights"], originals[1:] + ["周五一起听歌"])
+        self.withdraw("new-agreement", old)
+        self.assertEqual(self.service.get_state("owner")["data"]["memory_highlights"], originals[1:])
+
+    def test_state_worker_receives_bounded_highlights_and_an_exact_old_correction_target(self):
+        first = "两人约好周五听歌"
+        initial = [first] + [f"旧约定-{i}-" + "内容" * 20 for i in range(80)] + ["x" * 100000]
+        self.service.put_state("owner", {"memory_highlights": initial})
+        self.record("correction", "请忘了这条：" + first)
+        claim = self.service.claim_job(["update_state"])
+        visible = claim["materials"]["state"]["memory_highlights"]
+        self.assertIn(first, visible)
+        self.assertLessEqual(len(visible), 20)
+        self.assertLessEqual(sum(map(len, visible)), 1800)
+        self.assertEqual(self.service.get_state("owner")["data"]["memory_highlights"], initial)
+
+    def test_desktop_autonomous_tool_uses_its_own_retractable_turn(self):
+        from common.memory_journal import MemoryJournal, MemoryOutbox
+        from memory.client import MemoryClient
+        from tools.context import ToolContext, tool_context
+        from tools.dependencies import deps
+        from tools.memory_tool import update_status
+
+        self.service.put_state("owner", {"memory_highlights": ["周五听歌"], "important_thing": "会前准备"})
+        outbox = MemoryOutbox(self.root / "desktop-outbox.db")
+        journal = MemoryJournal(outbox, self.envelope(), "will:reading", autonomous=True)
+        client = MemoryClient.__new__(MemoryClient)
+        client.call = lambda method, **params: getattr(self.service, method)(**params)
+        with tool_context(ToolContext(autonomous=True, journal=journal)), patch.object(deps, "memory_client", client):
+            result = update_status(important_thing="读到雪天的章节", remove_memory_highlight="周五听歌")
+        self.assertIn("动态状态已更新", result)
+        active = self.service.get_state("owner")["data"]
+        self.assertEqual(active["memory_highlights"], ["周五听歌"])
+        self.assertEqual(active["important_thing"], "读到雪天的章节")
+        self.assertEqual(outbox.sync(client.call), 1)
+        source = self.repo.conn.execute("SELECT memory_id FROM experiences WHERE source_ref=?",
+                                        (journal.prefix + ":turn",)).fetchone()
+        self.service.delete_memory(source["memory_id"])
+        self.assertEqual(self.service.get_state("owner")["data"]["important_thing"], "会前准备")
+
     def test_newer_location_and_unsourced_manual_update_survive(self):
         old = self.record("old", "我在上海")
         self.complete({"current_location": "上海"})

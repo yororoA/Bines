@@ -36,12 +36,15 @@ def _patch(data, patch):
 
 
 _RELATIONSHIP = ("relationship_score", "relationship_level", "relationship_distribution")
-_OPERATION_KINDS = {"automatic", "manual_operations"}
+_OPERATION_KINDS = {"automatic", "manual_operations", "autonomous_operations"}
 
 
-def _apply(data, changes, event_key):
+def _apply(data, changes, event_key, *, highlight_limit=None):
     from tools.memory_tool import _apply_changes
     data = _apply_changes(data, **{key: value for key, value in changes.items() if key != "relationship_delta"})
+    if highlight_limit is not None:
+        # Reproduce the original FIFO policy only for pre-upgrade events.
+        data["memory_highlights"] = data["memory_highlights"][-highlight_limit:]
     if "relationship_delta" in changes:
         from relationship_state import SCORE_MIN, SCORE_MAX, compute_relationship_weights
         score = max(SCORE_MIN, min(SCORE_MAX, int(data.get("relationship_score", 0) or 0) + changes["relationship_delta"]))
@@ -67,14 +70,49 @@ class StateEffects:
         self.conn.execute("""CREATE TABLE IF NOT EXISTS state_effects (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE NOT NULL,
             scope TEXT NOT NULL, conversation_id TEXT, message_id INTEGER,
-            event_ts REAL NOT NULL, kind TEXT NOT NULL, changes TEXT NOT NULL, source_ref TEXT)""")
-        if "source_ref" not in {row["name"] for row in self.conn.execute("PRAGMA table_info(state_effects)")}:
+            event_ts REAL NOT NULL, kind TEXT NOT NULL, changes TEXT NOT NULL, source_ref TEXT,
+            highlight_limit INTEGER DEFAULT 32)""")
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(state_effects)")}
+        if "source_ref" not in columns:
             self.conn.execute("ALTER TABLE state_effects ADD COLUMN source_ref TEXT")
+        if "highlight_limit" not in columns:
+            self.conn.execute("ALTER TABLE state_effects ADD COLUMN highlight_limit INTEGER DEFAULT 32")
         self.conn.execute("CREATE INDEX IF NOT EXISTS state_effect_scope ON state_effects(scope,conversation_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS state_effect_source ON state_effects(source_ref,scope)")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS state_field_clocks (
             scope TEXT NOT NULL, field TEXT NOT NULL, event_ts REAL NOT NULL, message_id INTEGER NOT NULL,
             PRIMARY KEY(scope,field))""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS state_effect_time ON state_effects(scope,event_ts)")
+
+    def conversation_state(self, scope, day, day_start_hour):
+        """Yesterday's autonomous activity is still in the ledger, outside today's dialogue state."""
+        from .models import day_key
+
+        data = self.repo.get_state(scope)["data"]
+        clocks = self.conn.execute(
+            "SELECT field,event_ts,message_id FROM state_field_clocks WHERE scope=? "
+            "AND field IN ('important_thing','npc_state.current_activity')", (scope,)
+        ).fetchall()
+        for field, timestamp, message_id in clocks:
+            if day_key(timestamp, day_start_hour) >= day:
+                continue
+            action = "npc_activity" if field == "npc_state.current_activity" else field
+            target = data.get("npc_state") if action == "npc_activity" else data
+            key = "current_activity" if action == "npc_activity" else field
+            if not isinstance(target, dict) or not target.get(key):
+                continue
+            # A later human confirmation of the very same value owns the field.
+            # Use its field clock; unrelated state updates cannot refresh or expire it.
+            for row in self.conn.execute(
+                "SELECT kind,changes FROM state_effects WHERE scope=? AND event_ts=? "
+                "AND COALESCE(message_id,0)=? ORDER BY seq DESC", (scope, timestamp, message_id)
+            ):
+                changes = json.loads(row["changes"])
+                if (field if row["kind"] == "patch" else action) in changes:
+                    if row["kind"] == "autonomous_operations" and changes[action] == target[key]:
+                        del target[key]
+                    break
+        return data
 
     def _baseline(self, scope):
         current = self.repo.get_state(scope)
@@ -136,8 +174,8 @@ class StateEffects:
                 accepted[action] = value
                 if action != "relationship_delta":
                     self._mark(scope, key, stamp)
-        self.conn.execute("INSERT INTO state_effects(event_key,scope,conversation_id,message_id,event_ts,kind,changes) "
-                          "VALUES(?,?,?,?,?,'automatic',?)", (event_key, scope, message["conversation_id"],
+        self.conn.execute("INSERT INTO state_effects(event_key,scope,conversation_id,message_id,event_ts,kind,changes,highlight_limit) "
+                          "VALUES(?,?,?,?,?,'automatic',?,NULL)", (event_key, scope, message["conversation_id"],
                           message["id"], message["ts"], json.dumps(changes, ensure_ascii=False)))
         updated = _apply(current["data"], accepted, event_key) if accepted else current["data"]
         if "relationship_delta" in accepted:
@@ -158,9 +196,11 @@ class StateEffects:
             return True
         return False
 
-    def manual(self, scope, data, expected_version=None, source_ref=None, changes=None):
+    def manual(self, scope, data, expected_version=None, source_ref=None, changes=None, autonomous_conversation=None):
         current = self._baseline(scope)
-        message = self.conn.execute("SELECT * FROM messages WHERE source_ref=?", (source_ref,)).fetchone() if source_ref else None
+        message = None
+        if source_ref and autonomous_conversation is None:
+            message = self.conn.execute("SELECT * FROM messages WHERE source_ref=?", (source_ref,)).fetchone()
         if message and self._message_state_scope(message) != scope:
             raise ValueError("state source message must belong to the same state scope")
         event_key = "manual:" + uuid.uuid4().hex
@@ -176,7 +216,8 @@ class StateEffects:
                 raise ValueError("状态操作需要字符串字段和整数好感度增量")
             # Explicit operations distinguish a fresh same-value confirmation
             # from fields merely carried forward in the caller's full snapshot.
-            kind, effect = "manual_operations", changes
+            kind = "autonomous_operations" if autonomous_conversation is not None else "manual_operations"
+            effect = changes
             data = _apply(current["data"], changes, event_key)
         else:
             before, after = _flat(current["data"]), _flat(data)
@@ -186,9 +227,9 @@ class StateEffects:
         stamp = (message["ts"], message["id"]) if message else (self.repo.clock(), 0)
         version = self.repo.put_state(scope, data, expected_version, source_ref=source_ref)
         if effect:
-            self.conn.execute("INSERT INTO state_effects(event_key,scope,conversation_id,message_id,event_ts,kind,changes,source_ref) "
-                              "VALUES(?,?,?,?,?,?,?,?)", (event_key, scope,
-                              message["conversation_id"] if message else None, message["id"] if message else None,
+            self.conn.execute("INSERT INTO state_effects(event_key,scope,conversation_id,message_id,event_ts,kind,changes,source_ref,highlight_limit) "
+                              "VALUES(?,?,?,?,?,?,?,?,NULL)", (event_key, scope,
+                              message["conversation_id"] if message else autonomous_conversation, message["id"] if message else None,
                               stamp[0], kind, json.dumps(effect, ensure_ascii=False), source_ref))
             for key, value in effect.items():
                 fields = (_RELATIONSHIP if kind in _OPERATION_KINDS and key == "relationship_delta" else
@@ -211,6 +252,12 @@ class StateEffects:
         return data
 
     def _source_valid(self, effect):
+        if effect["kind"] == "autonomous_operations":
+            # The turn receipt may arrive through the outbox after this effect.
+            return not self.conn.execute(
+                "SELECT 1 FROM temporal_retractions WHERE scope=? AND source_ref=?",
+                (effect["scope"], effect["source_ref"]),
+            ).fetchone()
         if effect["message_id"] is None:
             return True  # An unsourced manual patch remains owned by its scope.
         from .evidence import _active
@@ -230,7 +277,7 @@ class StateEffects:
         if message.get("source_ref"):
             scope = self._message_state_scope(message)
             linked = self.conn.execute("UPDATE state_effects SET message_id=?,conversation_id=?,event_ts=? "
-                                       "WHERE source_ref=? AND scope=? AND message_id IS NULL",
+                                       "WHERE source_ref=? AND scope=? AND message_id IS NULL AND kind!='autonomous_operations'",
                                        (message["id"], message["conversation_id"], message["ts"],
                                         message["source_ref"], scope)).rowcount
             if linked and rebuild:
@@ -274,7 +321,10 @@ class StateEffects:
             changes = {action: value for action, value in changes.items()
                        if (row["kind"] in _OPERATION_KINDS and action == "relationship_delta")
                        or self._accept(scope, _clock_key(action, value) if row["kind"] in _OPERATION_KINDS else action, stamp)}
-            data = _apply(data, changes, row["event_key"]) if row["kind"] in _OPERATION_KINDS else _patch(data, changes)
+            if row["kind"] in _OPERATION_KINDS:
+                data = _apply(data, changes, row["event_key"], highlight_limit=row["highlight_limit"])
+            else:
+                data = _patch(data, changes)
             for action, value in changes.items():
                 if action == "relationship_delta":
                     for field in _RELATIONSHIP:

@@ -69,10 +69,12 @@ class MemoryClient:
         return self.call("get_state", scope=scope)
 
     def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
-                  source_ref: Optional[str] = None, changes: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  source_ref: Optional[str] = None, changes: Optional[Dict[str, Any]] = None,
+                  autonomous_envelope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Apply explicit operations when supplied; otherwise replace the legacy snapshot."""
         return self.call("put_state", scope=scope, data=data, expected_version=expected_version,
                          **({"source_ref": source_ref} if source_ref else {}),
+                         **({"autonomous_envelope": autonomous_envelope} if autonomous_envelope is not None else {}),
                          **({"changes": changes} if changes is not None else {}))
 
     def activity_snapshot(self, limit: int = 10) -> Dict[str, Any]:

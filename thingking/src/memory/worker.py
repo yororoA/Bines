@@ -198,7 +198,8 @@ def parse_summary(raw: str) -> Tuple[str, List[str], List[Dict[str, Any]], float
 
 def build_diary_prompt(materials: Dict[str, Any], diary_system_prompt: str) -> List[Dict[str, str]]:
     from .expression_learning import render_expression_notes
-    state = json.dumps(materials.get("state") or {}, ensure_ascii=False, indent=1)
+    from common.memory_highlights import bounded_highlight_state
+    state = json.dumps(bounded_highlight_state(materials.get("state") or {}), ensure_ascii=False, indent=1)
     life = json.dumps(materials.get("life") or {}, ensure_ascii=False, indent=1)
     return [
         {"role": "system", "content": diary_system_prompt},

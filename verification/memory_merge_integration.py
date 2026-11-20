@@ -104,6 +104,47 @@ class MemoryMergeIntegration(unittest.TestCase):
         self.assertEqual(state["relationship_score"], 134)
         self.assertEqual(state["active_quest"], "周五一起听歌")
 
+    def test_autonomous_research_keeps_receipt_and_cannot_replace_shared_highlights(self):
+        from dataclasses import replace
+        from common.memory_journal import MemoryJournal
+        from tools.memory_tool import update_status
+
+        shared = ["管理员画了碧波的头像"] + [f"约定 {i}" for i in range(40)]
+        self.memory.put_state("owner", {"memory_highlights": shared})
+        ctx = self.context({"post_type": "bines_proactive", "user_id": 1, "self_id": 99,
+                            "message_type": "private", "proactive": {}})
+        # This historical row used to match the fabricated external ID "...:None".
+        self.store.add(ctx.identity, "user", "早先的对话", external_id="99:p:1:None")
+        journal = MemoryJournal(self.hub.outbox, identity_envelope(ctx.identity), ctx.event_id,
+                                autonomous=True, event_ids=[ctx.event_id])
+        note = "展柜照明的实验观察。" * 150
+        command = {"action": "update_status", "args": {"add_memory_highlight": note,
+                   "remove_memory_highlight": shared[0], "npc_activity": "读书", "important_thing": "读完第一章"}}
+        with tool_context(replace(ctx, autonomous=True, journal=journal)), patch(
+                "chatBot.memory_hub.GatewayMemoryClient", return_value=self.memory):
+            result = journal.execute(command, lambda: update_status(**command["args"]))
+            self.assertIn("动态状态已更新", result)
+            version = self.memory.get_state("owner")["version"]
+            journal.execute({"action": "update_status", "args": {"add_memory_highlight": note}},
+                            lambda: update_status(add_memory_highlight=note))
+            self.assertEqual(self.memory.get_state("owner")["version"], version)
+            # The gateway derives provenance even for an older or malformed client.
+            for data in ({"data": {"memory_highlights": []}}, {"data": {}, "changes": {"remove_memory_highlight": shared[0]}}):
+                with self.assertRaisesRegex(RuntimeError, "高光"):
+                    self.memory.call("put_state", source_ref="unrelated-human", autonomous_envelope=None, **data)
+        self.hub.sync()
+        state = self.memory.get_state("owner")["data"]
+        self.assertEqual(state["memory_highlights"], shared)
+        self.assertEqual((state["npc_state"]["current_activity"], state["important_thing"]), ("读书", "读完第一章"))
+        conn = self.hub.service.repo.conn
+        write = conn.execute("SELECT * FROM state_effects WHERE kind='autonomous_operations'").fetchone()
+        self.assertEqual(write["source_ref"], journal.prefix + ":turn")
+        self.assertIsNone(write["message_id"])
+        receipt = conn.execute("SELECT memory_id FROM experiences WHERE source_ref=?", (journal.last_tool_receipt,)).fetchone()
+        detail = self.memory.call("memory_detail", memory_id=receipt["memory_id"], scope="owner")
+        records = [root["record"] for root in detail["roots"] if root.get("source_ref") == journal.last_tool_receipt]
+        self.assertEqual(records[0]["args"]["add_memory_highlight"], note)
+
     def test_memory_search_ignores_model_supplied_owner_scope_in_group(self):
         self.memory.add_memory("semantic", "owner", "主人生日秘密", subject_id="owner")
         self.memory.add_memory("episode", "qq:99:group:10", "群里的耳机约定")

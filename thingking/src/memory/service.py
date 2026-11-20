@@ -11,6 +11,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
+from common.memory_highlights import bounded_highlight_state
+
 from . import scope_policy
 from .models import (
     KIND_DIARY,
@@ -124,6 +126,8 @@ class MemoryService:
             source_ref TEXT PRIMARY KEY, memory_id TEXT NOT NULL, scope TEXT NOT NULL,
             record TEXT NOT NULL, revision INTEGER NOT NULL, recorded_at REAL NOT NULL
         )""")
+        from .highlight_upgrade import repair_autonomous_highlights
+        repair_autonomous_highlights(self.state_effects)
         self.repo.conn.execute("""CREATE TABLE IF NOT EXISTS prompt_history_segments (
             conversation_id TEXT NOT NULL, scope TEXT NOT NULL, start_ts REAL NOT NULL,
             start_id INTEGER NOT NULL, PRIMARY KEY(conversation_id,scope))""")
@@ -600,11 +604,12 @@ class MemoryService:
                 )
             ]
 
-        owner_state = self.repo.get_state(OWNER_SCOPE)["data"]
+        day = self._day(self.clock())
+        owner_state = self.state_effects.conversation_state(OWNER_SCOPE, day, self.settings.day_start_hour)
         state_scope = f"{env.scope}:user:{env.external_user_id}" if env.is_group else env.scope
         visible_state = scope_policy.visible_state(env.scope, owner_state)
         if env.scope != OWNER_SCOPE:
-            visible_state.update(self.repo.get_state(state_scope)["data"])
+            visible_state.update(self.state_effects.conversation_state(state_scope, day, self.settings.day_start_hour))
         last_user = self.repo.last_message(env.conversation_id, ROLE_USER)
         profile = self._profile(env, scopes, recall_query)
         profile_trace = copy.deepcopy(getattr(self.retriever, "last_trace", {}))
@@ -736,10 +741,22 @@ class MemoryService:
         return self.repo.get_state(scope)
 
     def put_state(self, scope: str, data: Dict[str, Any], expected_version: Optional[int] = None,
-                  source_ref: Optional[str] = None, changes: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  source_ref: Optional[str] = None, changes: Optional[Dict[str, Any]] = None,
+                  autonomous_envelope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self.repo.transaction():
-            version = self.state_effects.manual(scope, data, expected_version, source_ref=source_ref, changes=changes)
-            if source_ref:
+            autonomous_conversation = None
+            if autonomous_envelope is not None:
+                env = self.resolve(autonomous_envelope)
+                state_scope = f"{env.scope}:user:{env.external_user_id}" if env.is_group else env.scope
+                turn_source = isinstance(source_ref, str) and source_ref.startswith("experience:") and source_ref.endswith(":turn")
+                if scope != state_scope or not turn_source:
+                    raise ValueError("自主状态更新需要当前会话的轮次来源")
+                if not isinstance(changes, dict) or {"add_memory_highlight", "remove_memory_highlight"} & changes.keys():
+                    raise ValueError("自主状态更新只接受活动状态操作；共同高光由对话或管理员维护")
+                autonomous_conversation = env.conversation_id
+            version = self.state_effects.manual(scope, data, expected_version, source_ref=source_ref, changes=changes,
+                                                autonomous_conversation=autonomous_conversation)
+            if source_ref and autonomous_conversation is None:
                 message = self.repo.conn.execute(
                     "SELECT id FROM messages WHERE source_ref=?", (source_ref,),
                 ).fetchone()
@@ -1149,7 +1166,7 @@ class MemoryService:
             # 后台判断逐条使用真实消息；不等待 40 条摘要，也不把其他群成员混入个人状态。
             return {
                 "scope": job["scope"], "messages": [_message_view(message)],
-                "state": state["data"], "version": state["version"],
+                "state": bounded_highlight_state(state["data"], message["content"]), "version": state["version"],
             }
         if job["kind"] == JOB_SUMMARIZE:
             messages = self._summary_messages(job)
@@ -1219,7 +1236,7 @@ class MemoryService:
             from .diary_materials import select_materials
             selected = select_materials(self.repo, episodes, job["scope"], day)
             expression_notes = self.expression_learning.snapshot(job["scope"], limit=3)
-            state = self._diary_state(job["scope"], day)
+            state = bounded_highlight_state(self._diary_state(job["scope"], day))
             life = self.life.day_summary(day, job["scope"])
             from .attribution import digest as attribution_digest, evidence
             payload = {**job["payload"], "diary_material_selection": selected["material_selection"],
@@ -1842,12 +1859,17 @@ class MemoryService:
     def delete_memory(self, memory_id: str) -> Dict[str, Any]:
         with self.repo.transaction():
             experience = self.repo.conn.execute(
-                "SELECT source_ref FROM experiences WHERE memory_id=?", (memory_id,)
+                "SELECT scope,source_ref FROM experiences WHERE memory_id=?", (memory_id,)
             ).fetchone()
             if experience:
                 self.life.retract_experience(experience["source_ref"])
             self.repo.temporal.delete_memory(memory_id)
             deleted = self.repo.delete_memory(memory_id)
+            if experience and self.repo.conn.execute(
+                "SELECT 1 FROM state_effects WHERE scope=? AND source_ref=? AND kind='autonomous_operations'",
+                (experience["scope"], experience["source_ref"]),
+            ).fetchone():
+                self.state_effects._rebuild(experience["scope"], only_if_changed=True)
             node = self.graph.for_memory(memory_id)
             if node:
                 self.graph.invalidate(node["id"])

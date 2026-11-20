@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from common.clock import clock_message, now
+from common.memory_highlights import bounded_highlight_state
 from chatBot.messages import qq_native_at_spans, qq_prompt_body
 
 import persona_profile
@@ -157,7 +158,7 @@ def _scene_policy(envelope: Dict[str, Any], scene: str) -> str:
     return "\n".join(lines)
 
 
-def _state_block(state: Dict[str, Any]) -> str:
+def _state_block(state: Dict[str, Any], query: str = "") -> str:
     if not state:
         return ""
     state = {**state, "relationship_level": persona_profile.relationship_level(state)}
@@ -172,18 +173,10 @@ def _state_block(state: Dict[str, Any]) -> str:
             lines.append(f"- {label}：{state[key]}")
     if state.get("inventory"):
         lines.append(f"- 持有物品：{'；'.join(map(str, state['inventory']))}")
-    highlights = state.get("memory_highlights") or []
+    highlights = bounded_highlight_state(state, query).get("memory_highlights") or []
     if highlights:
         lines.append("- 历史背景摘要（可能含旧猜测，不是当前活动、情绪或台词；事实以记忆证据为准）：")
-        # 旧状态会不断追加高光；只取最近的一部分，避免早期条目把昨天的上下文挤掉。
-        size, kept = 0, []
-        recent = list(dict.fromkeys(map(str, highlights)))[-30:]
-        for item in reversed(recent):
-            if len(kept) >= 20 or size + len(item) > 1800:
-                continue
-            kept.append(item)
-            size += len(item)
-        for item in reversed(kept):
+        for item in highlights:
             lines.append(f"  · {item}")
     return "--- 当前状态 ---\n" + "\n".join(lines) if lines else ""
 
@@ -234,10 +227,10 @@ def _life_block(life: Dict[str, Any], scene: str) -> str:
     )
 
 
-def _fmt_time(ts: Optional[float], with_date: bool = True) -> str:
+def _fmt_time(ts: Optional[float]) -> str:
     if not ts:
         return ""
-    return now(ts).strftime("%Y/%m/%d %H:%M" if with_date else "%H:%M")
+    return now(ts).strftime("%Y/%m/%d %H:%M")
 
 
 def _channel_label(conversation_id: str) -> str:
@@ -348,7 +341,7 @@ def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str
             if mentions:
                 lines.append("QQ 消息元数据：" + json.dumps(
                     {"speaker": speaker(m), "mentioned_qq": mentions}, ensure_ascii=False))
-            lines.append(f"[{_fmt_time(m['ts'], with_date=False)}] "
+            lines.append(f"[{_fmt_time(m['ts'])}] "
                          f"{speaker(m)}"
                          f"{'' if m['role'] != ROLE_OBSERVED else '(未@你)'}: {content}")
         return [{"role": "system", "content": "--- 群聊近况 ---\n" + "\n".join(lines)}]
@@ -367,7 +360,9 @@ def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str
         if m["role"] == ROLE_ASSISTANT:
             messages.append({"role": "assistant", "content": content})
         else:
-            messages.append({"role": "user", "content": f"{speaker(m)}：{content}"})
+            stamp = _fmt_time(m.get("ts"))
+            prefix = f"[{stamp}] " if stamp else ""
+            messages.append({"role": "user", "content": f"{prefix}{speaker(m)}：{content}"})
     return messages
 
 
@@ -446,19 +441,23 @@ def _allocate_context(context, scene, counter, quotas, item_quotas=None):
         remaining = quota
         if kind == "state":
             blocks = []
-            for block in (_state_block(context.get("state") or {}), _life_block(context.get("life") or {}, scene)):
+            for block in (_state_block(context.get("state") or {}, context.get("recall_query") or ""),
+                          _life_block(context.get("life") or {}, scene)):
                 if not block:
                     continue
-                text = counter.prefix(block, max(0, remaining - 64))
-                if text != block and kind not in hungry:
-                    hungry.append(kind)
-                if text:
-                    if text != block:
-                        text += "\n[历史状态节选]"
+                text = block
+                cost = counter.messages([{"content": text}])
+                if cost > remaining:
+                    if kind not in hungry:
+                        hungry.append(kind)
+                    text = counter.prefix(block, max(0, remaining - 64))
+                    if not text:
+                        continue
+                    text += "\n[历史状态节选]"
                     cost = counter.messages([{"content": text}])
-                    if cost <= remaining:
-                        blocks.append(text)
-                        remaining -= cost
+                if cost <= remaining:
+                    blocks.append(text)
+                    remaining -= cost
             selected["_state_blocks"] = blocks
         else:
             values = (list(reversed(context.get(kind) or [])) if kind in {"working", "other_channels"} else

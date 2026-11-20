@@ -359,6 +359,21 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertNotIn("最旧背景", text)
         self.assertLess(len(text), 2100)
 
+    def test_named_highlight_is_visible_beyond_recent_window(self):
+        agreement = "答应在白露那天一起听潮汐这首歌"
+        state = {"memory_highlights": [agreement, *[f"近期记录 {i}" for i in range(40)]]}
+        text = prompt_builder._state_block(state, "我们之前约好什么时候听潮汐？")
+        self.assertEqual(text.count(agreement), 1)
+        self.assertLess(text.index(agreement), text.index("近期记录"))
+
+    def test_legacy_highlight_values_render_without_mutating_stored_state(self):
+        from common.memory_highlights import bounded_highlight_state
+        for value, expected in (("完整约定", ["完整约定"]), (73, []), (0, []), ({"unknown": "旧字段"}, [])):
+            with self.subTest(value=value):
+                state = {"memory_highlights": value}
+                self.assertEqual(bounded_highlight_state(state)["memory_highlights"], expected)
+                self.assertEqual(state["memory_highlights"], value)
+
 
 class TimeGapTest(unittest.TestCase):
     def test_time_gap_uses_last_user_timestamp(self):

@@ -5,7 +5,6 @@ from .dependencies import deps
 
 OWNER_SCOPE = "owner"
 _MAX_CONFLICT_RETRIES = 3
-_MAX_MEMORY_HIGHLIGHTS = 32
 
 
 def _memory_client():
@@ -197,7 +196,7 @@ def _apply_changes(state, *, current_location=None, relationship_delta=None, add
         highlights.append(add_memory_highlight)
     if remove_memory_highlight and remove_memory_highlight in highlights:
         highlights.remove(remove_memory_highlight)
-    state["memory_highlights"] = highlights[-_MAX_MEMORY_HIGHLIGHTS:]
+    state["memory_highlights"] = highlights
     return state
 
 
@@ -210,7 +209,8 @@ def update_status(current_location=None, relationship_level=None, relationship_d
                   expected_state: dict | None = None):
     """relationship_level is retained for old callers; use relationship_delta for changes."""
     from tools.context import CURRENT_CONTEXT
-    identity = CURRENT_CONTEXT.get().identity
+    context = CURRENT_CONTEXT.get()
+    identity = context.identity
     if identity.local:
         client = deps.memory_client
         scope = OWNER_SCOPE
@@ -225,7 +225,6 @@ def update_status(current_location=None, relationship_level=None, relationship_d
     except (TypeError, ValueError):
         return f"状态更新失败：relationship_delta 必须是整数（收到 {relationship_delta!r}）。"
     last_error = ""
-    context = CURRENT_CONTEXT.get()
     if context.journal and context.identity.local:
         source_ref = context.journal.prefix + ":user" if not context.autonomous else context.journal.prefix + ":turn"
     else:
@@ -238,6 +237,19 @@ def update_status(current_location=None, relationship_level=None, relationship_d
         "add_memory_highlight": add_memory_highlight, "remove_memory_highlight": remove_memory_highlight,
         "important_thing": important_thing,
     }.items() if value is not None}
+    notice = ""
+    if context.autonomous and (add_memory_highlight is not None or remove_memory_highlight is not None):
+        # The enclosing tool receipt retains the complete note as Bines' own
+        # experience. Only dialogue or an administrator edits shared highlights.
+        changes.pop("add_memory_highlight", None)
+        changes.pop("remove_memory_highlight", None)
+        notice = "自主轮次的笔记随工具经历记录，共同高光保持原样。"
+        if not changes:
+            return notice if context.journal else "自主轮次未变更共同高光，本轮没有经历记录。"
+    provenance = {"source_ref": source_ref} if source_ref else {}
+    if context.autonomous and identity.local:
+        from memory.channels import local_envelope
+        provenance["autonomous_envelope"] = local_envelope().to_dict()
     for _ in range(_MAX_CONFLICT_RETRIES):
         current = client.get_state(scope)
         if expected_version is not None and expected_version != current.get("version"):
@@ -245,7 +257,7 @@ def update_status(current_location=None, relationship_level=None, relationship_d
         updated = _apply_changes(current.get("data") or {}, **changes)
         try:
             result = client.put_state(scope, updated, expected_version=current.get("version"), changes=changes,
-                                      **({"source_ref": source_ref} if source_ref else {}))
+                                      **provenance)
         except RuntimeError as exc:
             if "StateConflict" not in str(exc):
                 raise
@@ -257,5 +269,6 @@ def update_status(current_location=None, relationship_level=None, relationship_d
         warnings = [f"警告：{key} 与预期状态不符" for key, value in (expected_state or {}).items()
                     if key in committed and committed[key] != value]
         return (f"动态状态已更新 (版本: {current.get('version')} -> {result['version']})"
+                + ("\n" + notice if notice else "")
                 + ("\n" + "\n".join(warnings) if warnings else ""))
     return f"状态更新失败：状态被并发修改，重试 {_MAX_CONFLICT_RETRIES} 次仍冲突（{last_error}）。"

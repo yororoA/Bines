@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from verification import napcat_integration as napcat
+from chatBot.turn_wait import FollowupRunner
 from common.context_budget import ContextTokenCounter
 from openai.types.chat import ChatCompletionMessage
 from thinking_model_helper import ThinkingModelHelper
@@ -17,7 +18,7 @@ class FullQQBudgetRegression(unittest.TestCase):
         environment = patch.dict(os.environ, {
             "BINES_ENV_FILE": "/dev/null", "BINES_MEMORY_BACKEND": "embedded",
             "BINES_CONTEXT_TOKENIZER_PATH": "", "BINES_MODEL_CONTEXT_TOKENS": "",
-            "BINES_WEBSITE_AUTO_OBSERVE": "false",
+            "BINES_WEBSITE_AUTO_OBSERVE": "false", "BINES_AUTONOMY_BACKEND": "sqlite",
         })
         environment.start()
         self.addCleanup(environment.stop)
@@ -32,8 +33,9 @@ class FullQQBudgetRegression(unittest.TestCase):
         bot = napcat.QQThinking(self.store, self.client)
         identity = self.store.identity(original)
         with tool_context(ToolContext(identity, rows[0]["id"], "budget-regression")):
-            full_tools = bot.runner.function_tools("QQ")
-            full_rules = bot.runner.instructions_for_source("QQ", native=True)
+            runner = FollowupRunner(bot.runner, self.store.turn_waits, rows, lambda: "")
+            full_tools = runner.function_tools("QQ")
+            full_rules = runner.instructions_for_source("QQ", native=True)
         self.assertGreaterEqual(len(full_tools), 50 if owner else 15)
 
         replies = [
@@ -72,6 +74,7 @@ class FullQQBudgetRegression(unittest.TestCase):
         if observed:
             counter = ContextTokenCounter()
             self.assertGreater(counter.messages(requests[0]["messages"]) + counter.count(full_tools), target)
+        return requests
 
     def test_existing_32768_setting_runs_complete_owner_and_regular_qq_turns(self):
         for owner in (False, True):
@@ -80,6 +83,17 @@ class FullQQBudgetRegression(unittest.TestCase):
 
     def test_default_target_runs_full_owner_tools_with_large_observation(self):
         self.exercise(owner=True, target=65536, observed=True)
+
+    def test_owner_reply_and_tool_followup_keep_the_pending_plan(self):
+        owner = self.store.identity(napcat.event("1"))
+        self.memory_hub._call("put_state", scope="owner",
+                              data={"active_quest": "约好周六去听排练", "relationship_score": 185})
+        for number in range(38):
+            self.store.add(owner, "assistant" if number % 2 else "user",
+                           f"第{number}条关于演出的讨论，" + "正在对日期和地点。" * 10,
+                           external_id=f"99:p:1:{number}")
+        for request in self.exercise(owner=True, target=65536):
+            self.assertTrue(any("约好周六去听排练" in m["content"] for m in request["messages"]))
 
 
 if __name__ == "__main__":

@@ -59,6 +59,8 @@ class FakeLLM:
     def __call__(self, messages):
         self.calls.append(messages)
         prompt = messages[-1]["content"]
+        if messages[0]["content"].startswith("你是独立的日记事实归属核对员"):
+            return json.dumps({"verdict": "pass", "issues": []})
         if "日记" in messages[0]["content"] or "日期：" in prompt:
             return "今天和管理员聊得很开心。"
         subject = "owner" if "owner" in prompt else f"qq:{STRANGER_QQ}"
@@ -141,12 +143,23 @@ class EndToEndTest(unittest.TestCase):
     def test_diary_is_written_in_persona_voice(self):
         self._talk_locally(3)
         self.worker.run_once()
+        highlights = [f"已记下的约定-{i}" for i in range(80)]
+        self.client.put_state("owner", {"memory_highlights": highlights})
         self.fx.clock.advance(2 * 86400)
         self.assertTrue(self.worker.run_once())
         import persona_profile
-        self.assertEqual(self.llm.calls[-1][0]["content"], persona_profile.diary_system_prompt())
+        write, audit = self.llm.calls[-2:]
+        self.assertEqual(write[0]["content"], persona_profile.diary_system_prompt())
+        self.assertIn("独立的日记事实归属核对员", audit[0]["content"])
+        review = json.loads(audit[1]["content"])
+        self.assertEqual(review["draft"], "今天和管理员聊得很开心。")
+        self.assertEqual(review["evidence"]["state"]["memory_highlights"], highlights[-20:])
+        self.assertIn(highlights[-1], write[1]["content"])
+        self.assertNotIn(highlights[0], write[1]["content"])
+        self.assertEqual(self.client.get_state("owner")["data"]["memory_highlights"], highlights)
         diaries = self.client.list_memories(kinds=["diary"])
         self.assertEqual([d["content"] for d in diaries["items"]], ["今天和管理员聊得很开心。"])
+        self.assertEqual(diaries["items"][0]["meta"]["diary_attribution_review"]["verdict"], "pass")
 
     def test_update_status_tool_uses_versioned_state(self):
         from tools.dependencies import deps

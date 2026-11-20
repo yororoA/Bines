@@ -314,6 +314,10 @@ class MemoryOutbox:
 
 
 class MemoryJournal:
+    @staticmethod
+    def turn_prefix(outbox, turn_id):
+        return "experience:" + hashlib.sha256(str(outbox.path.resolve()).encode()).hexdigest() + ":" + turn_id
+
     def __init__(self, outbox, envelope, turn_id, *, autonomous=False, candidate=None, event_ids=()):
         self.outbox, self.envelope, self.turn_id = outbox, envelope, turn_id
         self.autonomous, self.candidate = autonomous, safe_data(candidate or {})
@@ -331,7 +335,7 @@ class MemoryJournal:
         self.confirmed_expression_sources = {}
         self.confirmed_expression_memories = {}
         self.prompt_frames = []
-        self.prefix = "experience:" + hashlib.sha256(str(outbox.path.resolve()).encode()).hexdigest() + ":" + turn_id
+        self.prefix = self.turn_prefix(outbox, turn_id)
 
     def _record(self, key, record):
         record = {**record, "turn_id": self.turn_id, "autonomous": self.autonomous,

@@ -120,6 +120,25 @@ class IsolationTest(unittest.TestCase):
         self.assertEqual(group_ctx["state"], {"npc_state": {"attire": "开衫"}})
         self.assertEqual(owner_ctx["state"]["relationship_score"], 133)
 
+    def test_yesterdays_autonomous_activity_stays_in_history(self):
+        service = self.fx.service
+        service.put_state(OWNER_SCOPE, {"active_quest": "约好周六去看展"})
+        changes = {"npc_activity": "在查修复用的颜料", "important_thing": "读到一篇展柜照明的文章"}
+        service.put_state(OWNER_SCOPE, {}, changes=changes, source_ref="experience:fixture:study:turn",
+                          autonomous_envelope=local_env())
+        # Someone explicitly kept the same background, at the same clock tick.
+        service.put_state(OWNER_SCOPE, {}, changes={"important_thing": changes["important_thing"]})
+        same_day = service.build_context(qq_private_env(OWNER_QQ), "你好")["state"]
+        self.assertEqual(same_day["npc_state"]["current_activity"], changes["npc_activity"])
+        self.fx.clock.advance(86400)
+        service.put_state(OWNER_SCOPE, {}, changes={"current_location": "书房"})
+        next_day = service.build_context(qq_private_env(OWNER_QQ), "你好")["state"]
+        self.assertNotIn("current_activity", next_day["npc_state"])
+        self.assertEqual(next_day["important_thing"], changes["important_thing"])
+        self.assertEqual(next_day["active_quest"], "约好周六去看展")
+        self.assertEqual(service.get_state(OWNER_SCOPE)["data"]["npc_state"]["current_activity"],
+                         changes["npc_activity"])
+
     def test_local_conversation_continues_in_owner_private_chat(self):
         self.fx.service.record_turn(local_env(ts=self.fx.clock()), "明天提醒我去取快递", "好的，我记住了")
         _, private_ctx = self._recalled(qq_private_env(OWNER_QQ))

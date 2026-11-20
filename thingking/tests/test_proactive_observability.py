@@ -48,6 +48,16 @@ class ProactiveObservabilityTest(unittest.TestCase):
         self.client.request.return_value = {"connected": True}
         self.config = ProactiveConfig(startup_grace=0, min_idle=0, quiet_start=0, quiet_end=0)
 
+    def test_deliberation_bounds_shared_highlights_and_keeps_current_permissions(self):
+        highlights = [f"约定{i}" for i in range(90)] + ["很大的旧摘要" * 5000]
+        materials = {"state": {"memory_highlights": highlights}, "contact_allowed": False}
+        messages = build_deliberation_messages("自主评估", {"context": materials})
+        content = next(m["content"] for m in messages if m["content"].startswith("<deliberation_current>"))
+        current = json.loads(content.splitlines()[1])
+        self.assertFalse(current["contact_allowed"])
+        self.assertEqual(current["state"]["memory_highlights"], highlights[-21:-1])
+        self.assertEqual(len(materials["state"]["memory_highlights"]), 91)
+
     def scheduler(self, decide):
         scheduler = QQProactive(
             self.store, self.memory, self.client, config=self.config,

@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from chatBot.messages import Identity
 from common.context_budget import ContextTokenCounter, bound_request
+from common.memory_journal import MemoryJournal
 from prompt_builder import build_conversation_messages, conversation_style_guard, empty_context
 from skill_runner import QQ_ALLOWED_ACTIONS, SkillRunner
 from test_model_completion import model_with_responses, response
@@ -136,6 +137,47 @@ class RequestBudgetCompatibilityTests(unittest.TestCase):
             self.assertEqual(trace["counting_method"], "utf8_byte_upper_bound")
         finally:
             CURRENT_CONTEXT.reset(token)
+
+    def test_owner_qq_tools_leave_room_for_recall_at_the_soft_target(self):
+        # Reproduce an owner turn with all native schemas, 38 recent messages and
+        # only a few hundred byte-estimate units left after required instructions.
+        counter = ContextTokenCounter()
+        current = {"role": "user", "content": "对方刚刚发来：可以可以"}
+        for window in ("", "69632"):
+            with self.subTest(window=window), patch.dict(os.environ, {
+                    "BINES_CONTEXT_MAX_TOKENS": "65536", "BINES_MODEL_CONTEXT_TOKENS": window}):
+                memory = empty_context({"scope": "owner", "channel_type": "qq_private", "actor_name": "fixture"})
+                memory.update(
+                    working=[{"id": i, "role": "user", "ts": 100 + i,
+                              "content": f"第{i}条，" + "聊到演出的安排。" * 15} for i in range(38)],
+                    state={"active_quest": "一起去现场听排练"},
+                    profile=[{"id": "pref", "kind": "semantic", "content": "喜欢弦乐重奏"}],
+                    recalled=[{"id": "ticket", "kind": "episode", "content": "约的是周六下午的排练"}],
+                )
+                journal = MemoryJournal(SimpleNamespace(path=Path("offline.db")), memory["envelope"], "offline")
+                context = ToolContext(identity=Identity("bot", "owner", owner=True), journal=journal)
+                token = CURRENT_CONTEXT.set(context)
+                self.addCleanup(CURRENT_CONTEXT.reset, token)
+                frame = build_conversation_messages(memory)
+                tools = self.runner.function_tools("QQ")
+                rules = {"role": "system", "content": self.runner.instructions_for_source("QQ", native=True)}
+                metadata = {"role": "system", "content": "本轮 QQ 消息和等待状态 "}
+                schema_cost = counter.count({"tools": tools}) + 16
+                spare = (65536 - schema_cost - counter.messages([rules, metadata, current])
+                         - memory["context_budget"]["fixed_tokens"])
+                self.assertGreater(spare, 500)
+                metadata["content"] += "x" * (spare - 500)
+                sent = bound_request([rules, *frame, metadata, current], tools=tools, max_output_tokens=2048)
+                text = "\n".join(m["content"] for m in sent)
+                for fact in ("一起去现场听排练", "喜欢弦乐重奏", "约的是周六下午的排练", "第37条"):
+                    self.assertIn(fact, text)
+                self.assertIn(rules, sent)
+                self.assertIn(current, sent)
+                self.assertIn(metadata, sent)
+                trace = journal.memory_diagnostics["request"][-1]
+                self.assertLessEqual(trace["input_units"], 65536 + 8192)
+                if window:
+                    self.assertLessEqual(trace["input_units"], trace["hard_input_limit"])
 
     def test_local_tokenizer_uses_real_content_count_for_explicit_window(self):
         counter = ContextTokenCounter()

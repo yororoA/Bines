@@ -190,21 +190,27 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
                                and 0 < frame_budget.get("limit", 0) <= configured_limit
                                and frame_cost <= configured_limit
                                and isinstance(frame_budget.get("fixed_tokens"), int))
-            unreachable_soft_target = (already_bounded and schema_cost + counter.messages(required_outside)
-                                       + frame_budget["fixed_tokens"] > configured_limit)
-            if unreachable_soft_target and (hard_limit is None or
-                    frame_cost + schema_cost + counter.messages(required_outside) <= hard_limit):
-                # This frame already respected the original prompt budget. Tool
-                # declarations must not wipe its evidence simply because their
-                # unavoidable cost alone makes the soft request target impossible.
-                protected_frame = set(range(start, end + 1))
-                preserved_frame = True
-                break
-            target = hard_limit if unreachable_soft_target else limit
-            outside_cost = counter.messages(required_outside if unreachable_soft_target else outside)
-            available = max(0, target - schema_cost - outside_cost)
-            if unreachable_soft_target:
-                available = min(available, configured_limit)
+            available = max(0, limit - schema_cost - counter.messages(outside))
+            protect_rebuilt = False
+            if already_bounded:
+                required_cost = schema_cost + counter.messages(required_outside)
+                fixed = frame_budget["fixed_tokens"]
+                # Near the soft target, retain a small share for scoped memory.
+                # Otherwise a full tool catalog can leave room for the persona
+                # and just a few words of history, even on ordinary short turns.
+                minimum = min(frame_cost, fixed + configured_limit // 8)
+                if required_cost + fixed > configured_limit:
+                    # The target is unreachable even with no optional context.
+                    minimum = frame_cost
+                if hard_limit is not None:
+                    minimum = min(minimum, max(0, hard_limit - required_cost))
+                if minimum > available:
+                    if minimum == frame_cost:
+                        protected_frame = set(range(start, end + 1))
+                        preserved_frame = True
+                        break
+                    available = minimum
+                    protect_rebuilt = True
             from common.clock import CLOCK_MARKER
             from prompt_builder import build_conversation_messages
             # outside already includes this request's actual current input.
@@ -214,7 +220,7 @@ def bound_request(messages, *, tools=None, response_format=None, max_output_toke
             if any(str(m.get("content") or "").startswith(CLOCK_MARKER) for m in outside):
                 rebuilt = [m for m in rebuilt if not str(m.get("content") or "").startswith(CLOCK_MARKER)]
             result = [*result[:start], *rebuilt, *result[end + 1:]]
-            if unreachable_soft_target:
+            if protect_rebuilt:
                 protected_frame = set(range(start, start + len(rebuilt)))
             current_user = next((i for i in range(len(result) - 1, -1, -1)
                                  if result[i].get("role") == "user"), None)
