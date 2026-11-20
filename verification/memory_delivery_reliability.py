@@ -229,14 +229,20 @@ class ProvenanceDelivery(unittest.TestCase):
         self.assert_same_event()
 
     def test_native_operation_subkey_shares_its_turn_event(self):
-        self.journal._record(self.journal.prefix + ':native:desktop:fixture:tool:0',
+        receipt_ref = self.journal.prefix + ':native:desktop:fixture:tool:0'
+        self.journal._record(receipt_ref,
                             {'action': 'send_private_msg', 'category': 'tool', 'status': 'succeeded', 'result': 'fixture receipt'})
         self.journal._record(self.journal.prefix + ':turn', {'action': 'dialogue_turn', 'category': 'turn',
                                                           'status': 'completed', 'result': ''})
         self.deliver_unordered()
         self.service.record_message(self.envelope, 'user', 'fixture evidence', source_ref=self.ref,
                                     turn_ref=self.journal.prefix + ':turn')
-        self.assert_same_event()
+        mid = self.repo.conn.execute('SELECT id FROM messages WHERE source_ref=?', (self.ref,)).fetchone()[0]
+        receipt = self.repo.conn.execute('SELECT memory_id FROM experiences WHERE source_ref=?', (receipt_ref,)).fetchone()
+        self.assertIsNone(self.service.graph.for_memory(receipt['memory_id']))
+        # Sending is audit-only. Its physical evidence still shares the turn.
+        self.assertEqual(self.service.provenance.family('owner', [f'message:{mid}']),
+                         self.service.provenance.family('owner', ['experience:' + receipt_ref]))
 
     def test_longer_turn_prefix_cannot_be_registered_as_shorter_turn(self):
         ref = self.journal.prefix + ':another-turn:receipt'

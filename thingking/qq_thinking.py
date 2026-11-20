@@ -368,9 +368,17 @@ class QQThinking:
                 self.import_history(identity)
                 history = self.store.context(identity, include_ids=True)
                 request = current_input_text(relevant)
-                memory_context = self.memory.build_context(identity_envelope(identity), query=trusted_user_text)
                 from chatBot.media import describe_images, describe_videos, resolve_replies
                 quotes, quoted_events = resolve_replies(relevant, self.client)
+                # Only text from quotes resolved in this conversation can supply
+                # the topic of a follow-up such as “哪个门来着？”.
+                quote_topics = []
+                for quoted in quoted_events:
+                    parts = segments(quoted.get("message", quoted.get("raw_message", "")))
+                    quote_topics.append(readable([part for part in parts if part.get("type") == "text"])[:240])
+                memory_context = self.memory.build_context(
+                    identity_envelope(identity), query=trusted_user_text,
+                    current_input_refs=journal.turn_message_refs, quoted_text="\n".join(quote_topics).strip())
                 quotes = quoted_input_text(quotes, quoted_events, identity)
                 if quotes:
                     request += "\n本轮引用内容：\n" + "\n".join(quotes)

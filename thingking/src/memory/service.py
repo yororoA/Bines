@@ -214,12 +214,17 @@ class MemoryService:
         with self.repo.transaction():
             env = self.resolve(envelope)
             old = self.repo.conn.execute("SELECT * FROM experiences WHERE source_ref=?", (source_ref,)).fetchone()
+            previous_member = None
             if old:
                 if old["scope"] != env.scope:
                     raise ValueError("经历来源不可跨作用域重用")
                 if old["revision"] >= revision:
                     return {"id": old["memory_id"], "status": "duplicate"}
-                if self.repo.get_memory(old["memory_id"])["deleted"]:
+                previous_memory = self.repo.get_memory(old["memory_id"])
+                previous_member = previous_memory["meta"].get("group_state_scope")
+                if previous_member and previous_member != f"{env.scope}:user:{env.external_user_id}":
+                    raise ValueError("群成员不能改写另一成员自主轮次的回执")
+                if previous_memory["deleted"]:
                     return {"id": old["memory_id"], "status": "deleted"}
             ts = float(record.get("finished_at") or record.get("started_at") or env.timestamp or self.clock())
             if not math.isfinite(ts):
@@ -242,6 +247,10 @@ class MemoryService:
                     "experience_summary_pending": record["status"] != "started" and not audit_only,
                     "retrieval": {"keywords": [action, (record.get("candidate") or {}).get("topic", "")]},
                     "source_message_ids": [], "source_message_refs": record.get("source_message_refs") or []}
+            if previous_member:
+                meta["group_state_scope"] = previous_member
+            elif env.is_group and record.get("autonomous") and record.get("category") == "turn":
+                meta["group_state_scope"] = f"{env.scope}:user:{env.external_user_id}"
             for ref in record.get("source_message_refs") or []:
                 message = self.repo.conn.execute("SELECT id,origin FROM messages WHERE source_ref=? AND scope=?",
                                                  (ref, env.scope)).fetchone()
@@ -264,6 +273,9 @@ class MemoryService:
             self.repo.conn.execute("""INSERT INTO experiences VALUES(?,?,?,?,?,?)
                 ON CONFLICT(source_ref) DO UPDATE SET record=excluded.record,revision=excluded.revision""",
                 (source_ref, memory_id, env.scope, json.dumps(record, ensure_ascii=False), revision, self.clock()))
+            if action == "update_status" and record.get("autonomous") and record["status"] == "succeeded":
+                from .highlight_upgrade import repair_autonomous_highlights
+                repair_autonomous_highlights(self.state_effects, receipt_ref=source_ref)
             self.provenance.register(env.scope, source_ref, record)
             self.life.record_experience(env.scope, source_ref, record, revision)
             if record.get("category") == "turn" and record["status"] != "started":
@@ -562,10 +574,19 @@ class MemoryService:
             recent.append(f"{label}：{content[:80]}")
         return "\n".join([f"对方现在说：{text}", *recent]) if recent else text
 
-    def build_context(self, envelope: Dict[str, Any], query: str = "") -> Dict[str, Any]:
+    def build_context(self, envelope: Dict[str, Any], query: str = "", *,
+                      current_input_refs: Sequence[str] = (), quoted_text: str = "") -> Dict[str, Any]:
         env = self.resolve(envelope)
         scopes = scope_policy.recall_scopes(env.scope)
-        working = self._working_segment(env)
+        current_ids = set()
+        if current_input_refs:
+            # Callers append the current input themselves. A previous message
+            # with identical wording is still a distinct historical turn.
+            current_ids = {row["id"] for row in self.repo.conn.execute(
+                """SELECT id FROM messages WHERE scope=? AND conversation_id=?
+                   AND source_ref IN (SELECT value FROM json_each(?))""",
+                (env.scope, env.conversation_id, json.dumps(list(current_input_refs))))}
+        working = self._working_segment(env, current_ids)
         window_start = working[0]["ts"] if working else None
         bridge = self.repo.latest_episode_before(env.conversation_id, window_start)
         if bridge and self.retention.direct(bridge, "memory") is False:
@@ -582,8 +603,12 @@ class MemoryService:
         if bridge:
             bridge["temporal"] = self.repo.temporal.describe_memory_ids([bridge["id"]]).get(bridge["id"])
 
-        recall_query = self._recall_query(query or env.content, working)
+        lookup = query or env.content
+        if quoted_text:
+            lookup = (lookup + "\n" + quoted_text).strip()
+        recall_query = self._recall_query(lookup, working)
         excluded = {bridge["id"]} if bridge else set()
+        excluded.update(f"message:{mid}" for mid in current_ids)
         recalled = self._recall(
             recall_query, scopes, [KIND_EPISODE, KIND_EXCERPT, KIND_DIARY, "message"], excluded,
             env.conversation_id, window_start, include_working=True,
@@ -610,13 +635,14 @@ class MemoryService:
         visible_state = scope_policy.visible_state(env.scope, owner_state)
         if env.scope != OWNER_SCOPE:
             visible_state.update(self.state_effects.conversation_state(state_scope, day, self.settings.day_start_hour))
-        last_user = self.repo.last_message(env.conversation_id, ROLE_USER)
+        last_user = self.repo.last_message(env.conversation_id, ROLE_USER, exclude_ids=current_ids)
         profile = self._profile(env, scopes, recall_query)
         profile_trace = copy.deepcopy(getattr(self.retriever, "last_trace", {}))
         return {
             "envelope": env.to_dict(),
             "scope": env.scope,
             "conversation_id": env.conversation_id,
+            "current_query": (query or env.content or "").strip(),
             "recall_query": recall_query,
             "working": [_message_view(m) for m in working],
             "other_channels": other_channels,
@@ -633,7 +659,7 @@ class MemoryService:
             "last_user_ts": last_user["ts"] if last_user else None,
         }
 
-    def _working_segment(self, env):
+    def _working_segment(self, env, current_ids=()):
         """Keep a bounded anchor; re-read live source rows on every request.
 
         No prompt/evidence/authority cache: retractions, edits and identity
@@ -641,15 +667,19 @@ class MemoryService:
         bridge and recall pipeline when this segment rotates.
         """
         window, extra = self.settings.working_window, self.settings.working_segment_extra
+        if window <= 0:
+            return []
         if not extra:
-            return self.repo.recent_messages(env.conversation_id, window)
+            rows = self.repo.recent_messages(env.conversation_id, window + len(current_ids))
+            return [row for row in rows if row["id"] not in current_ids][-window:]
         with self.repo.transaction():
             rows = self.repo.conn.execute("""SELECT * FROM messages
                 WHERE conversation_id=? AND scope=?
                 AND LOWER(origin) NOT IN ('archived','recalled','withdrawn','deleted','retracted')
                 ORDER BY ts DESC,id DESC LIMIT ?""",
-                (env.conversation_id, env.scope, window + extra + 1)).fetchall()
-            rows = [dict(row) for row in reversed(rows)]
+                (env.conversation_id, env.scope, window + extra + 1 + len(current_ids))).fetchall()
+            rows = [dict(row) for row in reversed(rows) if row["id"] not in current_ids]
+            rows = rows[-(window + extra + 1):]
             anchor = self.repo.conn.execute("SELECT start_ts,start_id FROM prompt_history_segments "
                 "WHERE conversation_id=? AND scope=?", (env.conversation_id, env.scope)).fetchone()
             selected = [row for row in rows if anchor and (row["ts"], row["id"]) >= tuple(anchor)]
@@ -663,10 +693,20 @@ class MemoryService:
     @staticmethod
     def _recall_query(query: str, working: Sequence[Dict[str, Any]]) -> str:
         query = (query or "").strip()
-        if any(marker in query for marker in _REFERENCE_MARKERS):
-            recent_user = [m["content"] for m in working if m["role"] == ROLE_USER][-2:]
-            query = "\n".join([*recent_user, query])
-        return query
+        if not any(marker in query for marker in _REFERENCE_MARKERS):
+            return query
+        # Retrieval and highlight ranking both inspect bounded text. Keep the
+        # actual question first and use short, newest-first hints for referents.
+        hints = []
+        for row in reversed(working):
+            content = (row.get("content") or "").strip()
+            if row["role"] == ROLE_USER and content and content != query:
+                hint = content if len(content) <= 160 else content[:80] + "…" + content[-79:]
+                if hint not in hints:
+                    hints.append(hint)
+                    if len(hints) == 2:
+                        break
+        return "\n".join([query, *hints])
 
     def _score(self, row: Dict[str, Any], distance: float, now: float) -> float:
         relevance = max(0.0, 1.0 - distance)
@@ -756,12 +796,6 @@ class MemoryService:
                 autonomous_conversation = env.conversation_id
             version = self.state_effects.manual(scope, data, expected_version, source_ref=source_ref, changes=changes,
                                                 autonomous_conversation=autonomous_conversation)
-            if source_ref and autonomous_conversation is None:
-                message = self.repo.conn.execute(
-                    "SELECT id FROM messages WHERE source_ref=?", (source_ref,),
-                ).fetchone()
-                if message:
-                    self._cancel_state_for_message(message["id"])
             committed = self.repo.get_state(scope)["data"]
         return {"version": version, "data": committed}
 
@@ -776,8 +810,7 @@ class MemoryService:
                     continue
                 data = dict(row["data"])
                 data.pop("_version", None)
-                current = self.repo.get_state(row["scope"])
-                self.repo.put_state(row["scope"], {**data, **current["data"]}, current["version"])
+                self.state_effects.import_missing(row["scope"], data, source + ":" + key)
                 self.repo.ledger_add(source, key, "state", row["scope"], content_hash(str(data)))
                 imported += 1
             for row in memories:
@@ -849,12 +882,6 @@ class MemoryService:
         if not self.settings.state_updates:
             return
         scope = f"{env.scope}:user:{env.external_user_id}" if env.is_group else env.scope
-        if self.repo.conn.execute("SELECT 1 FROM state_effects WHERE message_id=? AND scope=? "
-                                  "AND kind IN ('patch','manual_operations') LIMIT 1", (message_id, scope)).fetchone():
-            # A desktop tool may commit before its raw message reaches this
-            # service. Once linked, it owns the same update as an on-time write.
-            self._cancel_state_for_message(message_id)
-            return
         self.repo.enqueue_job(
             JOB_STATE, scope, {"message_id": message_id, "memory_scope": env.scope},
             dedupe_key=f"{JOB_STATE}:{message_id}", conversation_id=env.conversation_id,
@@ -1859,17 +1886,16 @@ class MemoryService:
     def delete_memory(self, memory_id: str) -> Dict[str, Any]:
         with self.repo.transaction():
             experience = self.repo.conn.execute(
-                "SELECT scope,source_ref FROM experiences WHERE memory_id=?", (memory_id,)
+                "SELECT e.scope,e.source_ref,m.conversation_id,c.channel,json_extract(m.meta,'$.group_state_scope') AS member "
+                "FROM experiences e JOIN memories m ON m.id=e.memory_id "
+                "LEFT JOIN conversations c ON c.id=m.conversation_id WHERE e.memory_id=?", (memory_id,)
             ).fetchone()
             if experience:
                 self.life.retract_experience(experience["source_ref"])
             self.repo.temporal.delete_memory(memory_id)
             deleted = self.repo.delete_memory(memory_id)
-            if experience and self.repo.conn.execute(
-                "SELECT 1 FROM state_effects WHERE scope=? AND source_ref=? AND kind='autonomous_operations'",
-                (experience["scope"], experience["source_ref"]),
-            ).fetchone():
-                self.state_effects._rebuild(experience["scope"], only_if_changed=True)
+            if experience:
+                self.state_effects.retract_experience(experience)
             node = self.graph.for_memory(memory_id)
             if node:
                 self.graph.invalidate(node["id"])

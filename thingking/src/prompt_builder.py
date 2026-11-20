@@ -8,7 +8,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from common.clock import clock_message, now
-from common.memory_highlights import bounded_highlight_state
+from common.memory_highlights import highlight_groups
 from chatBot.messages import qq_native_at_spans, qq_prompt_body
 
 import persona_profile
@@ -158,9 +158,9 @@ def _scene_policy(envelope: Dict[str, Any], scene: str) -> str:
     return "\n".join(lines)
 
 
-def _state_block(state: Dict[str, Any], query: str = "") -> str:
+def _state_lines(state):
     if not state:
-        return ""
+        return []
     state = {**state, "relationship_level": persona_profile.relationship_level(state)}
     lines = []
     npc = state.get("npc_state") or {}
@@ -173,12 +173,21 @@ def _state_block(state: Dict[str, Any], query: str = "") -> str:
             lines.append(f"- {label}：{state[key]}")
     if state.get("inventory"):
         lines.append(f"- 持有物品：{'；'.join(map(str, state['inventory']))}")
-    highlights = bounded_highlight_state(state, query).get("memory_highlights") or []
+    return lines
+
+
+def _render_state(lines, highlights):
+    lines = list(lines)
     if highlights:
         lines.append("- 历史背景摘要（可能含旧猜测，不是当前活动、情绪或台词；事实以记忆证据为准）：")
         for item in highlights:
             lines.append(f"  · {item}")
     return "--- 当前状态 ---\n" + "\n".join(lines) if lines else ""
+
+
+def _state_block(state: Dict[str, Any], query: str = "") -> str:
+    matched, recent = highlight_groups(state, query)
+    return _render_state(_state_lines(state), [*matched, *recent])
 
 
 def _profile_block(context: Dict[str, Any], scene: str, *, record=True) -> str:
@@ -199,7 +208,7 @@ def _profile_block(context: Dict[str, Any], scene: str, *, record=True) -> str:
     return f"--- 你记得的关于{who}的事 ---\n" + "\n".join(f"- {fact}" for fact in facts)
 
 
-def _life_block(life: Dict[str, Any], scene: str) -> str:
+def _life_block(life: Dict[str, Any], scene: str, *, essential=False) -> str:
     """Render verified continuity without turning numeric state into scripted dialogue."""
     if not life:
         return ""
@@ -207,6 +216,8 @@ def _life_block(life: Dict[str, Any], scene: str) -> str:
         f"- 连续生命记录：第 {int(life.get('day_number') or 1)} 天",
         f"- 当前生命阶段：{life.get('phase_label') or life.get('phase') or '未知'}",
     ]
+    if essential:
+        return "--- 生命连续性 ---\n" + "\n".join(lines)
     if scene in (SCENE_LOCAL, SCENE_OWNER_QQ):
         regulation = life.get("regulation") or {}
         if regulation.get("mode"):
@@ -225,6 +236,53 @@ def _life_block(life: Dict[str, Any], scene: str) -> str:
         "不能声称自行改写出生、年龄、历史、关系或用户状态。\n"
         + "\n".join(lines)
     )
+
+
+def _budget_state_blocks(context, scene, counter, quota):
+    def cost(text):
+        return counter.messages([{"content": text}]) if text else 0
+
+    state, life = context.get("state") or {}, context.get("life") or {}
+    scalar_lines = _state_lines(state)
+    matched, recent = highlight_groups(state, context.get("recall_query") or "",
+                                       context.get("current_query") or "")
+    full_state = _render_state(scalar_lines, [*matched, *recent])
+    full_life = _life_block(life, scene)
+    if cost(full_state) + cost(full_life) <= quota:
+        return [block for block in (full_state, full_life) if block], False
+
+    # Reserve the actual day and phase even when a status field is very long.
+    life_block = full_life if cost(full_life) <= quota // 3 else _life_block(life, scene, essential=True)
+    if cost(life_block) > quota:
+        life_block = ""
+    state_quota = quota - cost(life_block)
+    lines, highlights = [], []
+    for item in matched:
+        if cost(_render_state(lines, [*highlights, item])) <= state_quota:
+            highlights.append(item)
+
+    long_lines = []
+    for line in scalar_lines:
+        if cost(_render_state([*lines, line], highlights)) <= state_quota:
+            lines.append(line)
+        else:
+            long_lines.append(line)
+    for line in long_lines:
+        suffix = "…[历史状态节选]"
+        overhead = cost(_render_state([*lines, suffix], highlights))
+        excerpt = counter.prefix(line, max(0, min(state_quota // 3, state_quota - overhead)))
+        if "：" in excerpt and cost(_render_state([*lines, excerpt + suffix], highlights)) <= state_quota:
+            lines.append(excerpt + suffix)
+
+    # Keep the newest fallback facts that fit, displayed in chronological order.
+    kept_recent = []
+    for item in reversed(recent):
+        if cost(_render_state(lines, [*highlights, item, *kept_recent])) <= state_quota:
+            kept_recent.insert(0, item)
+    state_block = _render_state(lines, [*highlights, *kept_recent])
+    if cost(state_block) + cost(full_life) <= quota:
+        life_block = full_life
+    return [block for block in (state_block, life_block) if block], True
 
 
 def _fmt_time(ts: Optional[float]) -> str:
@@ -440,25 +498,11 @@ def _allocate_context(context, scene, counter, quotas, item_quotas=None):
     for kind, quota in quotas.items():
         remaining = quota
         if kind == "state":
-            blocks = []
-            for block in (_state_block(context.get("state") or {}, context.get("recall_query") or ""),
-                          _life_block(context.get("life") or {}, scene)):
-                if not block:
-                    continue
-                text = block
-                cost = counter.messages([{"content": text}])
-                if cost > remaining:
-                    if kind not in hungry:
-                        hungry.append(kind)
-                    text = counter.prefix(block, max(0, remaining - 64))
-                    if not text:
-                        continue
-                    text += "\n[历史状态节选]"
-                    cost = counter.messages([{"content": text}])
-                if cost <= remaining:
-                    blocks.append(text)
-                    remaining -= cost
+            blocks, clipped = _budget_state_blocks(context, scene, counter, quota)
             selected["_state_blocks"] = blocks
+            remaining -= counter.messages([{"content": block} for block in blocks])
+            if clipped:
+                hungry.append(kind)
         else:
             values = (list(reversed(context.get(kind) or [])) if kind in {"working", "other_channels"} else
                       [("recalled", v) for v in _recall_candidates(context, selected["working"])]
@@ -582,9 +626,8 @@ def build_conversation_messages(context: Dict[str, Any], *, budget_limit=None,
     counter = ContextTokenCounter()
     limit = context_limit() if budget_limit is None else max(0, int(budget_limit))
     fixed = counter.messages([first, scene_message, clock, last])
-    # Some gateway envelopes carry identity only. recall_query still includes
-    # the current request (and may conservatively include referent context).
-    current = str(envelope.get("content") or context.get("recall_query") or "")
+    # Older services may only return the combined search query.
+    current = str(envelope.get("content") or context.get("current_query") or context.get("recall_query") or "")
     # Initial assembly precedes the caller's current-user message. Request-level
     # rebuilding has already charged that actual message in its outside budget.
     reserve = max(1024, counter.count(current) + 64) if reserve_current_input else 0

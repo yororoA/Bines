@@ -25,9 +25,9 @@ class FullQQBudgetRegression(unittest.TestCase):
         napcat.Integration.setUp(self)
         self.addCleanup(napcat.Integration.tearDown, self)
 
-    def exercise(self, *, owner, target, observed=False):
+    def exercise(self, *, owner, target, observed=False, text="查一下现在的时间，再告诉我。"):
         original = napcat.event("1" if owner else "2", msg_id=target,
-                                text="查一下现在的时间，再告诉我。")
+                                text=text)
         napcat.Integration.insert(self, original)
         rows = self.store.claim("budget-regression", 0, 0)
         bot = napcat.QQThinking(self.store, self.client)
@@ -66,6 +66,7 @@ class FullQQBudgetRegression(unittest.TestCase):
         for request in requests:
             self.assertEqual(request["tools"], full_tools, "budgeting must retain every authorized tool")
             self.assertIn(full_rules, [message.get("content") for message in request["messages"]])
+            self.assertEqual(sum(text in m["content"] for m in request["messages"] if m["role"] == "user"), 1)
         self.assertTrue(any(message.get("role") == "tool" and message.get("tool_call_id") == "budget-clock"
                             for message in requests[1]["messages"]))
         sends = [(action, params) for action, params in self.api.calls if action == "send_private_msg"]
@@ -94,6 +95,35 @@ class FullQQBudgetRegression(unittest.TestCase):
                            external_id=f"99:p:1:{number}")
         for request in self.exercise(owner=True, target=65536):
             self.assertTrue(any("约好周六去听排练" in m["content"] for m in request["messages"]))
+
+    def test_long_background_preserves_matched_highlight_and_life(self):
+        agreement = "周六排练约在河畔剧场，进场从东门走。"
+        owner = self.store.identity(napcat.event("1"))
+        self.memory_hub._call("put_state", scope="owner", data={
+            "important_thing": "正在整理衣橱。" * 200,
+            "memory_highlights": [agreement, *[f"第{i}次整理书架" for i in range(60)]],
+        })
+        for number in range(38):
+            self.store.add(owner, "assistant" if number % 2 else "user",
+                           f"第{number}条关于演出的讨论，" + "正在对日期和地点。" * 10,
+                           external_id=f"99:p:1:{number}")
+        for request in self.exercise(owner=True, target=65536, text="周六排练约好了从哪个门进？"):
+            content = "\n".join(message.get("content") or "" for message in request["messages"])
+            self.assertIn(agreement, content)
+            self.assertIn("当前生命阶段：", content)
+
+    def test_referential_question_selects_its_topic_after_a_long_prior_message(self):
+        agreement = "小提琴排练从河畔剧场东门进入。"
+        owner = self.store.identity(napcat.event("1"))
+        self.memory_hub._call("put_state", scope="owner", data={
+            "memory_highlights": [agreement, *[f"蒸鸡蛋和清炒蔬菜搭配，第{i}道菜。" for i in range(4)],
+                                  *[f"第{i}次整理书架" for i in range(36)]],
+        })
+        self.store.add(owner, "user", "午饭菜谱：" + "蒸鸡蛋和清炒蔬菜。" * 100,
+                       external_id="99:p:1:recipe")
+        for request in self.exercise(owner=True, target=65536, text="之前小提琴排练在哪个门见？"):
+            content = "\n".join(message.get("content") or "" for message in request["messages"])
+            self.assertIn(agreement, content)
 
 
 if __name__ == "__main__":

@@ -304,6 +304,7 @@ class Integration(unittest.TestCase):
                 self.assertNotIn("[@QQ:99]", incoming)
                 history = model.conversation[:-2]
                 text = "\n".join(m["content"] for m in history)
+                self.assertNotIn("这是什么意思", text)
                 self.assertIn("以前回复的正文，示例 [@QQ:99]", text)
                 self.assertIn(f'"mentioned_qq": ["{user}"]', text)
                 self.assertNotIn(f"[@QQ:{user}]以前回复", text)
@@ -407,6 +408,26 @@ class Integration(unittest.TestCase):
                 self.assertEqual(vision.call_args.args[0], ["https://qq.example/quoted.png"])
                 self.assertEqual(vision.call_args.kwargs["image_labels"], ["引用消息 95 的图片"])
                 self.store.finish([row["id"] for row in rows], "worker")
+
+    def test_short_followup_uses_the_resolved_quote_to_find_an_old_highlight(self):
+        current = event("2", msg_id=118, message=[
+            {"type": "reply", "data": {"id": "95"}},
+            {"type": "text", "data": {"text": "哪个门来着？"}},
+        ])
+        self.api.quoted["95"] = event("2", msg_id=95, text="小提琴排练")
+        target = "小提琴排练在河畔剧场东门集合"
+        highlights = [target] + [f"散步记录{i}" for i in range(36)]
+        self.memory_hub._call("put_state", scope=self.store.identity(current).state_scope,
+                              data={"memory_highlights": highlights})
+        self.insert(current)
+
+        class Model:
+            def run_skill_protocol(inner, conversation, runner, **kwargs):
+                self.assertIn("小提琴排练", conversation[-1]["content"])
+                self.assertTrue(any(target in m["content"] for m in conversation[:-1]))
+                return "在东门。", [], []
+
+        QQThinking(self.store, self.client).process(self.store.claim("worker", 0, 0), Model())
 
     def test_each_batched_reply_uses_its_own_event_authority(self):
         for message_id in (101, 102):

@@ -84,6 +84,26 @@ class StateIdentityTest(unittest.TestCase):
         self.service.sync_identities()
         return self.service.resolve(qq_private_env("20002", ts=self.clock()))
 
+    def test_binding_keeps_autonomous_withdrawals_and_unlink_redacts_old_owner_history(self):
+        env = qq_private_env("20002", ts=self.clock())
+        private = self.service.resolve(env).scope
+        def activity(scope, tag):
+            ref = "experience:gateway:proactive:" + tag + ":turn"
+            self.service.put_state(scope, {}, source_ref=ref, changes={"npc_activity": tag}, autonomous_envelope=env)
+            return self.service.record_experience(env, ref, {"category": "turn", "autonomous": True,
+                                                  "status": "completed", "action": "turn"})["id"]
+
+        deleted = activity(private, "已撤回活动")
+        self.service.delete_memory(deleted)
+        self.bind(True)
+        self.assertNotIn("已撤回活动", str(self.service.get_state("owner")))
+        activity("owner", "随账号迁移的活动")
+        self.bind(False)
+        history = self.service.state_history("owner")
+        self.assertNotIn("随账号迁移的活动", str(history))
+        self.assertNotIn("已撤回活动", str(self.service.get_state(private)))
+        self.assertIn("随账号迁移的活动", str(self.service.get_state(private)))
+
     def summarized_private(self):
         self.service.settings = replace(self.settings, state_updates=False, summarize_trigger=2, summarize_chunk=2)
         env = qq_private_env("20002", ts=self.clock())

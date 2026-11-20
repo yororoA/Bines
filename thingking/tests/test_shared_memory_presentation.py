@@ -118,6 +118,27 @@ class SharedMemoryPresentationTests(unittest.TestCase):
         self.assertEqual(ids, sorted(ids))
         self.assertLessEqual(sum(spent.values()), 1000)
 
+    def test_state_budget_preserves_whole_facts_and_verified_phase(self):
+        agreement = "排练从东门进入。"
+        oversized = "排练出行：" + "南门关闭，" * 100 + "请从北门绕行。"
+        context = {
+            "recall_query": "排练出行",
+            "state": {"active_quest": "带上门票", "important_thing": "整理衣橱" * 300,
+                      "memory_highlights": [agreement, oversized]},
+            "life": {"day_number": 72, "phase_label": "晚间休息"},
+        }
+        counter = ContextTokenCounter()
+        selected, spent, _ = _allocate_context(context, "local", counter, {"state": 700})
+        shown = "\n".join(selected["_state_blocks"])
+        self.assertIn(agreement, shown)
+        self.assertNotIn("南门关闭", shown)
+        self.assertIn("带上门票", shown)
+        self.assertIn("第 72 天", shown)
+        self.assertIn("晚间休息", shown)
+        self.assertEqual(counter.messages([{"content": text} for text in selected["_state_blocks"]]),
+                         spent["state"])
+        self.assertLessEqual(spent["state"], 700)
+
     def test_native_at_positions_preserve_identical_literal_text_and_media(self):
         from chatBot.messages import qq_prompt_body, qq_prompt_view, readable
         chain = [

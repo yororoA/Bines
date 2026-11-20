@@ -168,7 +168,22 @@ class TemporalStore:
     def _as_of(self, value: Optional[float]) -> float:
         return _timestamp(self.repo.clock() if value is None else value, "as_of")
 
-    def _check_source(self, scope: str, source_ref: Optional[str]) -> Optional[str]:
+    def _group_snapshot_receipt(self, memory_id, source_ref, scope):
+        # Standalone TemporalStore instances do not own the service's experience table.
+        conn = self.repo.conn
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiences'").fetchone():
+            return False
+        receipt = conn.execute(
+            "SELECT 1 FROM experiences e JOIN memories m ON m.id=e.memory_id AND e.scope=m.scope "
+            "WHERE m.id=? AND e.source_ref=? AND json_extract(m.meta,'$.group_state_scope')=? "
+            "AND json_extract(e.record,'$.category')='turn' AND json_extract(e.record,'$.autonomous')=1 "
+            "AND NOT EXISTS(SELECT 1 FROM temporal_retractions r WHERE r.scope=e.scope "
+            "AND r.source_ref IN (e.source_ref,m.id))",
+            (memory_id, source_ref, scope),
+        ).fetchone()
+        return receipt is not None
+
+    def _check_source(self, scope: str, source_ref: Optional[str], *, state_snapshot=False) -> Optional[str]:
         if source_ref is None:
             return None
         _text(source_ref, "source_ref")
@@ -185,7 +200,14 @@ class TemporalStore:
         if not rows:
             return None
         source = rows[0]
-        if source["scope"] != scope or source["deleted"]:
+        if source["deleted"]:
+            raise ValueError("source memory must be active in the same scope")
+        if source["scope"] != scope:
+            member_snapshot = state_snapshot and scope.startswith(source["scope"] + ":user:")
+            if member_snapshot and self._group_snapshot_receipt(source["id"], source_ref, scope):
+                # The member snapshot follows its turn ref, without making the
+                # group memory itself a source visible inside the member scope.
+                return None
             raise ValueError("source memory must be active in the same scope")
         if self.repo.conn.execute(
             "SELECT 1 FROM temporal_retractions WHERE scope = ? AND source_ref IN (?, ?)",
@@ -213,7 +235,7 @@ class TemporalStore:
         recorded_at = _timestamp(recorded_at, "recorded_at")
         effective_at = recorded_at if effective_at is None else _timestamp(effective_at, "effective_at")
         with self.repo.transaction() as conn:
-            source_memory_id = self._check_source(scope, source_ref)
+            source_memory_id = self._check_source(scope, source_ref, state_snapshot=True)
             old = conn.execute(
                 "SELECT * FROM state_history WHERE scope = ? AND version = ?", (scope, version),
             ).fetchone()

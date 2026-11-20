@@ -1,6 +1,8 @@
 """Exercise the legacy status ledger, including receipts arriving with old QQ attribution."""
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from memory.highlight_upgrade import repair_autonomous_highlights
 from memory.repository import MemoryRepository
@@ -16,7 +18,8 @@ class HighlightUpgradeTest(unittest.TestCase):
         self.repo.temporal = TemporalStore(self.repo)
         self.effects = StateEffects(self.repo)
         self.conn = self.repo.conn
-        self.conn.execute("CREATE TABLE experiences (source_ref TEXT,scope TEXT,record TEXT,memory_id TEXT)")
+        self.conn.execute("CREATE TABLE experiences (source_ref TEXT PRIMARY KEY,memory_id TEXT,scope TEXT,"
+                          "record TEXT,revision INTEGER DEFAULT 1,recorded_at REAL DEFAULT 0)")
         self.base = ["保留旧约定", "稍后明确删除"] + [f"既有记忆{i}" for i in range(30)]
         self.effects.manual("owner", {"memory_highlights": self.base, "current_location": "家"}, source_ref="manual:list")
         self.effects.manual("visitor", {"memory_highlights": ["访客约定"]})
@@ -40,7 +43,7 @@ class HighlightUpgradeTest(unittest.TestCase):
                        "status": "succeeded", "started_at": str(self.now - .5), "finished_at": str(self.now + .5),
                        "result": f"动态状态已更新 (版本: {state['version']} -> {version})"}
             memory = self.repo.add_memory("episode", "owner", "工具经历原文")
-            self.conn.execute("INSERT INTO experiences VALUES(?,'owner',?,?)",
+            self.conn.execute("INSERT INTO experiences(source_ref,scope,record,memory_id) VALUES(?,'owner',?,?)",
                               (self.autonomous_ref, json.dumps(receipt), memory))
 
     def test_recover_verified_evictions_and_keep_explicit_removal_later_edit_and_history(self):
@@ -67,6 +70,46 @@ class HighlightUpgradeTest(unittest.TestCase):
 
     def test_ambiguous_late_automatic_proposal_hidden_by_fifo_is_not_revived(self):
         self.check_late_proposal()
+
+    def test_success_delivered_after_upgrade_restores_only_unremoved_entries(self):
+        from memory.channels import local_envelope
+        from memory.lexical_index import LexicalIndex
+        from memory.service import MemoryService
+        from memory.settings import MemorySettings
+
+        self.operation({"add_memory_highlight": "资料笔记"}, autonomous=True)
+        self.operation({"add_memory_highlight": "新约定"})
+        # This explicit deletion targets an item which FIFO has already evicted.
+        self.operation({"remove_memory_highlight": self.base[1]})
+        record = json.loads(self.conn.execute("SELECT record FROM experiences").fetchone()[0])
+        self.conn.execute("DELETE FROM experiences")
+        self.conn.execute("INSERT INTO meta VALUES('autonomous_highlight_receipts_v1','1')")
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = MemorySettings(data_dir=Path(tmp), state_updates=False, associations_enabled=False)
+            def boot():
+                return MemoryService(self.repo, LexicalIndex(self.repo), settings, self.repo.clock)
+            service = boot()
+            before = service.get_state("owner")
+            env = local_envelope(timestamp=self.now).to_dict()
+            service.record_experience(env, self.autonomous_ref, {**record, "status": "started"})
+            self.assertEqual(service.get_state("owner"), before)
+            service.record_experience(env, self.autonomous_ref, record, revision=2)
+            restored = service.get_state("owner")
+            self.assertEqual(restored["data"]["memory_highlights"], [self.base[0], *self.base[2:], "新约定"])
+            service.record_experience(env, self.autonomous_ref, record, revision=2)
+            self.assertEqual(boot().get_state("owner"), restored)
+
+    def test_late_repair_respects_whole_list_replacement_and_conflicting_receipts(self):
+        self.operation({"add_memory_highlight": "资料笔记"}, autonomous=True)
+        before = self.repo.get_state("owner")
+        self.conn.execute("INSERT INTO experiences SELECT 'experience:ambiguous',memory_id,scope,record,1,0 "
+                          "FROM experiences WHERE source_ref=?", (self.autonomous_ref,))
+        repair_autonomous_highlights(self.effects, receipt_ref=self.autonomous_ref)
+        self.assertEqual(self.repo.get_state("owner"), before)
+        self.conn.execute("DELETE FROM experiences WHERE source_ref='experience:ambiguous'")
+        self.effects.manual("owner", {"memory_highlights": ["仅保留这个"]})
+        repair_autonomous_highlights(self.effects, receipt_ref=self.autonomous_ref)
+        self.assertEqual(self.repo.get_state("owner")["data"]["memory_highlights"], ["仅保留这个"])
 
     def test_late_proposal_before_materialized_baseline_is_not_revived(self):
         data = self.repo.get_state("owner")["data"]

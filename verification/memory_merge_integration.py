@@ -155,18 +155,22 @@ class MemoryMergeIntegration(unittest.TestCase):
             hits = self.memory.search("生日", ["qq:99:group:10"], k=10)
         self.assertEqual([hit["content"] for hit in hits], ["主人生日秘密"])
 
-    def test_manual_state_write_cancels_same_message_background_job(self):
+    def test_manual_state_write_and_background_extraction_apply_independent_fields(self):
         from tools.memory_tool import update_status
         self.memory.put_state("owner", {"relationship_score": 133})
-        ctx = self.context(event("1", text="谢谢你一直陪我"))
+        ctx = self.context(event("1", text="谢谢你一直陪我，下周二我们约好去看花"))
         with tool_context(ctx), patch("chatBot.memory_hub.GatewayMemoryClient", return_value=self.memory):
             self.memory.build_context({})
             job = self.hub.service.claim_job(kinds=["update_state"])
             self.assertIsNotNone(job)
             update_status(relationship_delta=1)
-        result = self.memory.complete_state_update(job["job"]["id"], {"relationship_delta": 1})
-        self.assertEqual(result["status"], "ignored")
-        self.assertEqual(self.memory.get_state("owner")["data"]["relationship_score"], 134)
+        changes = {"relationship_delta": 1, "add_memory_highlight": "下周二去看花"}
+        result = self.memory.complete_state_update(job["job"]["id"], changes, expected_version=job["materials"]["version"])
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(self.memory.complete_state_update(job["job"]["id"], changes)["status"], "ignored")
+        state = self.memory.get_state("owner")["data"]
+        self.assertEqual(state["relationship_score"], 134)
+        self.assertEqual(state["memory_highlights"], ["下周二去看花"])
 
     def test_history_import_does_not_reapply_old_relationship_changes(self):
         ev = event("1", msg_id=456, text="历史问候")

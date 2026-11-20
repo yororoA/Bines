@@ -505,6 +505,24 @@ class RuntimeMemoryBoundaryTest(unittest.TestCase):
         explicit = self.service.search("蓝色围巾", [OWNER_SCOPE], kinds=["message"])
         self.assertTrue(any(h["message_id"] == raw for h in explicit))
 
+    def test_synced_current_batch_is_not_history_and_keeps_an_earlier_identical_message(self):
+        question = "我们在哪个剧场见？"
+        previous_ts = self.fx.clock() - 86400
+        for i in range(3):
+            self.service.record_message(local_env(previous_ts - 3 + i), "assistant", f"旧消息{i}", source_ref=f"old-{i}")
+        self.service.record_message(local_env(previous_ts), "user", question, source_ref="prior")
+        for ref, text in (("current-1", question), ("current-2", "靠近东门吗？")):
+            self.service.record_message(local_env(self.fx.clock()), "user", text, source_ref=ref)
+        self.service.reconcile_index()
+        context = self.service.build_context(local_env(), question, current_input_refs=["current-1", "current-2"])
+        self.assertEqual([m["source_ref"] for m in context["working"]], ["old-0", "old-1", "old-2", "prior"])
+        self.assertEqual(context["last_user_ts"], previous_ts)
+        stored = self.service.build_context(local_env(), question)["working"]
+        self.assertEqual([m["source_ref"] for m in stored][-3:], ["prior", "current-1", "current-2"])
+        current_ids = {m["id"] for m in stored if m["source_ref"].startswith("current-")}
+        self.assertFalse(any(item.get("message_id") in current_ids
+                             for item in [*context["recalled"], *context["recall_backfill"]]))
+
     def test_profile_is_bounded_and_keeps_legacy_identity(self):
         fixed = self.repo.add_memory("semantic", OWNER_SCOPE, "fixed identity",
                                      subject_id="owner", origin="legacy", importance=1)

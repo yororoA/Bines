@@ -230,9 +230,11 @@ class LegacyMigrator:
             return
         state = json.loads(path.read_text(encoding="utf-8")) or {}
         state.pop("current_time", None)
-        current = self.repo.get_state(OWNER_SCOPE)
-        merged = {**state, **(current["data"] or {})}
-        self.repo.put_state(OWNER_SCOPE, merged)
+        from .state_effects import StateEffects
+        from .temporal import TemporalStore
+        if getattr(self.repo, "temporal", None) is None:
+            self.repo.temporal = TemporalStore(self.repo)
+        StateEffects(self.repo).import_missing(OWNER_SCOPE, state, source + ":state")
         self._ledger(source, "state", "state", OWNER_SCOPE, json.dumps(state, ensure_ascii=False, sort_keys=True))
         self.report.count(source, imported=True)
 

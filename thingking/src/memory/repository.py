@@ -7,7 +7,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Collection, Dict, Iterable, Iterator, List, Optional, Sequence
 
 from .models import ROLES, content_hash, is_system_event
 
@@ -291,12 +291,16 @@ class MemoryRepository:
         )
         return [dict(r) for r in rows]
 
-    def last_message(self, conversation_id: str, role: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def last_message(self, conversation_id: str, role: Optional[str] = None, *,
+                     exclude_ids: Collection[int] = ()) -> Optional[Dict[str, Any]]:
         sql = "SELECT * FROM messages WHERE conversation_id = ? AND LOWER(origin) != 'archived'"
         params: List[Any] = [conversation_id]
         if role:
             sql += " AND role = ?"
             params.append(role)
+        if exclude_ids:
+            sql += " AND id NOT IN (SELECT value FROM json_each(?))"
+            params.append(json.dumps(list(exclude_ids)))
         row = self.conn.execute(sql + " ORDER BY ts DESC, id DESC LIMIT 1", params).fetchone()
         return dict(row) if row else None
 

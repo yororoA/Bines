@@ -7,16 +7,12 @@ from .state_effects import _RELATIONSHIP, _clock_key, _flat
 
 _FIELD = "memory_highlights"
 _ACTIONS = {"add_memory_highlight", "remove_memory_highlight"}
-_POLICY = "autonomous_highlight_receipts_v1"
+_POLICY = "autonomous_highlight_receipts_v2"
 _SUCCESS = re.compile(r"动态状态已更新 \(版本: ([0-9]{1,19}) -> ([0-9]{1,19})\)")
 
 
-def _confirmed(effects, scope, receipts, rows):
+def _confirmed(effects, scope, receipts):
     """A receipt must identify one committed operation, even when old source refs repeat."""
-    operations = defaultdict(list)
-    for row in rows:
-        if row["kind"] == "manual_operations":
-            operations[row["source_ref"], json.dumps(row["changes"], sort_keys=True)].append(row)
     matches = {}
     for receipt in receipts:
         record = json.loads(receipt["record"])
@@ -39,7 +35,9 @@ def _confirmed(effects, scope, receipts, rows):
         args = record.get("args")
         if not isinstance(args, dict):
             continue
-        candidates = operations.get((snapshot["source_ref"], json.dumps(args, sort_keys=True)), [])
+        candidates = [row for row in effects.conn.execute(
+            "SELECT * FROM state_effects WHERE scope=? AND source_ref IS ? AND kind='manual_operations'",
+            (scope, snapshot["source_ref"])) if json.loads(row["changes"]) == args]
         if len(candidates) == 1 and effects._source_valid(candidates[0]):
             seq = candidates[0]["seq"]
             # Duplicate attestations for a single operation are ambiguous.
@@ -97,12 +95,12 @@ def _refresh_clocks(effects, scope, fields, baseline, rows):
 
 
 def _repair_scope(effects, scope, receipts):
+    confirmed = _confirmed(effects, scope, receipts)
+    if not confirmed:
+        return
     rows = [dict(row) for row in effects.conn.execute("SELECT * FROM state_effects WHERE scope=? ORDER BY seq", (scope,))]
     for row in rows:
         row["changes"] = json.loads(row["changes"])
-    confirmed = _confirmed(effects, scope, receipts, rows)
-    if not confirmed:
-        return
     baseline = effects.conn.execute("SELECT data,updated_at FROM state_effect_baselines WHERE scope=?", (scope,)).fetchone()
     current = effects.repo.get_state(scope)
     valid = [row for row in rows if effects._source_valid(row)]
@@ -148,8 +146,7 @@ def _repair_scope(effects, scope, receipts):
         fields.update(_clock_key(action, value) for action, value in changes.items())
         if "relationship_delta" in changes:
             fields.update(_RELATIONSHIP)
-        if repair_list:
-            changes = {key: value for key, value in changes.items() if key not in _ACTIONS}
+        changes = {key: value for key, value in changes.items() if key not in _ACTIONS}
         row.update(kind="autonomous_operations", message_id=None, changes=changes, event_ts=stamp)
         effects.conn.execute(
             "UPDATE state_effects SET kind=?,message_id=NULL,conversation_id=?,source_ref=?,event_ts=?,changes=? WHERE seq=?",
@@ -171,19 +168,31 @@ def _repair_scope(effects, scope, receipts):
             effects.repo.put_state(scope, {**current["data"], _FIELD: restored}, current["version"])
 
 
-def repair_autonomous_highlights(effects):
+def _receipts(conn, condition="", params=()):
+    return conn.execute("""
+        SELECT e.scope,e.source_ref,e.record,e.memory_id,m.conversation_id FROM experiences e
+        JOIN memories m ON m.id=e.memory_id AND m.scope=e.scope AND m.deleted=0
+        WHERE json_extract(e.record,'$.action')='update_status'
+          AND json_extract(e.record,'$.autonomous')=1 AND json_extract(e.record,'$.status')='succeeded'
+          AND NOT EXISTS (SELECT 1 FROM temporal_retractions r WHERE r.scope=e.scope
+                          AND r.source_ref IN (e.source_ref, e.memory_id, m.source_ref))
+    """ + condition, params)
+
+
+def repair_autonomous_highlights(effects, *, receipt_ref=None):
     with effects.repo.transaction():
+        if receipt_ref is not None:
+            # New turn-scoped effects have no legacy manual operation to repair.
+            # Probe only this receipt before examining other witnesses for its scope.
+            row = _receipts(effects.conn, " AND e.source_ref=?", (receipt_ref,)).fetchone()
+            if row and _confirmed(effects, row["scope"], [row]):
+                scoped = _receipts(effects.conn, " AND e.scope=?", (row["scope"],))
+                _repair_scope(effects, row["scope"], scoped)
+            return
         if effects.conn.execute("SELECT 1 FROM meta WHERE key=?", (_POLICY,)).fetchone():
             return
         receipts = defaultdict(list)
-        for row in effects.conn.execute("""
-            SELECT e.scope,e.source_ref,e.record,e.memory_id,m.conversation_id FROM experiences e
-            JOIN memories m ON m.id=e.memory_id AND m.scope=e.scope AND m.deleted=0
-            WHERE json_extract(e.record,'$.action')='update_status'
-              AND json_extract(e.record,'$.autonomous')=1 AND json_extract(e.record,'$.status')='succeeded'
-              AND NOT EXISTS (SELECT 1 FROM temporal_retractions r WHERE r.scope=e.scope
-                              AND r.source_ref IN (e.source_ref, e.memory_id, m.source_ref))
-        """):
+        for row in _receipts(effects.conn):
             receipts[row["scope"]].append(row)
         for scope, scoped in receipts.items():
             _repair_scope(effects, scope, scoped)

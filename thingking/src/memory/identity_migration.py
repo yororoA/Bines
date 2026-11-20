@@ -64,6 +64,17 @@ def migrate(service, envelope, old_scope):
     experience_refs = [r[0] for r in conn.execute("SELECT source_ref,memory_id FROM experiences WHERE scope=?", (old_scope,))
                        if r[1] in moved]
 
+    # Autonomous effects check their withdrawal in the destination scope
+    # during replay. Move tombstones before rebuilding either current state.
+    roots = {f"message:{m['id']}" for m in messages} | {m["source_ref"] for m in messages if m["source_ref"]}
+    roots.update(moved)
+    roots.update(memories[mid]["source_ref"] for mid in moved if memories[mid]["source_ref"])
+    for ref in roots:
+        row = conn.execute("SELECT * FROM temporal_retractions WHERE scope=? AND source_ref=?", (old_scope, ref)).fetchone()
+        if row:
+            conn.execute("INSERT OR IGNORE INTO temporal_retractions VALUES(?,?,?,?)", (new_scope, ref, row["fact_key"], row["valid_from"]))
+            conn.execute("DELETE FROM temporal_retractions WHERE scope=? AND source_ref=?", (old_scope, ref))
+
     # State effects retain physical message identity across scope changes. Never
     # replay a completed relationship increment simply because its owner changed.
     service.state_effects.migrate_conversation(conversation, old_scope, new_scope)
@@ -140,14 +151,6 @@ def migrate(service, envelope, old_scope):
                      "status=CASE WHEN status='running' THEN 'pending' ELSE status END,lease_until=NULL WHERE id=?",
                      (new_scope, json.dumps(payload, ensure_ascii=False), row["id"]))
 
-    roots = {f"message:{m['id']}" for m in messages} | {m["source_ref"] for m in messages if m["source_ref"]}
-    roots.update(moved)
-    roots.update(memories[mid]["source_ref"] for mid in moved if memories[mid]["source_ref"])
-    for ref in roots:
-        row = conn.execute("SELECT * FROM temporal_retractions WHERE scope=? AND source_ref=?", (old_scope, ref)).fetchone()
-        if row:
-            conn.execute("INSERT OR IGNORE INTO temporal_retractions VALUES(?,?,?,?)", (new_scope, ref, row["fact_key"], row["valid_from"]))
-            conn.execute("DELETE FROM temporal_retractions WHERE scope=? AND source_ref=?", (old_scope, ref))
     service.provenance.migrate(old_scope, new_scope, sorted(message_ids), experience_refs)
     for node in affected_nodes:
         if node["source_type"] == "raw":

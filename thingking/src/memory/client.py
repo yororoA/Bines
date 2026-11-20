@@ -62,8 +62,14 @@ class MemoryClient:
     def record_message(self, envelope: Dict[str, Any], role: str, content: str) -> Dict[str, Any]:
         return self.call("record_message", envelope=envelope, role=role, content=content)
 
-    def build_context(self, envelope: Dict[str, Any], query: str = "") -> Dict[str, Any]:
-        return self.call("build_context", envelope=envelope, query=query)
+    def build_context(self, envelope: Dict[str, Any], query: str = "", *,
+                      current_input_refs: Sequence[str] = (), quoted_text: str = "") -> Dict[str, Any]:
+        params = {}
+        if current_input_refs:
+            params["current_input_refs"] = list(current_input_refs)
+        if quoted_text:
+            params["quoted_text"] = quoted_text
+        return self.call("build_context", envelope=envelope, query=query, **params)
 
     def get_state(self, scope: str = "owner") -> Dict[str, Any]:
         return self.call("get_state", scope=scope)

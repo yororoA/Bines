@@ -573,7 +573,7 @@ def process_message(user_input, img_descr, source=None, extra_data=None):
             return _process_message(user_input, img_descr, source, extra_data)
     finally:
         memory_outbox.record_message(envelope, "user", user_input, user_ref,
-                                     state_update=not getattr(journal, "state_updated", False),
+                                     state_update=True,
                                      turn_ref=journal.prefix + ":turn")
 
 
@@ -628,7 +628,8 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
         memory_text = prompt_builder.strip_qq_prefix(user_input) if qq_ctx else user_input
         envelope = envelope_for_turn(source, extra_data, memory_text, owner_name=MEMORY_SETTINGS.owner_name).to_dict()
         try:
-            memory_context = memory_client.build_context(envelope, query=memory_text)
+            memory_context = memory_client.build_context(
+                envelope, query=memory_text, current_input_refs=journal.turn_message_refs if journal else ())
         except Exception as mem_err:
             print(f"[Thinking] 记忆上下文获取失败，本轮仅使用人格与场景: {mem_err}", flush=True)
             memory_context = prompt_builder.empty_context(envelope)
@@ -773,7 +774,6 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
         # 所有渠道统一写入记忆；QQ 只记录实际发出去的回复。
         assistant_memory = sent_qq_reply if qq_ctx else ("" if _is_only_action_or_empty(to_save) else to_save)
         try:
-            journal.state_updated = bool(stream_result.get("state_updated", False))
             journal.turn_result = assistant_memory
             journal.turn_status = ("failed" if stream_result.get("error") else
                                    "interrupted" if exited_due_to_interrupt else "completed")

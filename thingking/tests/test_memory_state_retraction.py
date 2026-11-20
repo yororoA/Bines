@@ -139,6 +139,32 @@ class MemoryStateRetractionTest(unittest.TestCase):
         self.service.delete_memory(source["memory_id"])
         self.assertEqual(self.service.get_state("owner")["data"]["important_thing"], "会前准备")
 
+    def test_group_turn_deletion_targets_its_member_in_either_delivery_order(self):
+        for receipt_first in (False, True):
+            with self.subTest(receipt_first=receipt_first):
+                group = str(int(receipt_first) + 100)
+                first, other = self.envelope("20001", group), self.envelope("20002", group)
+                scope = self.service.resolve(first).scope
+                member, neighbor = scope + ":user:20001", scope + ":user:20002"
+                self.service.put_state(neighbor, {"important_thing": "别人的事"})
+                ref = "experience:gateway:proactive:" + group + ":turn"
+                record = {"category": "turn", "autonomous": True, "action": "turn", "status": "started"}
+                if receipt_first:
+                    self.service.record_experience(first, ref, record)
+                    with self.assertRaises(ValueError):
+                        self.service.put_state(neighbor, {}, changes={"npc_activity": "错用回执"},
+                                               source_ref=ref, autonomous_envelope=other)
+                self.service.put_state(member, {}, changes={"npc_activity": "待撤回的活动"},
+                                       source_ref=ref, autonomous_envelope=first)
+                receipt = self.service.record_experience(first, ref, {**record, "status": "completed"}, revision=2)
+                with self.assertRaises(ValueError):
+                    self.service.record_experience(other, ref, record, revision=3)
+                self.service.delete_memory(receipt["id"])
+                self.assertNotIn("待撤回的活动", str(self.service.get_state(member)))
+                self.assertNotIn("待撤回的活动", str(self.service.state_history(member)))
+                self.assertNotIn("待撤回的活动", str(self.service.build_context(first, "近况")["state"]))
+                self.assertEqual(self.service.get_state(neighbor)["data"]["important_thing"], "别人的事")
+
     def test_newer_location_and_unsourced_manual_update_survive(self):
         old = self.record("old", "我在上海")
         self.complete({"current_location": "上海"})
@@ -302,14 +328,105 @@ class MemoryStateRetractionTest(unittest.TestCase):
         self.service.record_message(late, "user", "我在上海", source_ref="late-a", state_update=False)
         self.assertEqual(self.service.get_state("owner")["data"]["current_location"], "杭州")
 
-    def test_late_manual_source_does_not_enqueue_a_duplicate_automatic_relationship_effect(self):
+    def test_late_manual_source_leaves_independent_fields_for_the_worker(self):
         self.service.put_state("owner", {}, source_ref="late-manual",
                                changes={"relationship_delta": 1})
         late = {**self.envelope("10001"), "timestamp": self.now - 10}
         for _ in range(2):
-            self.service.record_message(late, "user", "谢谢你", source_ref="late-manual")
-            self.assertIsNone(self.service.claim_job(["update_state"]))
-            self.assertEqual(self.service.get_state("owner")["data"]["relationship_score"], 1)
+            self.service.record_message(late, "user", "谢谢你，周二去看花", source_ref="late-manual")
+        self.complete({"relationship_delta": 1, "add_memory_highlight": "周二去看花"})
+        self.assertIsNone(self.service.claim_job(["update_state"]))
+        data = self.service.get_state("owner")["data"]
+        self.assertEqual((data["relationship_score"], data["memory_highlights"]), (1, ["周二去看花"]))
+
+    def test_manual_after_worker_supersedes_the_same_source_once_and_keeps_its_other_fields(self):
+        self.service.put_state("owner", {"relationship_score": 100})
+        env = self.record("same-source", "周五一起听歌，我会在杭州")
+        self.complete({"relationship_delta": 2, "current_location": "杭州", "add_memory_highlight": "周五要听歌"})
+        for _ in range(2):
+            self.service.put_state("owner", {}, source_ref="same-source",
+                                   changes={"relationship_delta": 1, "add_memory_highlight": "约好周五一起听歌"})
+        data = self.service.get_state("owner")["data"]
+        self.assertEqual((data["relationship_score"], data["current_location"], data["memory_highlights"]),
+                         (101, "杭州", ["约好周五一起听歌"]))
+        self.withdraw("same-source", env)
+        self.assertEqual(self.service.get_state("owner")["data"], {"relationship_score": 100})
+
+    def test_delayed_manual_write_and_later_withdrawal_agree_on_source_order(self):
+        self.service.put_state("owner", {"relationship_score": 199})
+        self.now += 1
+        self.record("dorm", "还在宿舍，拿了书")
+        self.now += 1
+        self.record("airport", "已经到机场，取了票")
+        self.service.put_state("owner", {}, source_ref="airport",
+                               changes={"current_location": "机场", "add_item": "票", "relationship_delta": -1})
+        self.service.put_state("owner", {}, source_ref="dorm",
+                               changes={"current_location": "宿舍", "add_item": "书", "relationship_delta": 2})
+        state = self.service.get_state("owner")["data"]
+        self.assertEqual((state["current_location"], state["inventory"], state["relationship_score"]),
+                         ("机场", ["书", "票"], 199))
+        self.now += 1
+        pen = self.record("pen", "多带支笔")
+        self.service.put_state("owner", {}, source_ref="pen", changes={"add_item": "笔"})
+        self.withdraw("pen", pen)
+        self.assertEqual(self.service.get_state("owner")["data"], state)
+
+    def test_legacy_highlights_remain_intact_across_unrelated_writes_and_explicit_edits(self):
+        for scope, original in (("owner", "周五见面"), ("other", {"旧字段": "原文"}), ("third", 73)):
+            with self.subTest(original=original):
+                self.service.put_state(scope, {"memory_highlights": original})
+                self.service.put_state(scope, {}, changes={"current_time": "星期五"})
+                self.assertEqual(self.service.get_state(scope)["data"]["memory_highlights"], original)
+                self.service.put_state(scope, {}, changes={"add_memory_highlight": "带上书"})
+                self.assertEqual(self.service.get_state(scope)["data"]["memory_highlights"], [original, "带上书"])
+                self.service.put_state(scope, {}, changes={"remove_memory_highlight": "带上书"})
+                self.assertEqual(self.service.get_state(scope)["data"]["memory_highlights"], [original])
+
+    def test_gateway_import_survives_an_older_worker_and_its_subsequent_withdrawal(self):
+        self.service.put_state("owner", {"active_quest": "保留已有任务"})
+        old = {**self.envelope(), "timestamp": self.now - 60}
+        self.service.record_message(old, "user", "迟到的位置", source_ref="delayed")
+        row = {"scope": "owner", "data": {"active_quest": "旧任务", "important_thing": "导入的重要资料"}}
+        self.assertEqual(self.service.import_gateway_snapshot("old-gateway", [row], [])["imported"], 1)
+        self.assertEqual(self.service.import_gateway_snapshot("old-gateway", [row], [])["imported"], 0)
+        self.complete({"current_location": "迟到的位置", "important_thing": "旧进展"})
+        state = self.service.get_state("owner")["data"]
+        self.assertEqual(state["current_location"], "迟到的位置")
+        self.assertEqual(state["important_thing"], "导入的重要资料")
+        self.now += 1
+        later = self.record("later", "临时任务")
+        self.service.put_state("owner", {}, source_ref="later", changes={"active_quest": "临时任务"})
+        self.withdraw("later", later)
+        self.assertEqual(self.service.get_state("owner")["data"], state)
+        self.withdraw("delayed", old)
+        self.assertEqual(self.service.get_state("owner")["data"],
+                         {"active_quest": "保留已有任务", "important_thing": "导入的重要资料"})
+
+    def test_late_write_leaves_untracked_old_import_fields_intact(self):
+        self.service.put_state("owner", {"active_quest": "保留已有任务"})
+        before = self.service.get_state("owner")
+        self.repo.put_state("owner", {**before["data"], "important_thing": "旧版本导入"})
+        old = {**self.envelope(), "timestamp": self.now - 60}
+        self.service.record_message(old, "user", "迟到的位置", source_ref="delayed")
+        self.complete({"current_location": "迟到的位置"})
+        data = self.service.get_state("owner")["data"]
+        self.assertEqual((data["current_location"], data["important_thing"]), ("迟到的位置", "旧版本导入"))
+
+    def test_older_delta_cannot_change_a_materialized_baseline_or_retime_its_score(self):
+        # A pre-ledger store can have a current snapshot and no usable history.
+        self.repo.put_state("owner", {"relationship_score": 50})
+        self.repo.conn.execute("DELETE FROM state_history WHERE scope='owner'")
+        earlier = {**self.envelope(), "timestamp": self.now - 60}
+        self.service.record_message(earlier, "user", "早先的帮助", source_ref="before-baseline")
+        self.complete({"relationship_delta": 2})
+        self.assertEqual(self.service.get_state("owner")["data"]["relationship_score"], 50)
+        clock = self.repo.conn.execute("SELECT event_ts,message_id FROM state_field_clocks "
+                                       "WHERE scope='owner' AND field='relationship_score'").fetchone()
+        self.assertEqual(tuple(clock), (self.now, 0))
+        for ref in ("new-first", "new-second"):
+            self.record(ref, "同一时刻的另一条消息")
+            self.complete({"relationship_delta": 1})
+        self.assertEqual(self.service.get_state("owner")["data"]["relationship_score"], 52)
 
     def test_foreign_message_alias_cannot_retract_or_rebind_owner_state(self):
         self.service.put_state("owner", {}, source_ref="shared-alias", changes={"current_location": "北京"})

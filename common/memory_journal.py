@@ -586,8 +586,6 @@ class MemoryJournal:
             raise
         self.finish(entry, result)
         self.tool_result_refs["result:" + hashlib.sha256(str(result).strip().encode()).hexdigest()] = entry[0]
-        if command.get("action") == "update_status" and str(result).startswith("动态状态已更新"):
-            self.state_updated = True
         return result
 
     def begin_turn(self):

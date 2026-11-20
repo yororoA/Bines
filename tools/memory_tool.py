@@ -191,12 +191,16 @@ def _apply_changes(state, *, current_location=None, relationship_delta=None, add
         if value is not None:
             npc[key] = value
     state["npc_state"] = npc
-    highlights = list(state.get("memory_highlights") or [])
-    if add_memory_highlight and add_memory_highlight not in highlights:
-        highlights.append(add_memory_highlight)
-    if remove_memory_highlight and remove_memory_highlight in highlights:
-        highlights.remove(remove_memory_highlight)
-    state["memory_highlights"] = highlights
+    previous = state.setdefault("memory_highlights", [])
+    if add_memory_highlight or remove_memory_highlight:
+        # Old imports can contain one string or a custom JSON value. Keep a
+        # single entry intact and never rewrite it merely to update the clock.
+        highlights = previous if isinstance(previous, list) else ([] if previous is None else [previous])
+        if add_memory_highlight and add_memory_highlight not in highlights:
+            highlights.append(add_memory_highlight)
+        if remove_memory_highlight and remove_memory_highlight in highlights:
+            highlights.remove(remove_memory_highlight)
+        state["memory_highlights"] = highlights
     return state
 
 
