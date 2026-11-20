@@ -224,7 +224,7 @@ class ExistingReaderTests(unittest.TestCase):
                 self.reader._pages("bilibili")
         self.assertNotIn("bilibili", self.reader.ports)
 
-    def test_video_watch_preserves_pixel_frames_progress_and_original_dimensions(self):
+    def test_video_watch_preserves_pixel_capture_and_progress_in_storyboard(self):
         from PIL import Image
         browser = fixtures.WebsiteWatchTests.browser(self)
         capture_count = 0
@@ -239,7 +239,9 @@ class ExistingReaderTests(unittest.TestCase):
             result = service.watch("bilibili", duration_seconds=1, frames=3)
         self.assertEqual(result["status"], "ok")
         self.assertEqual([frame["media_time"] for frame in result["frames"]], [14, 16, 18])
-        self.assertEqual(Image.open(BytesIO(base64.b64decode(vision.call_args.args[0][0]))).size, (320, 180))
+        with Image.open(BytesIO(base64.b64decode(vision.call_args.args[0][0].partition(",")[2]))) as image:
+            self.assertEqual(image.size, (1260, 720))
+        self.assertEqual(result["layout"], "grid3")
         self.assertTrue(all(frame["capture_method"] == "video_pixels" for frame in result["frames"]))
         self.assertTrue(result["playback_advanced"])
         self.assertFalse(any(args[0] == "screenshot" for _, args, _ in browser.calls))

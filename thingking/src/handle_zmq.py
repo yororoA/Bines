@@ -22,6 +22,7 @@ from status_ws import ensure_status_stream_started
 from realtime_screen_bridge import (
     build_realtime_screen_paths,
     read_realtime_screen_analysis_if_enabled,
+    read_realtime_screen_observation_if_enabled,
     write_realtime_screen_context_if_enabled,
     send_realtime_screen_flush_signal,
 )
@@ -36,6 +37,7 @@ from listener_helpers import (
 from path_setup import ensure_project_root
 from runtime_wiring import register_runtime_dependencies
 from common.zmq_bus import create_publisher, create_subscriber
+from common.screen_observation import format_observation
 from qq_merge_coordinator import QQMergeCoordinator
 from message_flow_utils import (
     compute_enable_audio,
@@ -679,14 +681,15 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
                 except Exception as img_err:
                     print(f"[Thinking] 图片分析失败: {img_err}", flush=True)
 
-        # 实时屏幕分析：若启用则把最新分析作为系统消息注入，与用户输入一起发给主模型
+        # Only verified, timestamped desktop observations may enter a trusted turn.
         is_realtime_screen_active = False
-        rt_text = read_realtime_screen_analysis_if_enabled(REALTIME_SCREEN_PATHS)
+        rt_observation = (read_realtime_screen_observation_if_enabled(REALTIME_SCREEN_PATHS)
+                          if CURRENT_CONTEXT.get().identity.privileged else {})
+        rt_text = format_observation(rt_observation)
         if rt_text:
             if journal:
-                journal.capture("realtime_screen_observation", {}, rt_text)
-            # 【修改】强化 Prompt，明确告知模型已获得最新画面，无需再次调用工具
-            context_messages.append({"role": "system", "content": f"【实时屏幕分析（已是最新画面）】\n{rt_text}\n(系统提示：上述内容就是本轮最新屏幕结果。不要重复调用屏幕或视觉技能，直接使用这些信息回答。)"})
+                journal.capture("realtime_screen_observation", {}, rt_observation)
+            context_messages.append({"role": "system", "content": rt_text})
             is_realtime_screen_active = True
         
         # 消息体构建

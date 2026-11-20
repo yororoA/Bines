@@ -194,6 +194,17 @@ class DockerRebuildTests(unittest.TestCase):
                 self.assertNotEqual(memory_change["chatbot"], skill_change["chatbot"])
                 self.assertNotEqual(memory_change["memory-server"], skill_change["memory-server"])
 
+    def test_see_now_runtime_changes_invalidate_both_images(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(docker_launcher, "ROOT", Path(folder)):
+            for name in ("integrations/see_now/bridge.mjs", "vendor/see_now/src/pipeline.js", "vendor/see_now/package.json"):
+                with self.subTest(name=name):
+                    old = docker_launcher.source_hashes({})
+                    path = Path(folder) / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("updated runtime")
+                    new = docker_launcher.source_hashes({})
+                    self.assertTrue(all(new[key] != value for key, value in old.items()))
+
     def test_dashboard_assets_invalidate_launcher_image_hash(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

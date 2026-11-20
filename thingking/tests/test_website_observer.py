@@ -154,10 +154,11 @@ class ObserverTests(unittest.TestCase):
                 observer.tick("bilibili")
         result = observer.latest["bilibili"]["observation"]
         self.assertEqual(result["kind"], "video")
-        self.assertEqual(len(result["frames"]), 3)
+        self.assertEqual(len(result["frames"]), 9)
         self.assertTrue(result["playback_advanced"])
         self.assertFalse(result["audio_observed"])
-        self.assertEqual(len(vision.call_args.args[0]), 3)
+        self.assertEqual(len(vision.call_args.args[0]), 1)
+        self.assertEqual(result["layout"], "grid3")
 
     def test_unchanged_page_is_throttled_and_snapshot_does_not_invalidate(self):
         service, observer = self.observer(min_interval=0)

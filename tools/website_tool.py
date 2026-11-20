@@ -236,8 +236,8 @@ def website_media_status(platform: str) -> str:
     return _request("/v1/media-status", {"platform": platform})
 
 def website_watch(platform: str, question: str = "", duration_seconds: float = 6,
-                  frames: int = 3) -> str:
-    """观察当前可见视频的连续画面和字幕；采样1–30秒、2–6帧，不采集声音或控制播放。"""
+                  frames: int = 9) -> str:
+    """采样当前可见视频1–30秒、2–36帧（默认9），经See Now筛选为3×3九宫格；不采集声音或控制播放。"""
     _authorize()
     context = CURRENT_CONTEXT.get()
     def check():

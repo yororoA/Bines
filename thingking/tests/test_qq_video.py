@@ -37,14 +37,20 @@ class DecodeTests(unittest.TestCase):
             path = Path(temp) / "sample.mp4"
             make_video(path)
             result = decode_video(path)
-        self.assertEqual(len(result["frames"]), 6)
+        self.assertEqual(len(result["frames"]), 1)
+        self.assertEqual(result["layout"], "grid3")
+        self.assertEqual(result["image_kind"], "storyboards")
         self.assertAlmostEqual(result["duration_seconds"], 2, places=1)
         self.assertEqual(result["sample_times"][0], 0)
         self.assertGreater(result["sample_times"][-1], 1.8)
         self.assertEqual(result["sample_times"], sorted(result["sample_times"]))
         self.assertFalse(result["audio_observed"])
-        pixels = [Image.open(BytesIO(base64.b64decode(frame.split(",", 1)[1]))).getpixel((40, 40))
-                  for frame in (result["frames"][0], result["frames"][-1])]
+        self.assertTrue(result["sampling_complete"])
+        sheet = result["storyboards"][0]
+        self.assertEqual(len(sheet["frames"]), 2)
+        image = Image.open(BytesIO(base64.b64decode(result["frames"][0].split(",", 1)[1])))
+        pixels = [image.getpixel((cell["px"] + cell["pw"] // 2,
+                                  cell["py"] + cell["ph"] // 2)) for cell in sheet["cells"]]
         self.assertGreater(pixels[0][0], pixels[0][2] + 150)
         self.assertGreater(pixels[1][2], pixels[1][0] + 150)
 
@@ -68,10 +74,15 @@ class DecodeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "x"
             path.write_bytes(b"data")
-            with patch("chatBot.video_decode.subprocess.run",
-                       side_effect=subprocess.TimeoutExpired("decoder", 30)):
+            with patch("chatBot.video_decode.subprocess.Popen") as popen, patch(
+                    "chatBot.video_decode.os.killpg") as killpg:
+                process = popen.return_value
+                process.communicate.side_effect = [subprocess.TimeoutExpired("decoder", 45), ("", "")]
                 with self.assertRaisesRegex(ValueError, "超时"):
                     decode_video(path)
+                process.kill.assert_called_once()
+                if os.name != "nt":
+                    killpg.assert_called_once()
 
 
 class VideoTests(unittest.TestCase):
@@ -101,8 +112,10 @@ class VideoTests(unittest.TestCase):
             text = describe_videos([{**current, "event_id": eid}], self.client)
         self.assertIn("先红色，后蓝色", text)
         self.assertIn("未分析声音", text)
-        self.assertEqual(len(vision.call_args.args[0]), 6)
-        self.assertIn("1.96 秒", vision.call_args.kwargs["image_labels"][-1])
+        self.assertEqual(len(vision.call_args.args[0]), 1)
+        self.assertIn("3×3九宫格", vision.call_args.kwargs["image_labels"][0])
+        self.assertIn('"seconds": 1', vision.call_args.kwargs["image_labels"][0])
+        self.assertIn("补白", vision.call_args.args[1])
 
     def test_quoted_video_uses_the_referring_event_authority(self):
         original = self.source(mid=95, group="10")
@@ -213,7 +226,8 @@ class VideoTests(unittest.TestCase):
             def run_skill_protocol(inner, conversation, runner, **kwargs):
                 self.assertIn("视频观察结果", str(conversation))
                 self.assertIn("先红色后蓝色", str(conversation))
-                self.assertIn("1.96s", str(conversation))
+                self.assertIn("1s", str(conversation))
+                self.assertIn("九宫格", str(conversation))
                 return "画面颜色变了", [], []
 
         with patch("config.DEEPSEEK_API_KEY", "test"), patch(

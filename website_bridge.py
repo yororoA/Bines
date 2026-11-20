@@ -42,7 +42,7 @@ def dispatch(service, route, body):
         # Only individual frame captures lock the browser; waiting/inference
         # must leave room for a new owner action.
         return service.watch(body.get("platform"), body.get("question", ""),
-                             body.get("duration_seconds", 6), body.get("frames", 3))
+                             body.get("duration_seconds", 6), body.get("frames", 9))
     lock = getattr(service, "execute_lock", None)
     with lock if lock is not None else nullcontext():
         return _dispatch(service, route, body)

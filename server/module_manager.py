@@ -686,10 +686,9 @@ def _realtime_screen_ensure_from_config():
         return False, "纯 ChatBot 模式不启动屏幕模块"
     data = load_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH)
 
-    # 【新增】无论是否启动，都同步工具 schema 状态
-    # 实时分析启用 -> 禁用 get_screen_info; 实时分析禁用 -> 启用 get_screen_info
+    # 自动拼图之外仍允许主动截图：细字、指定区域和失效结果都需要它。
     realtime_enabled = data.get("enabled", False)
-    _update_skill_action_enabled("get_screen_info", not realtime_enabled)
+    _update_skill_action_enabled("get_screen_info", True)
 
     if not realtime_enabled:
         return False, "配置中未启用，不启动"
@@ -738,14 +737,14 @@ def save_realtime_screen_config():
     """保存配置；运行过程中根据本次保存的 enabled 状态启动或停止实时屏幕分析脚本。"""
     try:
         body = request.get_json() or {}
-        merged = dict(DEFAULT_REALTIME_SCREEN_CONFIG)
+        merged = load_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH)
         merged.update(body)
         config = normalize_realtime_screen_config(merged)
         persist_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH, config)
         enabled = config.get("enabled", False)
 
         # 【新增】状态切换时同步工具 schema
-        _update_skill_action_enabled("get_screen_info", not bool(enabled))
+        _update_skill_action_enabled("get_screen_info", True)
 
         if enabled:
             ok, msg = _realtime_screen_start()

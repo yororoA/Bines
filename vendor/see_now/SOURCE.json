@@ -1,0 +1,58 @@
+{
+  "repository": "https://github.com/yororoA/dsh-see-now-forBines",
+  "commit": "84029433767a32c3fad5f440ef583663532510f7",
+  "version": "0.2.3",
+  "license": "Apache-2.0",
+  "files": {
+    "src/pipeline.js": {
+      "upstream_sha256": "db9d2dc2b61d2ebca116fcc03e02dc66c3a1802f4ee2c42cc9345ae5c0b7146a",
+      "vendored_sha256": "75f91976190263844a2910ef71f15de46fe404b95fc9d7e68f01a90b033c7ac5"
+    },
+    "src/cuts.js": {
+      "upstream_sha256": "6e5f31d801c3c1e0b380995428e8fb86bd4aec92fa65dd9c2736f0701abe698e",
+      "vendored_sha256": "6e5f31d801c3c1e0b380995428e8fb86bd4aec92fa65dd9c2736f0701abe698e"
+    },
+    "src/tiers.js": {
+      "upstream_sha256": "fd51b2a19896c2c0a18f07f1d64b8e98d807ec3bc64029d6c6e7d2a5dbd70e2c",
+      "vendored_sha256": "fd51b2a19896c2c0a18f07f1d64b8e98d807ec3bc64029d6c6e7d2a5dbd70e2c"
+    },
+    "src/pack.js": {
+      "upstream_sha256": "ccc2ea9ce63aabf6e2ef61d114849a45f1eca4d6a398bc004437ed3937add489",
+      "vendored_sha256": "ccc2ea9ce63aabf6e2ef61d114849a45f1eca4d6a398bc004437ed3937add489"
+    },
+    "src/sheet.js": {
+      "upstream_sha256": "a3f2a169867523b46cd160032f4e3b331550cd4e8960d3323a31d0c362f94bea",
+      "vendored_sha256": "79510f1a7a3cd8b521b2fe1c0c808d7594639d2573004f1111d29b0a97c439d0"
+    },
+    "src/png.js": {
+      "upstream_sha256": "6288760abcf4845c9a64f70b115af2f89073c2be6192409ff9b2b9ec1689cc44",
+      "vendored_sha256": "6288760abcf4845c9a64f70b115af2f89073c2be6192409ff9b2b9ec1689cc44"
+    },
+    "src/layout.js": {
+      "upstream_sha256": "054c2e52e1b243b84c3986fac95acada710b5f7cdc7a28ccf99a36ffde33c70a",
+      "vendored_sha256": "054c2e52e1b243b84c3986fac95acada710b5f7cdc7a28ccf99a36ffde33c70a"
+    },
+    "src/scale.js": {
+      "upstream_sha256": "f2d68268d16c83a1fdcbf5bcdfa033a0d06f65deb308cce4e998cfd6bf20354f",
+      "vendored_sha256": "f2d68268d16c83a1fdcbf5bcdfa033a0d06f65deb308cce4e998cfd6bf20354f"
+    },
+    "src/tokens.js": {
+      "upstream_sha256": "ba8fa712f4d325a7e6b794606915459c1274c1b21ca1c0fa290b97737cc3a31c",
+      "vendored_sha256": "ba8fa712f4d325a7e6b794606915459c1274c1b21ca1c0fa290b97737cc3a31c"
+    },
+    "LICENSE": {
+      "upstream_sha256": "0f4587918026d801b3d9f77de89be59afd06301034f3f9bed5b6a1b1f2fd1c1d",
+      "vendored_sha256": "0f4587918026d801b3d9f77de89be59afd06301034f3f9bed5b6a1b1f2fd1c1d"
+    },
+    "NOTICE": {
+      "upstream_sha256": "80fddfb5edf555ba34d692ddaa9ae72b2b73b786dd2fe774b06d5065dd41eaa4",
+      "vendored_sha256": "80fddfb5edf555ba34d692ddaa9ae72b2b73b786dd2fe774b06d5065dd41eaa4"
+    }
+  },
+  "local_changes": [
+    "pipeline.js: collect cutTimes only when audioStrip is enabled; Bines disables the strip, so its unused lifetime history cannot grow. The bridge clears the exposed diagnostic log after every frame.",
+    "pipeline.js: cap future-frame lookahead at ceil(cutFutureDelay * fps) + 2 (at least 2) frames, dropping oldest pending candidates when producers exceed the configured rate; keeps capture queues bounded even with duplicate or dense timestamps.",
+    "sheet.js: remove decorative bars from unused layout cells; empty padding is not captured application content and must not resemble a loading indicator.",
+    "pipeline.js: add optional fixed grid3 chronological 3x3 rendering with a nine-frame cap, empty tail cells, precise source timestamps, explicit capture wall time and matching flush/finish paths. Bridge exposes acknowledged finite-frame processing and drain without replay queue loss or duplicate tail frames."
+  ]
+}

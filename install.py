@@ -38,7 +38,7 @@ DOCKER_DESKTOP_MAC_URLS = {
 }
 PROFILES = {"chatbot": ("launcher",), "full": tuple(ENVIRONMENTS)}
 IMPORTS = {
-    "launcher": ("flask", "zmq", "requests", "websocket", "openai", "yaml", "mcp", "redis"),
+    "launcher": ("flask", "zmq", "requests", "websocket", "openai", "yaml", "mcp", "redis", "PIL", "av"),
     "server": ("PyQt6.QtCore", "PyQt6.QtWidgets", "zmq", "requests", "PIL"),
     # PyAutoGUI opens a display at import time: check its distribution separately.
     "thinking": ("flask", "zmq", "websocket", "openai", "mcp", "PIL", "numpy",
@@ -668,7 +668,26 @@ class Installer:
                       "uninstall", "-y", opposite], "检查 ONNX Runtime 版本")
             packages += ["onnxruntime-gpu[cuda,cudnn]==1.22.0" if self.device == "cuda" else "onnxruntime==1.22.0"]
         self.pip(python, packages, "安装模块依赖", extra=extra, env=build_env)
+        if name in {"launcher", "thinking", "visual"}:
+            self.prepare_screen_runtime()
         self.verify(name)
+
+    def prepare_screen_runtime(self):
+        """Reuse a compatible Node; install only into the existing project runtime."""
+        from common.see_now import find_node_binary, SeeNowError
+        from common.env import read_env, env_path
+        configured = read_env(env_path() if self.root == ROOT else self.root / ".env").get("BINES_NODE_BINARY")
+        try:
+            find_node_binary(configured)
+        except SeeNowError as exc:
+            if configured or os.environ.get("BINES_NODE_BINARY"):
+                raise InstallError(str(exc)) from exc
+            from website_runtime import ensure_browser_node
+            try:
+                ensure_browser_node()
+                find_node_binary()
+            except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+                raise InstallError("See Now 需要 Node.js >=20；安装兼容版本或设置 BINES_NODE_BINARY") from error
 
     def verify(self, name):
         python = environment_python(name, self.root)
@@ -700,6 +719,12 @@ class Installer:
         if name in {"visual", "singing"} and self.device == "cuda":
             check += "import onnxruntime as ort;ort.preload_dlls();assert 'CUDAExecutionProvider' in ort.get_available_providers();"
         self.run([python, "-I", "-c", check], "核验核心模块导入", timeout=180)
+        if name in {"launcher", "thinking", "visual"}:
+            probe = ("import sys;" + f"sys.path.insert(0, {str(self.root)!r});"
+                     "from common.env import load_env;load_env();"
+                     "from common.see_now import SeeNowClient;"
+                     "client=SeeNowClient(84,48,4).start();client.close()")
+            self.run([python, "-I", "-c", probe], "核验 See Now 运行时（不截图）", timeout=30)
         if name in PROJECT_IMPORTS:
             probe_dir = self.log_dir / "import-check"
             probe_dir.mkdir(exist_ok=True)

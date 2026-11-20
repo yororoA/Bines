@@ -154,7 +154,7 @@ class WebsiteObserver:
             result = {**common, "status": "blocked_human",
                       "analysis": "当前可见登录或验证提示，等待主人处理"}
         elif video and video.get("ready_state", 0) >= 2:
-            result = {**self.service.watch(platform, duration_seconds=4, frames=3), **common,
+            result = {**self.service.watch(platform, duration_seconds=4, frames=9), **common,
                       "kind": "video"}
             if result.get("status") == "observing":
                 return  # Keep the last valid observation while a manual watch runs.

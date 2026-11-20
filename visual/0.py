@@ -30,6 +30,7 @@ from config import (
 )
 from common.zmq_bus import create_publisher
 from vlm_client import call_vision as _call_vision
+from common.camera_storyboard import CameraStoryboard, describe_camera
 # from models.object_models.object_recognise_onnx import ObjectDetector
 # from models.gesture_models.gesture import HandInteractionSystem
 
@@ -102,7 +103,8 @@ def static_image_model():
 
 
 # 摄像头模块
-def camera_model():
+def camera_model(stop=None):
+    stop = stop or threading.Event()
     # 初始化手势系统
     # hand_system = HandInteractionSystem()
 
@@ -121,7 +123,14 @@ def camera_model():
 
     if not cap.isOpened():
         print("Error: Could not open camera.")
-        exit()
+        cap.release()
+        raise RuntimeError("Camera could not be opened")
+
+    try:
+        storyboard = CameraStoryboard().start()
+    except Exception:
+        cap.release()
+        raise
 
     # --- 3. 多线程变量 ---
     # 用于在主线程(显示)和子线程(计算)之间共享数据
@@ -129,6 +138,7 @@ def camera_model():
         def __init__(self):
             self.frame_to_process = None  # 待处理的帧（旧流程，保留兼容）
             self.latest_frame = None  # 最新的摄像头帧（用于实时请求）
+            self.latest_frame_tick = None
             self.results = ([], [], [], [], "")  # 最新的识别结果: 人脸, 物体, 手部原始数据, 所有物体, 场景描述
             self.running = True  # 线程运行标志
             self.lock = threading.Lock()  # 线程锁
@@ -138,27 +148,13 @@ def camera_model():
     server_start_error = []
 
     # --- DeepSeek 视觉调用，复用原场景识别流程 ---
-    def call_vision(image_b64, focus_question=None):
-        # 根据是否有 focus_question 生成提示词
-        # 新规则：
-        # - 如果上游调用方提供了 focus_question，则直接视为完整提示词，不再在此处固定模板；
-        # - 否则使用默认的通用描述提示。
-        if focus_question:
-            prompt_text = str(focus_question).strip()
-        else:
-            prompt_text = "简要描述画面中的内容（50字以内），可适当关注人物的情绪和动作。"
-        result = _call_vision(
-            image_b64,
-            prompt_text,
-            proxies={"http": None, "https": None},
-            missing_key_message="",
-            empty_message="",
-            error_message_prefix="",
+    def call_vision(images, prompt, image_labels=None):
+        return _call_vision(
+            images, prompt, image_labels=image_labels,
+            proxies={"http": None, "https": None}, timeout=20, retries=0,
+            missing_key_message="[VLM missing key]", empty_message="[VLM empty response]",
+            error_message_prefix="[VLM error]",
         )
-        if result.startswith("[VLM 请求失败"):
-            print(f"DeepSeek vision error: {result}")
-            return ""
-        return result or ""
 
     # --- 4. 定义后台识别/服务线程 ---
     def recognition_loop():
@@ -202,16 +198,8 @@ def camera_model():
             union = len(words1 | words2)
             return intersection / union if union > 0 else 0.0
 
-        # 定义 update_caption 函数放在循环外
-        def update_caption(b64, focus_question=None):
-            # 注意: 在同步调用模式下，VLM 应该在返回前就把结果拿回来，
-            # 而不是像之前那样异步开个线程去跑，否则 REQ 立即返回了但没有 caption。
-            # 这里我们改为同步调用。
-            desc = call_vision(b64, focus_question)
-            return desc if desc else ""
-
         try:
-            while state.running:
+            while state.running and not stop.is_set():
                 # === 改动点: 阻塞等待 ZMQ 请求 ===
                 try:
                     # 接收指令，支持 JSON 格式（包含 focus 参数）或字符串格式（兼容旧版本）
@@ -242,14 +230,16 @@ def camera_model():
                     continue
 
                 frame = None
+                frame_tick = None
                 # === 修复: 获取主循环维护的最新帧，而不是使用可能过时的缓存帧 ===
                 # 使用锁保护，确保线程安全
                 with state.lock:
                     if state.latest_frame is not None:
                         frame = state.latest_frame.copy()  # 复制帧，避免主循环修改影响
+                        frame_tick = state.latest_frame_tick
 
-                if frame is None:
-                    rep_socket.send_json({"status": "error", "message": "Camera not ready"})
+                if frame is None or frame_tick is None or time.monotonic() - frame_tick > 2:
+                    rep_socket.send_json({"status": "error", "message": "Camera not ready or stale"})
                     continue
 
                 # 开始处理
@@ -268,31 +258,18 @@ def camera_model():
                     # 小分辨率图像直接使用原图，减少处理时间
                     frame_enhanced = frame
 
-                # === 1. 人脸识别 ===
-                face_results = face_identify(frame_enhanced)
-
-                # === 2. 准备图像给 VLM ===
-                # 优化2: 仅在有人脸识别结果时才绘制人脸框，减少不必要的绘制
-                vlm_frame = frame.copy()
-                if face_results:
-                    for (bbox, name) in face_results:
-                        startX, startY, endX, endY = bbox
-                        # 简化绘制，使用更高效的绘制函数
-                        cv2.rectangle(vlm_frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
-                        y = startY - 10 if startY - 10 > 10 else startY + 10
-                        # 优化3: 使用更高效的字体和绘制方式
-                        cv2.putText(vlm_frame, name, (startX, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-                # === 优化4: 调整JPEG编码质量，平衡质量和速度 ===
-                # 降低JPEG质量到40，提高编码速度
-                encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 40]
-                _, buffer = cv2.imencode('.jpg', vlm_frame, encode_params)
-                img_b64 = base64.b64encode(buffer).decode('utf-8')
-
-                # === 3. VLM 调用 (同步) ===
-                # 因为是应答模式，必须等结果
-                # 传递 focus_question 参数（如果存在）
-                current_caption = update_caption(img_b64, focus_question)
+                # Face recognition still uses the current original frame. The VLM
+                # receives continuously collected history plus the freshest sample.
+                try:
+                    face_results = face_identify(frame_enhanced)
+                    sheets = storyboard.snapshot()
+                    vis_info = describe_camera(sheets, [result[1] for result in face_results],
+                                               call_vision, focus_question)
+                    current_caption = vis_info["scene_caption"]
+                except Exception as exc:
+                    rep_socket.send_json({"status": "error", "message": "Camera analysis unavailable",
+                                          "error": type(exc).__name__})
+                    continue
 
                 # 检查内容是否与之前重复
                 is_repeated = False
@@ -302,16 +279,10 @@ def camera_model():
                         is_repeated = True
                         print(f"⚠️ 检测到重复内容，相似度: {similarity:.2f}，跳过发送重复描述")
 
-                # 构造结果
-                vis_info = {
-                    "faces": [f[1] for f in face_results],
-                    "objects": [],
-                    "gestures": [],
-                    "scene_caption": current_caption if not is_repeated else "",
-                    "scene_image": img_b64 if not is_repeated else "",
-                    "status": "success",
-                    "is_repeated": is_repeated
-                }
+                vis_info["is_repeated"] = is_repeated
+                if is_repeated:
+                    vis_info["scene_caption"] = ""
+                    vis_info["scene_image"] = ""
 
                 # === 4. 发送回复 (REP) ===
                 rep_socket.send_json(vis_info)
@@ -346,8 +317,15 @@ def camera_model():
     thread.start()
     if not server_ready.wait(timeout=10):
         state.running = False
+        storyboard.close()
+        cap.release()
+        thread.join(timeout=1)
         raise RuntimeError("Visual RPC 服务线程未能就绪")
     if server_start_error:
+        state.running = False
+        storyboard.close()
+        cap.release()
+        thread.join(timeout=1)
         raise RuntimeError(f"Visual RPC 服务启动失败: {server_start_error[0]}")
 
     try:
@@ -395,6 +373,7 @@ def camera_model():
         print("🔄 正在清理视觉模块资源...")
 
         state.running = False
+        storyboard.close()
         thread.join(timeout=3)
 
         # 2. 释放摄像头资源
@@ -415,17 +394,22 @@ def camera_model():
 
     # --- 5. 主循环  ---
     try:
-        while True:
+        while state.running and not stop.is_set():
             ret, frame = cap.read()
             if not ret:
                 break
 
+            captured_at = time.time()
+            frame_tick = time.monotonic()
             frame = cv2.flip(frame, 1)  # 水平反转
+            # Keep pre-request motion samples; never send model requests from capture.
+            storyboard.push(frame, captured_at=captured_at, bgr=True)
             h, w = frame.shape[:2]
 
             # 1. 更新最新帧（用于实时请求）
             with state.lock:
                 state.latest_frame = frame.copy()  # 保存最新帧的副本
+                state.latest_frame_tick = frame_tick
                 # 把当前帧塞给后台线程（旧流程，保留兼容）
                 if state.frame_to_process is None:
                     state.frame_to_process = frame
@@ -528,7 +512,7 @@ def camera_model():
             # 检查退出信号（通过其他方式，如文件标志或信号）
             # 由于不再使用 cv2.waitKey，需要通过其他方式检查退出
             # 保持循环运行，直到收到退出信号
-            time.sleep(0.01)  # 短暂休眠，避免CPU占用过高
+            stop.wait(0.01)  # 短暂休眠，避免CPU占用过高
     except KeyboardInterrupt:
         print("\n⏹️ 收到中断信号，正在退出...")
         state.running = False
@@ -536,4 +520,7 @@ def camera_model():
         cleanup()
 
 
-camera_model()
+if __name__ == "__main__":
+    from common.service_shutdown import run_service
+    sys.excepthook = sys.__excepthook__
+    run_service(camera_model, name="Visual", force_exit=True)

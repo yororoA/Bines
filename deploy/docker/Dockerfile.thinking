@@ -1,5 +1,9 @@
 ARG BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
+ARG NODE_IMAGE=docker.m.daocloud.io/library/node:22-bookworm-slim
+FROM ${NODE_IMAGE} AS see-now-node
 FROM ${BASE_IMAGE}
+
+COPY --from=see-now-node /usr/local/bin/node /usr/local/bin/node
 
 ARG BINES_UID=1000
 ARG BINES_GID=1000
@@ -18,6 +22,7 @@ RUN python /usr/local/bin/bines-install-apt.py --mirror "${APT_MIRROR}" \
         tzdata \
         libglib2.0-0 \
         libgomp1 \
+        libstdc++6 \
         libsndfile1 \
         ffmpeg
 

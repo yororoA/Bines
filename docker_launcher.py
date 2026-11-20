@@ -257,6 +257,7 @@ IMAGE_SOURCES = {
     "bines-launcher:local": _SHARED_SOURCES + (
         "chatBot/**/*.py", "chatBot/api/*.json",
         "server/*.py", "server/templates/*", "server/dashboard_static/*",
+    "integrations/see_now/*.mjs", "vendor/see_now/package.json", "vendor/see_now/src/*.js",
         "requirements/launcher.txt", "requirements-chatbot.txt",
         "thingking/rag_web_static/*",
         "deploy/docker/Dockerfile.launcher",

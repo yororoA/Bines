@@ -949,7 +949,7 @@ class WebsiteService:
         return {"status": "ok", "platform": config.key,
                 "tabs": self.browser.run(config, ["tab", "list"])[:10000]}
 
-    def watch(self, platform, question="", duration_seconds=6, frames=3):
+    def watch(self, platform, question="", duration_seconds=6, frames=9):
         """Read a short sequence of visible video frames and captions."""
         from common.website_watch import watch
         if not self.watch_lock.acquire(blocking=False):

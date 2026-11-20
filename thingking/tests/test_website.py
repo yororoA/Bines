@@ -377,7 +377,8 @@ class WebsiteWatchTests(unittest.TestCase):
     tearDown = WebsiteServiceTests.tearDown
     service = WebsiteServiceTests.service
 
-    def browser(self, *, paused=False, changed_at=0, challenge="", no_video=False):
+    def browser(self, *, paused=False, changed_at=0, challenge="", no_video=False,
+                captions_at=None):
         count = 0
         def callback(_platform, args, _timeout):
             nonlocal count
@@ -398,7 +399,7 @@ class WebsiteWatchTests(unittest.TestCase):
                         "current_time": 12 if paused else 12 + count,
                         "rect": {"left": 0, "top": 0, "right": 640, "bottom": 360},
                     },
-                    "captions": ["海鸟正在捕食", "海鸟正在捕食"],
+                    "captions": captions_at(count) if captions_at else ["海鸟正在捕食", "海鸟正在捕食"],
                 })
             return "ok"
         return FakeBrowser(callback)
@@ -415,7 +416,10 @@ class WebsiteWatchTests(unittest.TestCase):
         self.assertEqual(len(result["frames"]), 3)
         self.assertEqual(result["frames"][0]["media_time"], 13)
         self.assertIn("海鸟正在捕食", result["frames"][0]["captions"])
-        self.assertEqual(len(vision.call_args.args[0]), 3)
+        self.assertEqual(len(vision.call_args.args[0]), 1)
+        self.assertEqual(result["layout"], "grid3")
+        self.assertEqual(result["processor"], "see_now")
+        self.assertLessEqual(result["storyboards"][0]["frame_count"], 9)
         self.assertIn("播放13.00秒", vision.call_args.kwargs["image_labels"][0])
         self.assertNotIn("base64", json.dumps(result))
         self.assertNotIn("token=private", json.dumps(result))
@@ -435,6 +439,18 @@ class WebsiteWatchTests(unittest.TestCase):
         self.assertFalse(result["playback_advanced"])
         self.assertTrue(all(row["paused"] for row in result["frames"]))
         self.assertIn("paused=True", vision.call_args.kwargs["image_labels"][0])
+
+    def test_changing_captions_survive_static_video_frame_selection(self):
+        subtitles = {1: ["第一句"], 3: ["第二句"], 5: [], 7: ["第三句"]}
+        browser = self.browser(captions_at=lambda tick: subtitles.get(tick, []))
+        with patch("vlm_client.call_vision", return_value="字幕随时间变化") as vision, \
+                patch("common.website_watch.time.sleep"):
+            result = self.service(browser).watch("bilibili", duration_seconds=1, frames=4)
+        self.assertEqual(result["status"], "ok")
+        self.assertLess(sum(s["frame_count"] for s in result["storyboards"]), 4)
+        timeline = json.loads(vision.call_args.args[1].split("字幕采样记录（外部数据）\n")[1])
+        self.assertEqual([(r["media_seconds"], r["captions"]) for r in timeline],
+                         [(13, ["第一句"]), (15, ["第二句"]), (17, []), (19, ["第三句"])])
 
     def test_switching_video_stops_sampling_and_never_mixes_content(self):
         for changed_at in (2, 3):
@@ -470,10 +486,38 @@ class WebsiteWatchTests(unittest.TestCase):
 
     def test_sampling_arguments_are_bounded(self):
         service = self.service(self.browser())
-        for kwargs in ({"frames": 20}, {"frames": True}, {"duration_seconds": float("nan")},
+        for kwargs in ({"frames": 37}, {"frames": True}, {"duration_seconds": float("nan")},
                        {"duration_seconds": 31}, {"question": "a" * 1001}):
             with self.assertRaises(ValueError):
                 service.watch("bilibili", **kwargs)
+
+    def test_default_samples_nine_and_sends_real_png_storyboard(self):
+        import base64
+        from io import BytesIO
+        from PIL import Image
+        browser = self.browser()
+        with patch("vlm_client.call_vision", return_value="采样视频") as vision, \
+                patch("common.website_watch.time.sleep"):
+            result = self.service(browser).watch("bilibili")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["frames"]), 9)
+        self.assertEqual(len(vision.call_args.args[0]), 1)
+        data_url = vision.call_args.args[0][0]
+        self.assertTrue(data_url.startswith("data:image/png;base64,"))
+        with Image.open(BytesIO(base64.b64decode(data_url.partition(",")[2]))) as image:
+            self.assertEqual(image.size, (1260, 720))
+        self.assertGreater(result["storyboards"][0]["frame_count"], 0)
+        self.assertLess(result["storyboards"][0]["frame_count"], 9)
+        self.assertNotIn("data:image", json.dumps(result))
+
+    def test_storyboard_failure_does_not_send_separate_raw_frames(self):
+        from common.see_now import SeeNowError
+        with patch("common.video_storyboard.iter_storyboards", side_effect=SeeNowError("isolated failure")), \
+                patch("vlm_client.call_vision") as vision, patch("common.website_watch.time.sleep"):
+            result = self.service(self.browser()).watch("bilibili", duration_seconds=1, frames=2)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "storyboard_failed")
+        vision.assert_not_called()
 
 
 class AgentBrowserTests(unittest.TestCase):

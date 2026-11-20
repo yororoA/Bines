@@ -51,6 +51,7 @@ realtime_screen_config.json
 server/realtime_screen_context.json
 server/realtime_screen_flush.signal
 server/realtime_screen_pid.txt
+server/realtime_screen_observation.json
 presence_state.json
 presence_state.json.tmp
 thingking/src/bored_rl_weights.json

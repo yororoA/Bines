@@ -20,5 +20,7 @@ singing/work/
 server/realtime_screen_context.json
 server/realtime_screen_flush.signal
 presence_state.json
+server/realtime_screen_observation.json
+docs/tests/
 *.zip
 *.dmg

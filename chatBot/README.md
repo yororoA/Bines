@@ -10,7 +10,7 @@
 - `update_catalog.py`：`python -m chatBot.update_catalog 版本号` 更新官方目录及来源/内容哈希。
 - `gateway.py` / `gateway_client.py`：令牌鉴权的本机 HTTP API，Skills 不再创建第二条 WebSocket。
 - `mcp_server.py`：官方 MCP SDK stdio 服务，列出全部独立 API 工具，复用同一能力入口。
-- `video.py` / `video_decode.py`：直接接收或实际引用的 QQ 视频自动解码，沿整段时间线均匀抽取最多 6 帧交给视觉模型，结果带时长与采样时间。每轮最多两段，每段不超过 64 MiB / 1 小时，解码超时 30 秒，采样图最长边 1280 像素。只理解画面，不识别声音；短暂动作可能落在采样间隔内。读取失败时保留本轮其他内容，不猜测视频。
+- `video.py` / `video_decode.py` 对本轮收到或实际引用的 QQ 视频用 PyAV 解码，按目标 4 fps 抽样，再由 See Now 筛选并依次填入 3×3 九宫格。每轮最多两段，每段不超过 64 MiB 或 1 小时，解码超时 45 秒。每段最多采 240 个候选、分析 8 张拼图。结果附采样范围、时间及截断说明，声音不在观察范围。
 - `../thingking/qq_thinking.py`：独立 QQ Thinking，按发送者合并、并行处理，确认发送后记忆。
 
 旧桌面 QQ 分支不再接收输入。默认 Docker ChatBot 模式同时启动独立 Memory Server 与 Memory Worker，不需要桌面音视频依赖。无法确认是否送达的写操作保留回执，不自动重放。
