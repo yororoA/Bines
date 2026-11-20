@@ -154,7 +154,12 @@ class MemoryAdmin:
         items = [dict(row) for row in self.repo.conn.execute(
             "SELECT id,kind,scope,status,attempts,last_error,created_at,updated_at,started_at,duration_seconds,"
             "json_extract(payload,'$.rejected_links') AS rejected_links,"
+            "json_extract(payload,'$.last_failure.causes[0]') AS error_type,"
+            "json_extract(payload,'$.terminal_reason') AS terminal_reason,"
             "json_array_length(payload,'$.unresolved_targets') AS unresolved_count FROM jobs" + clause
             + " ORDER BY id DESC LIMIT ? OFFSET ?",
             (*params, max(1, min(100, int(limit))), max(0, int(offset))))]
+        for item in items:
+            if not item["error_type"]:
+                item["error_type"] = (item["last_error"] or "").split(":", 1)[0]
         return {"items": items, "total": total}

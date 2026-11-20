@@ -33,7 +33,7 @@ from realtime_screen_config import (
 
 app = Flask(__name__, template_folder=os.path.join(ROOT_DIR, "server", "templates"),
             static_folder=os.path.join(ROOT_DIR, "server", "static"))
-install_admin_guard(app, "manager", entrypoints=("/", "/status"))
+install_admin_guard(app, "manager", entrypoints=("/", "/status", "/control"))
 
 
 # 缓存游戏模式状态（因为我们无法从Thinking进程查询状态，所以只能在管理器本地缓存一份）
@@ -283,9 +283,13 @@ supervisor = ServiceSupervisor(PROCESSES)
 
 from server.status_dashboard import create_status_blueprint
 from common.memory_portability_web import create_portability_blueprint
+from common.admin_settings import create_settings_blueprint
+from server.state_controls import create_state_controls_blueprint
 
 app.register_blueprint(create_status_blueprint(supervisor, HTTP_PORTS))
 app.register_blueprint(create_portability_blueprint())
+app.register_blueprint(create_settings_blueprint())
+app.register_blueprint(create_state_controls_blueprint(supervisor))
 
 
 def start_process(config):
@@ -741,21 +745,41 @@ def save_realtime_screen_config():
         merged.update(body)
         config = normalize_realtime_screen_config(merged)
         persist_realtime_screen_config(REALTIME_SCREEN_CONFIG_PATH, config)
-        enabled = config.get("enabled", False)
-
-        # 【新增】状态切换时同步工具 schema
-        _update_skill_action_enabled("get_screen_info", True)
-
-        if enabled:
-            ok, msg = _realtime_screen_start()
-            if not ok:
-                return jsonify({"success": False, "message": msg}), 500
-            return jsonify({"success": True, "message": msg})
-        else:
-            _realtime_screen_stop()
-            return jsonify({"success": True, "message": "已关闭并停止实时屏幕分析脚本"})
+        return _apply_screen_config(config)
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+def _apply_screen_config(config):
+    enabled = config.get("enabled", False)
+
+    # 【新增】状态切换时同步工具 schema
+    _update_skill_action_enabled("get_screen_info", True)
+
+    if enabled:
+        ok, msg = _realtime_screen_start()
+        if not ok:
+            return jsonify({"success": False, "message": msg}), 500
+        return jsonify({"success": True, "message": msg})
+    else:
+        _realtime_screen_stop()
+        return jsonify({"success": True, "message": "已关闭并停止实时屏幕分析脚本"})
+
+
+@app.post("/api/control/screen/apply")
+def apply_screen_config():
+    from common.admin_settings import ConfigurationError, SettingsStore
+    store = SettingsStore()
+    if Path(REALTIME_SCREEN_CONFIG_PATH).resolve() != (store.root / "server/realtime_screen_config.json").resolve():
+        return jsonify(success=False, message="当前配置目录与屏幕进程不同，请在对应宿主机应用"), 409
+    try:
+        saved = store.document("screen")
+        enabled = saved["content"].get("enabled", False)
+        if type(enabled) is not bool:
+            return jsonify(success=False, message="屏幕配置的 enabled 必须为布尔值"), 400
+        return _apply_screen_config(saved["content"])
+    except (OSError, ConfigurationError):
+        return jsonify(success=False, message="无法读取已保存的屏幕配置"), 400
 
 
 if __name__ == '__main__':

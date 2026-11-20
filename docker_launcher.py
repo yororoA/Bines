@@ -200,6 +200,14 @@ def _environment(profile: str) -> Dict[str, str]:
     from common.clock import timezone
     from common.website_spool import read_bridge_token
     env = dict(os.environ)
+    # Bind only the active MCP file. A new inode after an atomic GUI save
+    # makes Compose recreate its consumer and attach the new file.
+    mcp_path = ROOT / (env.get("BINES_MCP_CONFIG") or "mcp.servers.json")
+    if not mcp_path.is_file():
+        mcp_path = COMPOSE_FILE.parent / "empty-mcp.json"
+    env["_BINES_DOCKER_MCP_FILE"] = str(mcp_path.resolve())
+    meta = mcp_path.stat()
+    env["_BINES_DOCKER_MCP_VERSION"] = f"{meta.st_ino}:{meta.st_mtime_ns}"
     env["BINES_PROFILE"] = profile
     env["BINES_MEMORY_TIMEZONE"] = timezone().key
     env["BUILDX_CONFIG"] = str(BUILDX_CONFIG)
@@ -249,15 +257,16 @@ def run_build(profile: str, *services: str, timeout: float = 3600):
 # 每个镜像分别计算内容哈希，QQ 网关独有代码变化不再触发 RAG 镜像重建。
 _SHARED_SOURCES = (
     "*.py", "common/**/*.py", "tools/**/*.py",
+    "integrations/see_now/*.mjs", "vendor/see_now/package.json", "vendor/see_now/src/*.js",
     "thingking/*.py", "thingking/src/**/*.py", "thingking/scripts/*.py", "thingking/persona/*.yaml",
     "skills/**/*.md", "server/skill_actions.json", ".dockerignore",
     "deploy/docker/install_apt.py",
 )
 IMAGE_SOURCES = {
     "bines-launcher:local": _SHARED_SOURCES + (
+        ".env.example", "deploy/docker/compose.yaml",
         "chatBot/**/*.py", "chatBot/api/*.json",
         "server/*.py", "server/templates/*", "server/dashboard_static/*",
-    "integrations/see_now/*.mjs", "vendor/see_now/package.json", "vendor/see_now/src/*.js",
         "requirements/launcher.txt", "requirements-chatbot.txt",
         "thingking/rag_web_static/*",
         "deploy/docker/Dockerfile.launcher",

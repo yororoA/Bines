@@ -117,6 +117,7 @@ services:
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_GATEWAY_DIR: /app/gateway_data
       BINES_QQ_GATEWAY_HOST: 0.0.0.0
+      BINES_QQ_GATEWAY_PORT: 6102
       BINES_QQ_GATEWAY_URL: http://chatbot:6102
       BINES_NAPCAT_WS_URL: ws://napcat:3001
       BINES_NAPCAT_WEBUI_URL: http://napcat:6099
@@ -153,6 +154,8 @@ services:
     restart: unless-stopped
     user: "${BINES_UID:-1000}:${BINES_GID:-1000}"
     command: ["python", "thingking/qq_thinking.py"]
+    labels:
+      io.bines.mcp-version: "${_BINES_DOCKER_MCP_VERSION:-default}"
     env_file:
       - path: ../../.env
         required: false
@@ -166,7 +169,14 @@ services:
       BINES_PROACTIVE_FOLLOWUP_DELAY: ${BINES_PROACTIVE_FOLLOWUP_DELAY:-90}
       BINES_WEBSITE_BRIDGE_TOKEN: ${BINES_WEBSITE_BRIDGE_TOKEN:-}
       BINES_WEBSITE_BRIDGE_SPOOL: /app/thingking/memory_data/website_bridge
+      BINES_MCP_CONFIG: /run/bines/mcp.json
     volumes:
+      - type: bind
+        source: ${_BINES_DOCKER_MCP_FILE:-./empty-mcp.json}
+        target: /run/bines/mcp.json
+        read_only: true
+        bind:
+          create_host_path: false
       - ../../thingking/memory_data:/app/thingking/memory_data
       - ../../thingking/models:/app/thingking/models
       - bines-gateway:/app/gateway_data
@@ -251,6 +261,7 @@ services:
       PYTHONFAULTHANDLER: "1"
       <<: [*bines-timezone, *bines-autonomy]
       BINES_DOCKER_MODE: "1"
+      BINES_NODE_BINARY: /usr/local/bin/node
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_MEMORY_BIND_HOST: 0.0.0.0
       BINES_QDRANT_URL: http://qdrant:6333
@@ -258,10 +269,9 @@ services:
       BINES_QDRANT_MIN_SCORE: ${BINES_QDRANT_MIN_SCORE:-0.52}
       HF_HOME: /app/thingking/models/hf-cache
     ports:
-      - "127.0.0.1:5560:5560"
+      - "127.0.0.1:${BINES_RAG_RPC_PORT:-5560}:${BINES_RAG_RPC_PORT:-5560}"
     volumes:
       - ../../thingking/memory_data:/app/thingking/memory_data
-      BINES_NODE_BINARY: /usr/local/bin/node
       - ../../thingking/models:/app/thingking/models
       - ../../thingking/data:/app/thingking/data:ro
     depends_on:
@@ -294,11 +304,16 @@ services:
       BINES_QQ_GATEWAY_URL: http://chatbot:6102
       BINES_HTTP_HOST: 0.0.0.0
       BINES_ADMIN_LOCAL_PROXY: docker
+      # Configuration edits persist on the host, separately from runtime env.
+      BINES_CONFIG_ROOT: /app/admin_project
+      BINES_GATEWAY_DIR: /app/gateway_data
     ports:
-      - "127.0.0.1:${BINES_RAG_WEB_PORT:-5001}:5001"
+      - "127.0.0.1:${BINES_RAG_WEB_PORT:-5001}:${BINES_RAG_WEB_PORT:-5001}"
     volumes:
       - ../../thingking/memory_data:/app/thingking/memory_data
       - ../../thingking/models:/app/thingking/models
+      - ../../:/app/admin_project
+      - bines-gateway:/app/gateway_data:ro
     depends_on:
       memory-server:
         condition: service_healthy

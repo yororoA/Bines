@@ -10,6 +10,7 @@ deploy/napcat/data/
 deploy/napcat/qrcode.png
 deploy/napcat/.env
 .env
+mcp.servers.json
 .git/
 node_modules/
 static/

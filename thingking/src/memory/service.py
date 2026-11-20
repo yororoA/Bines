@@ -1662,6 +1662,8 @@ class MemoryService:
             stats["vector_status"] = self.index.status()
         stats["identity_links"] = self.repo.identity_links()
         stats["conversations"] = self.repo.list_conversations()
+        stats["state_scopes"] = [row["scope"] for row in self.repo.conn.execute(
+            "SELECT scope FROM state ORDER BY scope")]
         for table in ("retrieval_keys", "state_history", "fact_versions", "association_nodes",
                       "association_chains", "association_edges", "memory_usage_events", "consolidation_snapshots"):
             try:

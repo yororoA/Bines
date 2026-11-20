@@ -47,12 +47,12 @@ def desktop_handoff():
         "desktop_handoff", seed=lambda: legacy_json(control_path().parent / "desktop_activity_handoff.json"))[0]
 
 
-def set_owner_control(mode, reason=""):
+def set_owner_control(mode, reason="", *, store=None):
     if mode not in {"pause", "resume", "stop"}:
         raise ValueError("mode 必须是 pause、resume 或 stop")
     data = {"mode": mode, "reason": str(reason)[:500], "updated_at": time.time()}
-    activity_store().update("control", lambda old: data,
-                            seed=lambda: legacy_json(control_path()))
+    (store if store is not None else activity_store()).update(
+        "control", lambda old: data, seed=lambda: legacy_json(control_path()))
     return data
 
 

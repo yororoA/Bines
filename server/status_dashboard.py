@@ -141,6 +141,11 @@ def create_status_blueprint(supervisor=None, ports=None):
     def status_page():
         return render_template("status_dashboard.html", ports=ports or {})
 
+    @blueprint.get("/control")
+    def control_page():
+        return render_template("control_center.html", ports=ports or {},
+                               host_controls=supervisor is not None)
+
     @blueprint.get("/api/status/overview")
     def overview():
         # Coalesce tabs/pollers. A refresh never starts competing probe batches.

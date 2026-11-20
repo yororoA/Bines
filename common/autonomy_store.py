@@ -88,11 +88,13 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('DEL', KEYS[1])
 """
 
-    def __init__(self, *, directory=None, sqlite_path=None, backend=None, url=None, prefix=None):
+    def __init__(self, *, directory=None, sqlite_path=None, backend=None, url=None, prefix=None,
+                 timeout=3, sqlite_timeout=10):
         self.directory = Path(directory or memory_directory())
         self.backend = backend or os.getenv("BINES_AUTONOMY_BACKEND", "redis").lower()
         self.prefix = prefix or os.getenv("BINES_AUTONOMY_PREFIX", "bines:autonomy:")
         self._lease = threading.local()
+        self.sqlite_timeout = sqlite_timeout
         if self.backend == "redis":
             try:
                 import redis
@@ -100,8 +102,8 @@ return redis.call('DEL', KEYS[1])
                 password = json.loads(credentials.read_text())["password"] if credentials.exists() else None
                 self.redis = redis.Redis.from_url(
                     url or os.getenv("BINES_AUTONOMY_REDIS_URL", "redis://127.0.0.1:6380/0"),
-                    password=password, decode_responses=True, socket_timeout=3,
-                    socket_connect_timeout=3,
+                    password=password, decode_responses=True, socket_timeout=timeout,
+                    socket_connect_timeout=timeout,
                 )
             except Exception as exc:
                 raise AutonomyStoreError(f"自主状态 Redis 配置不可用（{type(exc).__name__}）") from None
@@ -122,7 +124,7 @@ return redis.call('DEL', KEYS[1])
 
     @contextmanager
     def _db(self):
-        db = sqlite3.connect(self.path, timeout=10)
+        db = sqlite3.connect(self.path, timeout=self.sqlite_timeout)
         try:
             with db:
                 yield db
