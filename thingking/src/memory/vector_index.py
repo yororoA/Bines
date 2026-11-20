@@ -21,6 +21,7 @@ from .evidence import vector_key_eligible, vector_key_filter
 
 COLLECTION = "memories"
 PREFIX = "memory_keys_v3_"
+_EXACT_HOT_LIMIT = 512
 log = logging.getLogger("bines.memory.vector_index")
 
 
@@ -344,6 +345,17 @@ class VectorIndex:
             target = self._keys if generation is None else self._client.get_collection(generation, embedding_function=None)
             target.delete(ids=list(ids))
 
+    @staticmethod
+    def _query_filter(scopes, kinds, subject_id=None, *, archive_only=False):
+        clauses = [{"scope": {"$in": list(scopes)}}]
+        if kinds:
+            clauses.append({"kind": {"$in": list(kinds)}})
+        if subject_id:
+            clauses.append({"subject_id": subject_id})
+        # $ne also includes legacy hot vectors that have no tier metadata.
+        clauses.append({"retrieval_status": "cold" if archive_only else {"$ne": "cold"}})
+        return {"$and": clauses}
+
     def _query(self, text, scopes, kinds, n, subject_id=None, *, archive_only=False):
         started = time.monotonic()
         trace = {"status": "empty", "cache_hit": False, "wait_ms": 0.0}
@@ -388,19 +400,8 @@ class VectorIndex:
                     with self._priority:
                         self._query_waiters -= 1
                         self._priority.notify_all()
-            clauses = [{"scope": {"$in": list(scopes)}}]
-            if kinds:
-                clauses.append({"kind": {"$in": list(kinds)}})
-            if subject_id:
-                clauses.append({"subject_id": subject_id})
-            if archive_only:
-                clauses.append({"retrieval_status": "cold"})
-            else:
-                # Chroma's $ne includes absent metadata, preserving old hot
-                # keys while excluding archive vectors before the top-N limit.
-                clauses.append({"retrieval_status": {"$ne": "cold"}})
             result = target.query(query_embeddings=[embedding],
-                where=clauses[0] if len(clauses) == 1 else {"$and": clauses},
+                where=self._query_filter(scopes, kinds, subject_id, archive_only=archive_only),
                 n_results=max(1, min(int(n), count)), include=["distances", "metadatas"])
             trace["status"] = "ok" if result["ids"][0] else "empty"
             trace["returned"] = len(result["ids"][0])
@@ -414,6 +415,33 @@ class VectorIndex:
     def query_keys(self, text, scopes, kinds=None, n=40):
         result = self._query(text, scopes, kinds, n)
         return self._matches(result)
+
+    def exact_hot_keys(self, text, scopes, kinds):
+        """Check a small filtered HNSW miss using the vector from this query."""
+        cache_key = (id(self.embedder), hashlib.sha256(text.encode()).digest())
+        with self._state_lock:
+            embedding = self._query_cache.get(cache_key)
+            target = self._active
+        if target is None or embedding is None or not scopes:
+            return VectorMatches()
+        where = self._query_filter(scopes, kinds)
+        ids = target.get(where=where, limit=_EXACT_HOT_LIMIT + 1, include=[])["ids"]
+        if not ids or len(ids) > _EXACT_HOT_LIMIT:
+            return VectorMatches()
+        rows = target.get(ids=ids, where=where, include=["embeddings", "metadatas"])
+        if not rows["ids"]:
+            return VectorMatches()
+
+        import numpy as np
+        matrix = np.asarray(rows["embeddings"], dtype=np.float64)
+        query = np.asarray(embedding, dtype=np.float64)
+        norms = np.linalg.norm(matrix, axis=1) * np.linalg.norm(query)
+        similarities = np.divide(matrix @ query, norms, where=norms > 0, out=np.zeros_like(norms))
+        pairs = sorted(((key, float(1 - similarity)) for key, similarity in
+                        zip(rows["ids"], np.clip(similarities, -1, 1)) if np.isfinite(similarity)),
+                       key=lambda pair: (pair[1], pair[0]))
+        return VectorMatches(pairs, {key: meta.get("source_hash") for key, meta in zip(rows["ids"], rows["metadatas"])},
+                             {key: meta.get("search_hash") for key, meta in zip(rows["ids"], rows["metadatas"])})
 
     def query_archive_keys(self, text, scopes, kinds=None, n=12):
         # _query reuses the same query embedding and cache as the hot channel.

@@ -289,6 +289,56 @@ class ArchiveRetrievalTests(unittest.TestCase):
         self.assertEqual(self.service.retriever.last_trace["vector_requested"], 10)
         self.assertNotIn(key_id, {kid for kid, _ in self.index.query_archive_keys(query, ["owner"], n=128)})
 
+    def test_exact_hot_rescue_reuses_query_vector_and_checks_scope_tier_kind_and_hashes(self):
+        self.service.retriever.settings = replace(self.service.retriever.settings, cold_fallback_limit=0)
+        hot = self.repo.add_memory("episode", "owner", "围巾放在银柜。")
+        distractor = self.repo.add_memory("episode", "owner", "整理杂物。")
+        stale = [self.repo.add_memory("episode", "owner", "围巾放在别处。") for _ in range(2)]
+        self.repo.add_memory("episode", "visitor", "围巾在访客家。")
+        self.repo.add_memory("semantic", "owner", "另一个围巾。")
+        self.cold(text="围巾曾经放在旧柜。")
+        self.index_all()
+        collection = self.index._keys
+        for mid, field in zip(stale, ("source_hash", "search_hash")):
+            collection.update(ids=[f"m:{mid}:0"], metadatas=[{field: "outdated"}])
+        kid = f"m:{distractor}:0"
+        metadata = collection.get(ids=[kid], include=["metadatas"])["metadatas"]
+        ann_miss = {"ids": [[kid]], "distances": [[1.0]], "metadatas": [metadata]}
+        before_queries = list(self.embedder.queries)
+        with patch.object(collection, "query", return_value=ann_miss):
+            hits = self.service.search("保暖纪念品的位置", ["owner"], kinds=["episode"])
+        self.assertEqual([hit["id"] for hit in hits], [hot])
+        self.assertEqual(self.service.retriever.last_trace["exact_hot_hits"], 1)
+        self.assertEqual(self.embedder.queries, [*before_queries, "保暖纪念品的位置"])
+
+    def test_hot_rescue_skips_large_candidate_set_and_unavailable_or_unneeded_search(self):
+        self.service.retriever.settings = replace(self.service.retriever.settings, cold_fallback_limit=0)
+        mid = self.repo.add_memory("episode", "owner", "银色储藏柜。")
+        self.index_all()
+        collection = self.index._keys
+        kid = f"m:{mid}:0"
+        metadata = collection.get(ids=[kid], include=["metadatas"])["metadatas"]
+        ann_miss = {"ids": [[kid]], "distances": [[1.0]], "metadatas": [metadata]}
+        with patch.object(collection, "query", return_value=ann_miss), patch.object(
+                collection, "get", return_value={"ids": [str(i) for i in range(513)]}) as probe:
+            self.assertFalse(self.service.search("保暖纪念品", ["owner"]))
+            self.assertEqual(probe.call_count, 1)
+            self.assertEqual(probe.call_args.kwargs["include"], [])
+            self.assertEqual(probe.call_args.kwargs["limit"], 513)
+            probe.reset_mock()
+            self.assertTrue(self.service.search("银色储藏柜", ["owner"]))
+            self.service.search("原话“没有命中”", ["owner"])
+            self.index._query_wait_seconds = 0
+            with self.index._embedding_lock:
+                self.service.search("正在排队的查询", ["owner"])
+            self.assertEqual(self.service.retriever.last_trace["vector"]["status"], "busy")
+            probe.assert_not_called()
+        with patch.object(collection, "query", side_effect=RuntimeError("ANN unavailable")), \
+                patch.object(collection, "get") as probe, self.assertLogs(level="ERROR"):
+            self.service.search("查询故障", ["owner"])
+            probe.assert_not_called()
+        self.assertNotIn("正在排队的查询", self.embedder.queries)
+
     def test_old_signature_requeues_cold_sources_and_async_backfill_finishes(self):
         from memory.evidence import EvidenceStore
         from memory.vector_maintenance import VectorMaintenance

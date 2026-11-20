@@ -160,6 +160,27 @@ class HybridRetriever:
         vector_distances = {}
         vector_requested = 0
         vector_attempts = []
+        exact_hot_hits = 0
+
+        def live_vector_sources(vector):
+            live = eligible(self.keys.get_keys([key for key, _ in vector], scopes))
+            hashes = getattr(vector, "source_hashes", None)
+            search_hashes = getattr(vector, "search_hashes", None)
+            selected, sources = [], set()
+            for key, distance in vector:
+                row = live.get(key)
+                if not row or (hashes is not None and hashes.get(key) != row["source_hash"]):
+                    continue
+                if search_hashes is not None and search_hashes.get(key) != hashlib.sha256(row["search_text"].encode()).hexdigest():
+                    continue
+                source = (row["source_type"], row["memory_id"] or row["message_id"])
+                if source not in sources:
+                    sources.add(source)
+                    selected.append((key, distance))
+                    if len(selected) == count:
+                        break
+            return selected
+
         if hasattr(self.index, "query_keys") or getattr(self.index, "persistent", True):
             try:
                 requested, ceiling = count, min(2048, max(256, count * 16))
@@ -172,31 +193,24 @@ class HybridRetriever:
                     vector_attempts.append(dict(getattr(self.index, "last_query_trace", {}) or
                                                 {"status": "ok" if vector else "empty"}))
                     vector_requested = requested
-                    live = eligible(self.keys.get_keys([key for key, _ in vector], scopes))
-                    hashes = getattr(vector, "source_hashes", None)
-                    if hashes is not None:
-                        live = {key: row for key, row in live.items() if hashes.get(key) == row["source_hash"]}
-                    search_hashes = getattr(vector, "search_hashes", None)
-                    if search_hashes is not None:
-                        live = {key: row for key, row in live.items()
-                                if search_hashes.get(key) == hashlib.sha256(row["search_text"].encode()).hexdigest()}
-                    selected, sources = [], set()
-                    for key, distance in vector:
-                        row = live.get(key)
-                        if not row:
-                            continue
-                        source = (row["source_type"], row["memory_id"] or row["message_id"])
-                        if source in sources:
-                            continue
-                        sources.add(source)
-                        selected.append((key, distance))
-                        if len(selected) == count:
-                            break
+                    selected = live_vector_sources(vector)
                     if len(selected) >= count or len(vector) < requested or requested >= ceiling:
                         vector_distances = dict(selected)
                         rankings["vector"] = [key for key, _ in selected]
                         break
                     requested = min(ceiling, requested * 2)
+                # Filtered HNSW can miss a close hot vector among distant
+                # candidates. Reuse the query embedding after a semantic miss.
+                if (mode == "association" and not lexical and vector_attempts[-1].get("status") in {"ok", "empty"}
+                        and not any(d <= self.settings.retrieval_max_distance for d in vector_distances.values())
+                        and hasattr(self.index, "exact_hot_keys")):
+                    exact_vector = self.index.exact_hot_keys(query, scopes, allowed_kinds)
+                    if exact_vector and exact_vector[0][1] <= self.settings.retrieval_max_distance:
+                        rescored = live_vector_sources(exact_vector)
+                        exact_hot_hits = sum(d <= self.settings.retrieval_max_distance for _, d in rescored)
+                        if exact_hot_hits:
+                            vector_distances = dict(rescored)
+                            rankings["vector"] = list(vector_distances)
             except Exception:
                 vector_attempts.append({"status": "error"})
                 log.exception("向量检索失败，使用全文候选")
@@ -220,6 +234,7 @@ class HybridRetriever:
         self.last_trace = {"candidates": len(candidates), "channels": {name: len(ids) for name, ids in rankings.items()},
                            "reranker": "local", "as_of": as_of, "historical": historical,
                            "vector_requested": vector_requested, "vector_attempts": vector_attempts,
+                           "exact_hot_hits": exact_hot_hits,
                            "vector": vector_attempts[-1] if vector_attempts else {"status": "disabled"},
                            "retrieval_mode": mode, "cold_fallback": 0}
         if self.settings.reranker_model and candidates:
