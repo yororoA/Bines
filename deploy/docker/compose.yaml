@@ -161,10 +161,10 @@ services:
         required: false
     environment:
       <<: [*bines-timezone, *bines-autonomy]
+      BINES_NODE_BINARY: /usr/local/bin/node
       BINES_PROFILE: ${BINES_PROFILE:-chatbot}
       BINES_MEMORY_DIR: /app/thingking/memory_data
       BINES_GATEWAY_DIR: /app/gateway_data
-      BINES_NODE_BINARY: /usr/local/bin/node
       BINES_QQ_GATEWAY_URL: http://chatbot:6102
       BINES_PROACTIVE_FOLLOWUP_DELAY: ${BINES_PROACTIVE_FOLLOWUP_DELAY:-90}
       BINES_WEBSITE_BRIDGE_TOKEN: ${BINES_WEBSITE_BRIDGE_TOKEN:-}
