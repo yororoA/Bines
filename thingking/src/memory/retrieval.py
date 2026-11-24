@@ -12,6 +12,8 @@ from .lexical_index import query_terms
 from .models import MEMORY_KINDS, ZONE
 
 log = logging.getLogger("bines.memory.retrieval")
+_QUOTED = re.compile(r'[“"「]([^”"」]+)[”"」]')
+_RECENT = re.compile(r"最近(?:一|几)次|最后一次|上一?次(?!元)|上一?回|近期|最近(?!邻)")
 
 
 def _source_time_visible(timestamp, when):
@@ -40,8 +42,10 @@ def time_intent(query):
             when = datetime(int(match[1]), int(match[2]), int(match[3] or 1), tzinfo=ZONE).timestamp()
         except ValueError:
             pass
-    history = any(word in query for word in ("以前", "曾经", "之前", "历史", "当时", "变化"))
-    return when, history or when is not None
+    query = _QUOTED.sub(" ", query)
+    history = any(word in query for word in ("以前", "曾经", "之前", "历史", "当时", "变化", "从前", "那时候"))
+    past = re.search(r"(?:^|[\s，。！？：、,!?]|我|你|他|她|们|记得|说说|关于|回忆)过去(?!式|分词)", query)
+    return when, history or past is not None or when is not None
 
 
 class HybridRetriever:
@@ -132,7 +136,17 @@ class HybridRetriever:
         self.sync()
         # 原始消息与派生记忆都可命中；限定 semantic 的画像查询不混入聊天正文。
         allowed_kinds = list(kinds) if kinds else [*MEMORY_KINDS, "message"]
-        terms = query_terms(query)
+        intent_text = _QUOTED.sub(" ", query)
+        prefer_recent = bool(_RECENT.search(intent_text))
+        topic_query = query
+        if prefer_recent:
+            # A date qualifier alone is not matching evidence for another topic.
+            topic_query = _RECENT.sub(" ", intent_text)
+            topic_query = re.sub(r"(?:在哪里|在哪[儿里]?)[？?呢吗\s]*$", " ", topic_query)
+            topic_query = " ".join([topic_query, *_QUOTED.findall(query)])
+        terms = query_terms(topic_query)
+        if prefer_recent and not terms:
+            return []
         topic = " ".join(sorted(terms)) or query
         date, historical = time_intent(query)
         historical = include_history or historical
@@ -155,7 +169,7 @@ class HybridRetriever:
         # Scan ranked lexical batches until enough eligible independent sources
         # survive. Expired facts and a long source's chunks cannot spend the quota.
         lexical = self.keys.bm25_query(topic, scopes, allowed_kinds, count,
-                                       accept=eligible, per_source=1)
+                                       accept=eligible, per_source=1, prefer_recent=prefer_recent)
         rankings = {"bm25": [key for key, _ in lexical]}
         vector_distances = {}
         vector_requested = 0
@@ -244,7 +258,7 @@ class HybridRetriever:
         quota = max(0, min(10, getattr(self.settings, "cold_fallback_limit", 3)))
         if quota:
             cold, trace = self._cold_candidates(query, topic, anchors, terms, scopes,
-                                                allowed_kinds, eligible, quota)
+                                                allowed_kinds, eligible, quota, prefer_recent)
             candidates.extend(cold)
             self.last_trace.update(trace)
         candidates.sort(key=lambda row: (-row["score"], row["id"]))
@@ -253,22 +267,54 @@ class HybridRetriever:
                 anchor.lower() in row["content"].lower() for anchor in anchors), -row["score"], row["id"]))
         graph = getattr(self.repo, "associations", None)
         graph_enabled = graph is not None and self.settings.associations_enabled and expand_graph
+
+        def visible(node):
+            if not node or node["scope"] not in scopes or not graph.valid(node):
+                return False
+            if node["source_type"] == "raw":
+                if "message" not in allowed_kinds or any(f"message:{i}" in excluded for i in node["message_ids"]):
+                    return False
+                for mid in node["message_ids"]:
+                    message = graph._message(mid)
+                    if not message or not _source_time_visible(message.get("ts"), when):
+                        return False
+                    if node["retrieval_status"] == "cold":
+                        if not self.keys._cold_source(message, "message"):
+                            return False
+                        if message.get("episode_id") and not self.repo.temporal.visible_memory_ids(
+                                [message["episode_id"]], as_of=as_of, include_history=historical):
+                            return False
+                return True
+            return (node["source_type"] in allowed_kinds and node["memory_id"] not in excluded
+                    and bool(self.repo.temporal.visible_memory_ids(
+                        [node["memory_id"]], as_of=as_of, include_history=historical)))
+
         output, seen = [], set()
         for row in candidates:
             source_id = (row["source_type"], row["memory_id"] or row["message_id"])
             if source_id in seen:
                 continue
             evidence = []
+            reference = {}
             if not graph_enabled and include_evidence:
                 evidence = self.keys.evidence(row, scopes, query=query, limit=self.settings.evidence_limit,
                                               include_cold=row["meta"].get("retrieval_status") == "cold")
                 if not evidence:
                     continue
+                if graph is not None:
+                    node = self._source_node(graph, row)
+                    if not visible(node):
+                        continue
+                    reference = graph.citation(node)
+                    if row["message_id"] is not None:
+                        material = graph.material(node)
+                        start, end = material["message_ranges"][row["message_id"]]
+                        reference["citation_offset"] = max(start, material["text"].find(row["content"], start, end))
             seen.add(source_id)
             memory = self.repo.get_memory(row["memory_id"]) if row["memory_id"] and not graph_enabled else None
             # key.content 是原文连续片段；evidence 指向原始轮次，不能把提取事实当成用户原话。
             output.append({
-                **(memory or {}), "id": row["memory_id"] or f"message:{row['message_id']}",
+                **(memory or {}), **reference, "id": row["memory_id"] or f"message:{row['message_id']}",
                 "memory_id": row["memory_id"], "message_id": row["message_id"],
                 "key_id": row["id"], "scope": row["scope"], "kind": row["kind"],
                 "content": memory["content"] if memory else row["content"], "evidence": evidence,
@@ -281,9 +327,9 @@ class HybridRetriever:
                 break
         if not graph_enabled:
             return self._describe(output[:k], as_of)
-        return self._graph_fusion(query, output, scopes, allowed_kinds, k, excluded, as_of, historical, mode)
+        return self._graph_fusion(query, output, scopes, k, as_of, mode, visible)
 
-    def _cold_candidates(self, query, topic, anchors, terms, scopes, kinds, eligible, quota):
+    def _cold_candidates(self, query, topic, anchors, terms, scopes, kinds, eligible, quota, prefer_recent):
         kinds = [kind for kind in kinds if kind in {"message", "episode", "excerpt"}]
         trace = {"cold_fallback": 0, "cold_vector": {"status": "disabled"}}
         if not kinds:
@@ -293,7 +339,7 @@ class HybridRetriever:
         # exact quote in BM25; they must not consume a pre-filter shortlist or
         # hide another chunk of the same source before its literal is checked.
         lexical = self.keys.bm25_query(" ".join(anchors) or topic, scopes, kinds, 128,
-            accept=eligible, cold_only=True, scan_limit=128)
+            accept=eligible, cold_only=True, scan_limit=128, prefer_recent=prefer_recent)
         live = eligible(self.keys.get_keys([kid for kid, _ in lexical], scopes, include_cold=True))
         accepted, coverage = {}, {}
         for kid, _ in lexical:
@@ -370,38 +416,16 @@ class HybridRetriever:
         trace["cold_fallback"] = len(output)
         return output, trace
 
-    def _graph_fusion(self, query, direct, scopes, kinds, k, excluded, as_of, historical, mode="association"):
+    def _source_node(self, graph, row):
+        if row["memory_id"]:
+            return graph.for_memory(row["memory_id"]) or graph.register_memory(row["memory_id"])
+        return graph.for_message(row["message_id"]) or graph.register_raw([self.repo.get_message(row["message_id"])])
+
+    def _graph_fusion(self, query, direct, scopes, k, as_of, mode, visible):
         graph = self.repo.associations
-        when = self.repo.temporal._as_of(as_of)
-
-        def visible(node):
-            if not node or node["scope"] not in scopes or not graph.valid(node):
-                return False
-            if node["source_type"] == "raw":
-                if "message" not in kinds or any(f"message:{i}" in excluded for i in node["message_ids"]):
-                    return False
-                for mid in node["message_ids"]:
-                    message = graph._message(mid)
-                    if not message or not _source_time_visible(message.get("ts"), when):
-                        return False
-                    if node["retrieval_status"] == "cold":
-                        if not self.keys._cold_source(message, "message"):
-                            return False
-                        if message.get("episode_id") and not self.repo.temporal.visible_memory_ids(
-                                [message["episode_id"]], as_of=as_of, include_history=historical):
-                            return False
-                return True
-            return (node["source_type"] in kinds and node["memory_id"] not in excluded
-                    and bool(self.repo.temporal.visible_memory_ids(
-                        [node["memory_id"]], as_of=as_of, include_history=historical)))
-
         rows, direct_ids = {}, []
         for hit in direct:
-            node = (graph.for_memory(hit["memory_id"]) if hit["memory_id"]
-                    else graph.for_message(hit["message_id"]))
-            if not node:
-                node = (graph.register_memory(hit["memory_id"]) if hit["memory_id"]
-                        else graph.register_raw([self.repo.get_message(hit["message_id"])]))
+            node = self._source_node(graph, hit)
             if not visible(node):
                 continue
             if node["id"] not in rows:

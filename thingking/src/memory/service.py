@@ -153,15 +153,12 @@ class MemoryService:
         from .expression_learning import ExpressionLearning
         self.expression_learning = ExpressionLearning(self)
         with self.repo.transaction():
-            # Existing unsummarized receipts must settle before association.
-            for row in self.repo.conn.execute("""SELECT DISTINCT e.memory_id FROM experiences e JOIN jobs j
+            # Reconcile open summaries and restore usable raw receipts for old terminal jobs.
+            for row in self.repo.conn.execute("""SELECT e.memory_id,j.status FROM experiences e JOIN jobs j
                 ON json_extract(j.payload,'$.source_ref')=e.source_ref
                 AND json_extract(j.payload,'$.revision')=e.revision
-                WHERE j.kind='summarize_experience' AND j.status IN ('pending','running')""").fetchall():
-                memory = self.repo.get_memory(row["memory_id"])
-                if memory and not memory["deleted"] and not memory["meta"].get("experience_summary_pending"):
-                    self.repo.update_memory(memory["id"], meta={**memory["meta"], "experience_summary_pending": True})
-                    self.graph.register_memory(memory["id"])
+                WHERE j.kind='summarize_experience' AND j.status IN ('pending','running','failed')""").fetchall():
+                self._sync_experience_summary_status(row["memory_id"], row["status"])
             self.graph.backfill(limit=settings.association_backfill_batch)
 
     # ---------- identity ----------
@@ -367,6 +364,7 @@ class MemoryService:
             # Action/status remain machine-supplied even if a model misstates the receipt.
             content = f"Bines经历 · {record.get('action')} · 状态={record['status']}\n{summary.strip()[:2400]}"
             meta = {**memory["meta"], "experience_summary_pending": False}
+            meta.pop("experience_summary_failed", None)
             self.repo.update_memory(memory["id"], content=content, tags=list(tags)[:5], meta=meta)
             self.graph.register_memory(memory["id"])
             self.repo.finish_job(job_id)
@@ -1033,7 +1031,8 @@ class MemoryService:
         while True:
             job = self.repo.claim_job(self.settings.job_lease_seconds,
                                      kinds=kinds or [JOB_ASSOCIATE, JOB_SUMMARIZE, JOB_DIARY, "summarize_experience", "repair_memory", "audit_memory"],
-                                     excluded=deferred, max_lease_recoveries=self.settings.job_max_lease_recoveries)
+                                     excluded=deferred, max_lease_recoveries=self.settings.job_max_lease_recoveries,
+                                     on_lease_exhausted=self._release_failed_experience)
             if job is None:
                 return None
             with self.repo.transaction():
@@ -1379,7 +1378,18 @@ class MemoryService:
             if delta == 0:
                 changes.pop("relationship_delta", None)
             message = self.repo.get_message(job["payload"]["message_id"])
-            changed = self.state_effects.automatic(job["scope"], message, changes, expected_version)
+            changed = self.state_effects.automatic(job["scope"], message, changes, expected_version,
+                                                  defer_stale=expected_attempt is not None)
+            if changed is None:
+                # A valid extraction can race a different turn. Release this
+                # claim for a fresh snapshot without spending a model failure.
+                now = self.clock()
+                self.repo.conn.execute(
+                    "UPDATE jobs SET status='pending',lease_until=NULL,available_at=?,updated_at=?,"
+                    "started_at=NULL,duration_seconds=NULL WHERE id=? AND attempts=? AND status='running'",
+                    (now + 1, now, job_id, expected_attempt),
+                )
+                return {"status": "stale", "scope": job["scope"], "changed": False}
             self.repo.finish_job(job["id"])
         return {"status": "done", "scope": job["scope"], "changed": changed}
 
@@ -1579,6 +1589,27 @@ class MemoryService:
             self._index_ids([diary_id])
         return {"status": "done", "diary_id": diary_id, "protected_episodes": protected}
 
+    def _sync_experience_summary_status(self, memory_id, job_status):
+        memory = self.repo.get_memory(memory_id)
+        if not memory or memory["deleted"]:
+            return
+        # Once a terminal attempt released raw evidence, a recovery attempt
+        # keeps it readable until a successful summary replaces it.
+        fallback = job_status == "failed" or bool(memory["meta"].get("experience_summary_failed"))
+        meta = {**memory["meta"], "experience_summary_pending": not fallback}
+        if fallback:
+            meta["experience_summary_failed"] = True
+        if meta != memory["meta"]:
+            self.repo.update_memory(memory_id, meta=meta)
+            self.graph.register_memory(memory_id)
+
+    def _release_failed_experience(self, kind, payload):
+        if kind == "summarize_experience":
+            row = self.repo.conn.execute("SELECT memory_id FROM experiences WHERE source_ref=? AND revision=?",
+                                         (payload.get("source_ref"), payload.get("revision"))).fetchone()
+            if row:
+                self._sync_experience_summary_status(row["memory_id"], "failed")
+
     def fail_job(self, job_id: int, error: str, expected_attempt=None, failure=None) -> Dict[str, Any]:
         with self.repo.transaction():
             job = self.repo.get_job(int(job_id))
@@ -1588,14 +1619,8 @@ class MemoryService:
                 return {"status": "ignored"}
             status = self.repo.fail_job(int(job_id), error or "unknown error", self.settings.job_max_attempts,
                                         failure=failure)
-            if status == "failed" and job["kind"] == "summarize_experience":
-                row = self.repo.conn.execute("SELECT memory_id,revision FROM experiences WHERE source_ref=?",
-                                            (job["payload"]["source_ref"],)).fetchone()
-                memory = self.repo.get_memory(row["memory_id"]) if row else None
-                if memory and row["revision"] == job["payload"]["revision"] and not memory["deleted"]:
-                    self.repo.update_memory(memory["id"], meta={**memory["meta"],
-                        "experience_summary_pending": False, "experience_summary_failed": True})
-                    self.graph.register_memory(memory["id"])
+            if status == "failed":
+                self._release_failed_experience(job["kind"], job["payload"])
             return {"status": status}
 
     def retry_failed_job(self, job_id, *, scope, kind, expected_attempt, expected_updated_at,
@@ -1839,13 +1864,20 @@ class MemoryService:
         node = self.graph.get(source_id, scope)
         if not node or not self.graph.valid(node):
             return None
+        temporal = {}
+        memory_id = node["memory_id"]
+        if memory_id:
+            if not self.repo.temporal.visible_memory_ids([memory_id], include_history=True):
+                return None
+            temporal["temporal"] = self.repo.temporal.describe_memory_ids([memory_id])[memory_id]
         material = self.graph.material(node)
         text = material["text"]
         end = min(len(text), offset + limit)
         return {"citation_id": node["id"], "node_id": node["id"], "node_digest": node["digest"],
                 "kind": node["source_type"], "content": text[offset:end], "offset": offset,
                 "next_offset": end if end < len(text) else None, "total_chars": len(text),
-                "is_excerpt": offset > 0 or end < len(text), "corrections": self.corrections.inherited_facts(node)}
+                "is_excerpt": offset > 0 or end < len(text), "corrections": self.corrections.inherited_facts(node),
+                **temporal}
 
     def state_history(self, scope: str = OWNER_SCOPE, as_of: Optional[float] = None, limit: int = 20):
         return self.repo.temporal.state_history(scope, as_of, max(1, min(50, int(limit))))

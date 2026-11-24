@@ -253,7 +253,8 @@ class StateEffects:
         return self._commit_effect(scope, current, "patch", patch, ref, (self.repo.clock(), 0),
                                    None, None, source_ref=ref, snapshot={**current["data"], **missing})
 
-    def automatic(self, scope, message, changes, expected_version=None):
+    def automatic(self, scope, message, changes, expected_version=None, *, defer_stale=False) -> bool | None:
+        """Return None only when a fenced worker needs fresh materials before writing."""
         current = self._baseline(scope)
         event_key = "message:" + str(message["id"])
         if self.conn.execute("SELECT 1 FROM state_effects WHERE event_key=?", (event_key,)).fetchone():
@@ -271,6 +272,8 @@ class StateEffects:
                 "AND redacted=0 AND source_ref=?", (scope, expected_version, current["version"], message["source_ref"])
             ).fetchone()[0]
             if not same_source or same_source != current["version"] - expected_version:
+                if defer_stale:
+                    return None
                 raise StateConflict(f"state version is {current['version']}, expected {expected_version}")
         version = self._commit_effect(scope, current, "automatic", changes, event_key, (message["ts"], message["id"]),
                                       message["conversation_id"], message["id"])

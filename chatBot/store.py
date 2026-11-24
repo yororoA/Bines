@@ -149,9 +149,12 @@ class MemoryStore:
                 ambiguous_self_private = self_message and not identity.group and identity.user == identity.account
                 if not ambiguous_self_private:
                     db.execute(
-                        """INSERT OR IGNORE INTO messages
+                        """INSERT INTO messages
                         (scope,conversation,actor,name,role,content,raw,external_id,ts)
-                        VALUES(?,?,?,?,?,?,?,?,?)""",
+                        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(scope,external_id) DO UPDATE SET
+                        conversation=excluded.conversation,actor=excluded.actor,name=excluded.name,role=excluded.role,
+                        content=excluded.content,raw=excluded.raw,ts=excluded.ts,memory_synced=0
+                        WHERE messages.ts IS NULL AND messages.recalled=0""",
                         (identity.scope, identity.conversation, identity.user, identity.name,
                          "assistant" if self_message else "user",
                          readable(event.get("message", event.get("raw_message", ""))), raw,
@@ -161,8 +164,19 @@ class MemoryStore:
             if event.get("notice_type") in {"group_recall", "friend_recall"}:
                 group = str(event.get("group_id") or "")
                 user = str(event.get("user_id") or "")
-                external = f"{identity.account}:{group or 'p:'+user}:{event.get('message_id')}"
-                db.execute("UPDATE messages SET recalled=1,content='[消息已撤回]',raw=NULL,memory_synced=0 WHERE external_id=?", (external,))
+                peer = group or (identity.user if identity.user != identity.account else "")
+                if not peer or event.get("message_id") is None:
+                    return True
+                external = f"{identity.account}:{group or 'p:'+peer}:{event['message_id']}"
+                updated = db.execute("UPDATE messages SET recalled=1,content='[消息已撤回]',raw=NULL,memory_synced=0 "
+                                     "WHERE external_id=?", (external,)).rowcount
+                if not updated:
+                    # A withdrawal can arrive before history/get_msg materializes
+                    # the original. Keep the marker so neither can revive it.
+                    db.execute("""INSERT INTO messages(scope,conversation,actor,name,role,content,external_id,ts,recalled)
+                        VALUES(?,?,?,?,?,'[消息已撤回]',?,?,1)""",
+                        (identity.scope, identity.conversation, user, identity.name,
+                         "assistant" if user == identity.account else "user", external, now))
         return True
 
     def claim(self, worker, debounce=1.5, max_wait=5, limit=12, lease=120):
@@ -305,13 +319,15 @@ class MemoryStore:
         result = []
         for row in reversed(rows):
             content = row["content"]
+            metadata = {}
             if identity.group:
                 content = f"[QQ:{row['actor']} {row['name'] or ''}] {content}"
             if include_ids and not row["recalled"] and row["external_id"]:
                 prefix = f"{identity.account}:{identity.group or 'p:'+identity.user}:"
                 if row["external_id"].startswith(prefix):
-                    content = f"[message_id={row['external_id'][len(prefix):]}] {content}"
-            result.append({"role": row["role"], "content": content})
+                    metadata["message_id"] = row["external_id"][len(prefix):]
+                    content = f"[message_id={metadata['message_id']}] {content}"
+            result.append({"role": row["role"], "content": content, **metadata})
         return result
 
     def recall(self, identity, query, limit=5):

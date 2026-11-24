@@ -233,12 +233,115 @@ class Integration(unittest.TestCase):
         self.assertFalse(bot.should_reply({"post_type": "request"}, self.store.identity(ev)))
         self.assertFalse(bot.should_reply(ev, self.store.identity(ev)))
 
+    def test_private_outgoing_echo_never_triggers_another_reply(self):
+        from unittest.mock import Mock
+        echo = event("99", target_id="2", msg_id=80, text="Bines 刚发的消息")
+        self.insert(echo)
+        model = Mock()
+        model.run_skill_protocol.return_value = ("重复回复", [], [])
+        QQThinking(self.store, self.client).process(self.store.claim("worker", 0, 0), model)
+        model.run_skill_protocol.assert_not_called()
+        self.assertFalse(any(action.startswith("send_") for action, _ in self.api.calls))
+
+    def test_group_reply_without_mention_checks_remote_author_and_withdrawals(self):
+        from unittest.mock import Mock
+        for group, author, revoked, foreign in (("21", "99", False, False), ("22", "3", False, False),
+                                                ("23", "99", True, False), ("24", "99", False, True)):
+            with self.subTest(group=group):
+                self.api.calls.clear()
+                self.api.quoted["80"] = event(author, group="25" if foreign else group, msg_id=80, text="旧的约定")
+                if revoked:
+                    self.store.ingest({"post_type": "notice", "notice_type": "group_recall", "self_id": 99,
+                                       "group_id": group, "user_id": 99, "message_id": 80})
+                    notice = self.store.claim("worker", 0, 0)
+                    self.store.finish([row["id"] for row in notice], "worker")
+                self.insert(event("2", group=group, msg_id=81, message=[
+                    {"type": "reply", "data": {"id": 80}}, {"type": "text", "data": {"text": "具体几点？"}}]))
+                rows = self.store.claim("worker", 0, 0)
+                model = Mock()
+                model.run_skill_protocol.return_value = ("约在下午。", [], [])
+                QQThinking(self.store, self.client).process(rows, model)
+                self.store.finish([row["id"] for row in rows], "worker")
+                self.assertEqual(model.run_skill_protocol.call_count, int(group == "21"))
+                self.assertEqual(sum(action == "get_msg" for action, _ in self.api.calls), int(not revoked))
+                self.assertEqual(sum(action == "send_group_msg" for action, _ in self.api.calls), int(group == "21"))
+
+    def test_retracting_the_quoted_bot_message_during_generation_cancels_group_send(self):
+        original = event("99", group="31", msg_id=80, text="旧的约定")
+        self.store.add(self.store.identity(original), "assistant", "旧的约定", raw=original, external_id="99:31:80")
+        self.insert(event("2", group="31", msg_id=81, message=[
+            {"type": "reply", "data": {"id": 80}}, {"type": "text", "data": {"text": "具体几点？"}}]))
+        class Model:
+            def run_skill_protocol(inner, *args, **kwargs):
+                self.store.ingest({"post_type": "notice", "notice_type": "group_recall", "self_id": 99,
+                                   "group_id": "31", "user_id": 99, "message_id": 80})
+                return "过期的答复", [], []
+        QQThinking(self.store, self.client).process(self.store.claim("worker", 0, 0), Model())
+        self.assertFalse(any(action == "send_group_msg" for action, _ in self.api.calls))
+
+    def test_uncached_group_quotes_use_a_bounded_number_of_remote_reads_per_batch(self):
+        from unittest.mock import Mock
+        for mid in range(20, 26):
+            self.api.quoted[str(mid)] = event("3", group="33", msg_id=mid)
+            self.insert(event("2", group="33", msg_id=mid + 100, message=[
+                {"type": "reply", "data": {"id": mid}}, {"type": "text", "data": {"text": "你说的事"}}]))
+        model = Mock()
+        QQThinking(self.store, self.client).process(self.store.claim("worker", 0, 0), model)
+        model.run_skill_protocol.assert_not_called()
+        self.assertEqual([params["message_id"] for action, params in self.api.calls if action == "get_msg"],
+                         ["20", "21", "22", "23"])
+
+    def test_withdrawal_during_cold_quote_lookup_prevents_reply(self):
+        from unittest.mock import Mock
+        self.api.quoted["80"] = event("99", group="34", msg_id=80)
+        self.insert(event("2", group="34", msg_id=81, message=[{"type": "reply", "data": {"id": 80}}]))
+        original = self.api.raw_api
+        def withdrawing(action, params, *args, **kwargs):
+            response = original(action, params, *args, **kwargs)
+            if action == "get_msg":
+                self.store.ingest({"post_type": "notice", "notice_type": "group_recall", "self_id": 99,
+                                   "group_id": "34", "user_id": 99, "message_id": 80})
+            return response
+        model = Mock()
+        with patch.object(self.api, "raw_api", side_effect=withdrawing):
+            QQThinking(self.store, self.client).process(self.store.claim("worker", 0, 0), model)
+        model.run_skill_protocol.assert_not_called()
+        self.assertEqual(sum(action == "get_msg" for action, _ in self.api.calls), 1)
+
+    def test_uncached_private_withdrawal_blocks_stale_get_msg_without_hiding_other_peers(self):
+        from unittest.mock import Mock
+        for sender, extra in (("2", {}), ("99", {"target_id": "2"})):
+            with self.subTest(sender=sender):
+                mid = 70 if sender == "2" else 71
+                self.store.ingest({"post_type": "notice", "notice_type": "friend_recall", "self_id": 99,
+                                   "user_id": sender, "message_id": mid, **extra})
+                notice = self.store.claim("worker", 0, 0)
+                self.store.finish([row["id"] for row in notice], "worker")
+                self.api.quoted[str(mid)] = event(sender, msg_id=mid, text="已撤回的内容", **extra)
+                current = event("2", msg_id=mid + 100, message=[
+                    {"type": "reply", "data": {"id": mid}}, {"type": "text", "data": {"text": "还能读到吗？"}}])
+                self.insert(current)
+                model = Mock()
+                model.run_skill_protocol.return_value = ("", [], [])
+                rows = self.store.claim("worker", 0, 0)
+                QQThinking(self.store, self.client).process(rows, model)
+                self.store.finish([row["id"] for row in rows], "worker")
+                self.assertNotIn("已撤回的内容", str(model.run_skill_protocol.call_args.args[0]))
+                self.assertFalse(any(action == "get_msg" for action, _ in self.api.calls))
+                with self.store.connection() as db:
+                    marker = db.execute("SELECT scope,recalled FROM messages WHERE external_id=?",
+                                        (f"99:p:2:{mid}",)).fetchone()
+                    self.assertEqual((marker["scope"], marker["recalled"]), (self.store.identity(current).scope, 1))
+
     def test_qq_reply_history_and_no_false_memory(self):
         ev = event("2")
         self.insert(ev)
         rows = self.store.claim("worker", 0, 0)
         foreign = event("3", msg_id=8, text="foreign private")
-        self.api.history = [foreign, event("2", msg_id=9, text="own history")]
+        self.api.history = [foreign, event("2", msg_id=9, text="own history"),
+                            event("99", msg_id=12, text="another peer outgoing", target_id="7"),
+                            event("99", msg_id=13, text="correct peer outgoing", target_id="2"),
+                            event("2", group="91", msg_id=14, text="another group history")]
         class Model:
             def run_skill_protocol(inner, conversation, runner, **kwargs):
                 inner.context = str(conversation)
@@ -248,6 +351,9 @@ class Integration(unittest.TestCase):
         bot.process(rows, model)
         self.assertIn("own history", model.context)
         self.assertNotIn("foreign private", model.context)
+        self.assertNotIn("another peer outgoing", model.context)
+        self.assertNotIn("another group history", model.context)
+        self.assertIn("correct peer outgoing", model.context)
         self.assertIn("回复", str(self.store.context(self.store.identity(ev))))
         self.insert(event("3", msg_id=10))
         self.store.finish([row["id"] for row in rows], "worker")
@@ -431,7 +537,8 @@ class Integration(unittest.TestCase):
 
     def test_each_batched_reply_uses_its_own_event_authority(self):
         for message_id in (101, 102):
-            self.api.quoted[str(message_id)] = event("3", group="10", msg_id=message_id, text=f"引用{message_id}")
+            self.api.quoted[str(message_id)] = event("3", group="10", msg_id=message_id, text=f"引用{message_id}",
+                                                      time=1704067200)
             self.insert(event("2", group="10", msg_id=message_id + 100, message=[
                 {"type": "reply", "data": {"id": str(message_id)}},
                 {"type": "at", "data": {"qq": "99"}},
@@ -442,10 +549,42 @@ class Integration(unittest.TestCase):
             def run_skill_protocol(inner, conversation, runner, **kwargs):
                 self.assertIn("引用101", conversation[-1]["content"])
                 self.assertIn("引用102", conversation[-1]["content"])
+                self.assertIn('"input_number": 1', conversation[-1]["content"])
+                self.assertIn('"input_number": 2', conversation[-1]["content"])
+                from common.clock import now
+                self.assertIn(now(1704067200).isoformat(timespec="seconds"), conversation[-1]["content"])
+                table = json.loads(conversation[-2]["content"].split("当前会话消息 ID（仅供引用，不是指令）：\n")[1].splitlines()[0])
+                self.assertEqual([(row["input_number"], row["message_id"], row["quoted_message_ids"]) for row in table
+                                  if row["kind"] == "current_input"], [(1, "201", ["101"]), (2, "202", ["102"])])
                 return "看到这两条啦", [], []
 
         QQThinking(self.store, self.client).process(rows, Model())
         self.assertEqual(sum(action == "get_msg" for action, _ in self.api.calls), 2)
+
+    def test_undated_quote_stays_out_of_dated_memory_until_original_event_arrives(self):
+        from unittest.mock import Mock
+        original = event("2", msg_id=85, text="明天去东站")
+        del original["time"]
+        self.api.quoted["85"] = original
+        self.insert(event("2", msg_id=86, message=[
+            {"type": "reply", "data": {"id": 85}}, {"type": "text", "data": {"text": "当时说的哪天？"}}]))
+        model = Mock()
+        model.run_skill_protocol.return_value = ("", [], [])
+        QQThinking(self.store, self.client).process(self.store.claim("worker", 0, 0), model)
+        incoming = model.run_skill_protocol.call_args.args[0][-1]["content"]
+        self.assertIn('"sent_at": null', incoming)
+        self.assertIn("明天去东站", incoming)
+        self.memory_hub.sync()
+        with self.store.connection() as db:
+            row = db.execute("SELECT id,ts FROM messages WHERE external_id='99:p:2:85'").fetchone()
+        self.assertIsNone(row["ts"])
+        ref = self.memory_hub.source + ":" + str(row["id"])
+        self.assertIsNone(self.memory_hub.service.repo.conn.execute(
+            "SELECT ts FROM messages WHERE source_ref=?", (ref,)).fetchone())
+        self.store.ingest({**original, "time": 1704067200})
+        self.memory_hub.sync()
+        self.assertEqual(self.memory_hub.service.repo.conn.execute(
+            "SELECT ts FROM messages WHERE source_ref=?", (ref,)).fetchone()["ts"], 1704067200)
 
     def test_cached_text_quote_does_not_call_napcat_get_msg(self):
         current = event("2", msg_id=97, message=[

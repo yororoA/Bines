@@ -339,6 +339,47 @@ class MemoryStateRetractionTest(unittest.TestCase):
         data = self.service.get_state("owner")["data"]
         self.assertEqual((data["relationship_score"], data["memory_highlights"]), (1, ["周二去看花"]))
 
+    def test_repeated_cross_turn_conflicts_refresh_worker_materials_without_losing_an_agreement(self):
+        import json
+        from memory.worker import MemoryWorker
+        self.record("agreement", "记得我们周五一起听歌")
+        activities = []
+        def extract(messages):
+            state = json.loads(messages[-1]["content"])["当前状态"]
+            activities.append(state.get("npc_state", {}).get("current_activity"))
+            if len(activities) <= self.service.settings.job_max_attempts:
+                self.service.put_state("owner", {}, changes={"npc_activity": f"进展 {len(activities)}"})
+            return '{"add_memory_highlight":"周五一起听歌","relationship_delta":1}'
+
+        worker = MemoryWorker(self.service, extract, lambda: "", state_complete_text=extract)
+        for i in range(self.service.settings.job_max_attempts):
+            self.assertTrue(worker.run_once(["update_state"]))
+            row = self.repo.conn.execute("SELECT id FROM jobs WHERE kind='update_state'").fetchone()
+            job = self.repo.get_job(row["id"])
+            self.assertEqual(job["status"], "pending")
+            self.assertNotIn("generation_failures", job["payload"])
+            self.assertEqual(self.service.complete_state_update(job["id"], {"relationship_delta": 2},
+                             expected_version=i, expected_attempt=job["attempts"])["status"], "ignored")
+            self.now = job["available_at"]
+        self.assertTrue(worker.run_once(["update_state"]))
+        self.assertEqual(activities, [None] + [f"进展 {i+1}" for i in range(self.service.settings.job_max_attempts)])
+        data = self.service.get_state("owner")["data"]
+        self.assertEqual((data["memory_highlights"], data["relationship_score"]), (["周五一起听歌"], 1))
+        self.assertFalse(worker.run_once(["update_state"]))
+
+    def test_withdrawal_cancels_requeued_stale_extraction_and_prior_lease(self):
+        env = self.record("withdraw-during-retry", "约好周五听歌")
+        claim = self.service.claim_job(["update_state"])
+        self.service.put_state("owner", {}, changes={"npc_activity": "散步"})
+        args = dict(expected_attempt=claim["job"]["attempts"], expected_version=claim["materials"]["version"])
+        changes = {"add_memory_highlight": "周五听歌"}
+        self.assertEqual(self.service.complete_state_update(claim["job"]["id"], changes, **args)["status"], "stale")
+        self.withdraw("withdraw-during-retry", env)
+        self.now += 10
+        self.assertIsNone(self.service.claim_job(["update_state"]))
+        self.assertEqual(self.service.complete_state_update(claim["job"]["id"], changes, **args)["status"], "ignored")
+        self.assertEqual(self.service.get_state("owner")["data"]["memory_highlights"], [])
+
     def test_manual_after_worker_supersedes_the_same_source_once_and_keeps_its_other_fields(self):
         self.service.put_state("owner", {"relationship_score": 100})
         env = self.record("same-source", "周五一起听歌，我会在杭州")

@@ -5,9 +5,10 @@ import re
 from chatBot.messages import readable, segments
 
 log = logging.getLogger("bines.qq.media")
+MAX_QUOTED_MESSAGES = 4
 
 
-def resolve_replies(events, client):
+def resolve_replies(events, client, lookup_quote=None):
     quotes, images, seen = [], [], set()
     for event in events:
         for part in segments(event.get("message", event.get("raw_message", ""))):
@@ -17,11 +18,12 @@ def resolve_replies(events, client):
             if not re.fullmatch(r"[1-9]\d*", message_id) or message_id in seen:
                 continue
             seen.add(message_id)
-            if len(seen) > 4:
+            if len(seen) > MAX_QUOTED_MESSAGES:
                 break
             try:
-                result = client.request("/quoted_message", {"message_id": message_id},
-                                        timeout=10, event_id=event["event_id"])
+                result = (lookup_quote(event, message_id) if lookup_quote else
+                          client.request("/quoted_message", {"message_id": message_id},
+                                         timeout=10, event_id=event["event_id"]))
                 data = result.get("data") or {}
                 if result.get("status") != "ok":
                     quotes.append(f"引用消息 {message_id}：[暂不可读取或已撤回]")

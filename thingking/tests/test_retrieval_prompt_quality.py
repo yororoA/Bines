@@ -1,5 +1,6 @@
 """Synthetic retrieval-to-prompt regressions; no network, models or real memory."""
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -66,6 +67,95 @@ class RetrievalPromptQualityTests(unittest.TestCase):
         hits = self.service.search("needle", ["owner"], k=5)
         self.assertEqual(len(hits), 5)
         self.assertEqual(len({r["id"] for r in hits}), 5)
+
+    def test_search_tool_distinguishes_past_and_present_on_results_and_open_pages(self):
+        from tools.dependencies import deps
+        from tools.memory_tool import read_memory_source, search_memory
+        for mid, city, at in (("past", "南京", 100), ("present", "杭州", 300)):
+            self.repo.add_memory("semantic", "owner", "我的住址是" + city, memory_id=mid)
+            self.repo.temporal.put_fact(mid, "owner", "owner", "city", city, at)
+        with patch.object(deps, "memory_client", self.service):
+            for graph_enabled in (True, False):
+                self.service.retriever.settings = replace(self.service.retriever.settings,
+                                                          associations_enabled=graph_enabled)
+                past = {hit["id"]: hit for hit in search_memory("过去的住址")}
+                self.assertEqual(set(past), {"past", "present"})
+                self.assertFalse(past["past"]["temporal"]["is_current"])
+                self.assertEqual(past["past"]["temporal"]["valid_to"], 300)
+                self.assertTrue(past["present"]["temporal"]["is_current"])
+                page = read_memory_source(past["past"]["expand"]["source_id"])
+                self.assertIn("南京", page["content"])
+                self.assertEqual(page["temporal"], past["past"]["temporal"])
+                self.assertEqual([r["id"] for r in search_memory("现在的住址")], ["present"])
+
+    def test_direct_search_preserves_original_with_its_verified_correction(self):
+        from tools.dependencies import deps
+        from tools.memory_tool import read_memory_source, search_memory
+        self.service.retriever.settings = replace(self.service.retriever.settings, associations_enabled=False)
+        ref = self.service.record_message(local_envelope(timestamp=900).to_dict(), "user", "车票约在周五。")
+        node = self.service.graph.for_message(ref["message_ids"][0])
+        self.service.correct_memory(scope="owner", node_id=node["id"], operation_id="retry-ticket",
+                                    expected_digest=node["digest"], kind="fact", quote="周五",
+                                    replacement="周六", explanation="用户核实了票面日期")
+        with patch.object(deps, "memory_client", self.service):
+            hit = search_memory("车票约在哪天")[0]
+            self.assertIn("周五", hit["content"])
+            self.assertEqual(hit["corrections"][0]["replacement"], "周六")
+            self.assertEqual(read_memory_source(hit["citation_id"])["corrections"], hit["corrections"])
+            self.assertEqual(read_memory_source(**hit["expand"], limit=len(hit["content"]))["content"], hit["content"])
+
+    def test_deleted_fact_source_retires_its_previously_opened_page(self):
+        source = self.service.add_memory("episode", "owner", "票务依据")["id"]
+        fact = self.service.add_memory("semantic", "owner", "票务预约在周一")["id"]
+        self.repo.temporal.put_fact(fact, "owner", "owner", "ticket", "周一", 100, source_ref=source)
+        citation = self.service.search("票务预约", ["owner"], kinds=["semantic"])[0]["citation_id"]
+        self.assertIsNotNone(self.service.read_memory_source(citation, "owner"))
+        self.service.delete_memory(source)
+        self.assertFalse(self.service.search("票务预约", ["owner"], kinds=["semantic"], include_history=True))
+        self.assertIsNone(self.service.read_memory_source(citation, "owner"))
+
+    def test_recent_question_breaks_lexical_ties_by_event_time_before_candidate_limit(self):
+        self.repo.add_memory("episode", "owner", "排练地点在北楼", memory_id="zz-new", end_ts=900)
+        for i in range(self.service.settings.retrieval_candidates + 1):
+            self.repo.add_memory("episode", "owner", "排练地点在南楼", memory_id=f"aa-old-{i}", end_ts=100+i)
+        self.repo.add_memory("episode", "owner", "最近一次演出在礼堂", memory_id="unrelated", end_ts=950)
+        for graph_enabled in (True, False):
+            self.service.retriever.settings = replace(self.service.retriever.settings, associations_enabled=graph_enabled)
+            for query in ("最近一次排练地点在哪", "上次排练地点在哪"):
+                self.assertEqual(self.service.search(query, ["owner"], k=1)[0]["id"], "zz-new")
+            self.assertFalse(self.service.search("最近一次彩灯调试在哪", ["owner"]))
+            self.assertEqual(self.service.search("排练地点在哪", ["owner"], k=1)[0]["id"], "aa-old-0")
+
+    def test_history_only_comes_from_the_question_and_not_a_product_or_motion(self):
+        from memory.retrieval import time_intent
+        for query in ("过去式练习", "过去分词", "走过去的路", "打开「过去的住址」", "上次元活动"):
+            self.assertFalse(time_intent(query)[1], query)
+        for query in ("我过去的住址", "我过去喜欢什么", "过去喜欢听哪首歌"):
+            self.assertTrue(time_intent(query)[1], query)
+
+    def test_historical_result_cannot_open_grouped_messages_after_as_of(self):
+        first = self.service.record_message(local_envelope(timestamp=100).to_dict(), "user", "排练地点在南楼")
+        later = self.service.record_message(local_envelope(timestamp=900).to_dict(), "assistant", "接下来改到北楼")
+        ids = first["message_ids"] + later["message_ids"]
+        self.service.graph.register_raw([self.repo.get_message(mid) for mid in ids])
+        for enabled in (False, True):
+            self.service.retriever.settings = replace(self.service.retriever.settings, associations_enabled=enabled)
+            self.assertFalse(self.service.search("排练地点", ["owner"], as_of=200))
+            self.assertTrue(self.service.search("排练地点", ["owner"], as_of=900))
+
+    def test_direct_page_offset_identifies_the_speaker_of_repeated_text(self):
+        from tools.dependencies import deps
+        from tools.memory_tool import read_memory_source, search_memory
+        self.service.retriever.settings = replace(self.service.retriever.settings, associations_enabled=False)
+        phrase = "合唱排练"
+        ids = [self.service.record_message(local_envelope(timestamp=at).to_dict(), role, phrase)["message_ids"][0]
+               for at, role in ((100, "user"), (900, "assistant"))]
+        self.service.graph.register_raw([self.repo.get_message(mid) for mid in ids])
+        with patch.object(deps, "memory_client", self.service):
+            hits = search_memory("最近一次合唱排练")
+            page = read_memory_source(hits[0]["citation_id"])["content"]
+            self.assertEqual([(h["id"], h["expand"]["offset"]) for h in hits],
+                             [(f"message:{ids[1]}", page.rindex(phrase)), (f"message:{ids[0]}", page.index(phrase))])
 
     def test_expired_candidates_do_not_hide_current_fact(self):
         for i in range(41):

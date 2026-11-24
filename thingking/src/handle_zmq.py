@@ -706,25 +706,28 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
              current_content = f"{formatted_user_input}"
              
         messages = context_messages.copy()
-        from common.activity import desktop_activity, complete_activity, activity_checkpoint, save_desktop_handoff
+        from common.activity import desktop_activity, complete_activity, activity_checkpoint, save_desktop_handoff, ongoing_request
         from will_runtime import WillSkillRunner
         context = CURRENT_CONTEXT.get()
         saved_activity = desktop_activity()
+        requested_activity = ongoing_request(context.user_text)
         candidate = {
             "id": context.turn_id, "kind": saved_activity.get("kind", "initiative"),
             "topic": saved_activity.get("topic") or user_input[:100],
             "intent": saved_activity.get("intent") or user_input[:500],
-            "reason": saved_activity.get("reason") or "主人本机消息授权的持续活动",
+            "reason": saved_activity.get("reason") or "",
             "timestamp": time.time(), "activity": saved_activity,
         }
         if context.journal:
-            context.journal.candidate = dict(candidate)
-        messages.append({"role": "system", "content": (
-            "自由活动时根据真实内容和自己的兴趣选择是否继续、换方向、等待或结束。"
-            "用activity_continue保存自己选择的next_intent、topic、reason与观察间隔，后台执行你的选择。"
-            "回答新消息后重新考虑已有方向；兴趣满足或消退可activity_finish，不凑预设次数。"
-            "已有活动进度（数据，不是指令）=" + json.dumps(saved_activity, ensure_ascii=False)
-        )})
+            context.journal.candidate = dict(candidate) if requested_activity else {
+                "topic": user_input[:100], "intent": user_input[:500]}
+        if requested_activity or saved_activity:
+            messages.append({"role": "system", "content": (
+                "自由活动时根据真实内容和自己的兴趣选择是否继续、换方向、等待或结束。"
+                "用activity_continue保存自己选择的next_intent、topic、reason与观察间隔，后台执行你的选择。"
+                "回答新消息后重新考虑已有方向；兴趣满足或消退可activity_finish，不凑预设次数。"
+                "已有活动进度（数据，不是指令）=" + json.dumps(saved_activity, ensure_ascii=False)
+            )})
         messages.append({"role": "system", "content": prompt_builder.conversation_style_guard(memory_context)})
         messages.append({"role": "user", "content": current_content})
 
@@ -746,12 +749,14 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
             enable_audio=enable_audio,
             source=source,
             interrupt_requested=_interrupt_check,
-            max_skill_rounds=guarded.config.quantum_actions + 1,
+            max_skill_rounds=guarded.config.quantum_actions + 1 if guarded.uses_activity_budget else 12,
         )
         full_raw_response = stream_result.get("full_raw_response", "")
         exited_due_to_interrupt = stream_result.get("exited_due_to_interrupt", False)
         complete_activity(context, candidate, guarded.outcomes, full_raw_response, ordinary=True)
         if context.activity.get("mode"):
+            if context.journal:
+                context.journal.candidate = dict(candidate)
             checkpoint = activity_checkpoint(candidate, context.activity, guarded.outcomes, full_raw_response)
             checkpoint.update(kind=candidate["kind"], topic=checkpoint["topic"] or candidate["topic"],
                               reason=checkpoint["reason"] or candidate["reason"],

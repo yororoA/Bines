@@ -148,9 +148,12 @@ class ActivityRequestBudgetTests(unittest.TestCase):
 
     def test_ordinary_runner_does_not_acquire_an_activity_time_limit(self):
         model = self.model([(100, response(tool_calls=[native_call(1)])), (100, response("done"))])
-        with tool_context(ToolContext(LOCAL_IDENTITY)):
-            text, history, _ = model.run_tool_calls([], self.runner)
+        context = ToolContext(LOCAL_IDENTITY, user_text="现在几点？")
+        with tool_context(context):
+            runner = WillSkillRunner(self.runner, self.candidate, lambda: "", ordinary=True)
+            text, history, _ = model.run_tool_calls([], runner)
         self.assertEqual((model.request_starts, text, len(history)), ([0, 100], "done", 1))
+        self.assertEqual(context.activity, {})
 
     def test_text_protocol_checks_next_request_and_length_retry(self):
         for length in (False, True):

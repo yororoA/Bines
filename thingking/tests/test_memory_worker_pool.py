@@ -83,6 +83,54 @@ class WorkerClaimTest(unittest.TestCase):
         memory = self.repo.conn.execute("SELECT memory_id FROM experiences").fetchone()[0]
         self.assertTrue(self.repo.get_memory(memory)["meta"]["experience_summary_failed"])
         self.assertIn("failed", self.repo.get_memory(memory)["content"])
+        self.clock.advance(self.service.settings.job_recovery_seconds + 1)
+        retry = self.service.claim_job(["summarize_experience"])["job"]
+        self.service = MemoryService(self.repo, LexicalIndex(self.repo), self.service.settings, self.clock)
+        waiting = self.repo.get_memory(memory)
+        self.assertFalse(waiting["meta"]["experience_summary_pending"])
+        self.assertTrue(waiting["meta"]["experience_summary_failed"])
+        self.assertIn("浏览器未加载", waiting["content"])
+        self.service.complete_experience_summary(retry["id"], "浏览器未加载。", expected_attempt=retry["attempts"])
+        self.assertFalse(self.repo.get_memory(memory)["meta"].get("experience_summary_failed"))
+
+    def test_expired_summary_releases_record_for_diary_and_repairs_old_pending_flag_on_restart(self):
+        from dataclasses import replace
+        self.service.settings = replace(self.service.settings, job_max_lease_recoveries=1)
+        receipt = dict(action="web_fetch", status="succeeded", result="读到旧桥施工通知")
+        mid = self.service.record_experience(local_env(self.clock()), "bridge", receipt)["id"]
+        for _ in range(2):
+            job = self.service.claim_job(["summarize_experience"])["job"]
+            self.clock.advance(self.service.settings.job_lease_seconds + 1)
+        self.assertIsNone(self.service.claim_job(["summarize_experience"]))
+        self.assertEqual(self.repo.get_job(job["id"])["payload"]["terminal_reason"], "lease_recovery_budget")
+        self.assertEqual(self.service.complete_experience_summary(job["id"], "迟到的摘要",
+                         expected_attempt=job["attempts"])["status"], "ignored")
+        memory = self.repo.get_memory(mid)
+        self.assertTrue(memory["meta"]["experience_summary_failed"])
+        self.assertFalse(memory["meta"]["experience_summary_pending"])
+        self.assertIn("旧桥施工通知", memory["content"])
+        self.assertIsNotNone(self.service.claim_job(["associate"]))
+        # An old server could have recorded the terminal job without this flag transition.
+        old_meta = {**memory["meta"], "experience_summary_pending": True}
+        old_meta.pop("experience_summary_failed")
+        self.repo.update_memory(mid, meta=old_meta)
+        self.service = MemoryService(self.repo, LexicalIndex(self.repo), self.service.settings, self.clock)
+        self.assertTrue(self.repo.get_memory(mid)["meta"]["experience_summary_failed"])
+        self.clock.advance(86400)
+        self.assertEqual(self.service.enqueue_due_diaries(), 1)
+
+    def test_expired_previous_revision_does_not_release_new_summary_before_it_finishes(self):
+        from dataclasses import replace
+        self.service.settings = replace(self.service.settings, job_max_lease_recoveries=0)
+        record = dict(action="web_fetch", status="succeeded", result="第一版")
+        mid = self.service.record_experience(local_env(self.clock()), "revised", record)["id"]
+        self.service.claim_job(["summarize_experience"])
+        self.service.record_experience(local_env(self.clock()), "revised", {**record, "result": "新版"}, revision=2)
+        self.clock.advance(self.service.settings.job_lease_seconds + 1)
+        new = self.service.claim_job(["summarize_experience"])["job"]
+        self.assertEqual(new["payload"]["revision"], 2)
+        self.assertTrue(self.repo.get_memory(mid)["meta"]["experience_summary_pending"])
+        self.assertFalse(self.repo.get_memory(mid)["meta"].get("experience_summary_failed"))
 
     def test_repair_worker_rebuilds_corrected_source(self):
         turn = self.service.record_turn(local_env(self.clock()), "住在北京", "收到")

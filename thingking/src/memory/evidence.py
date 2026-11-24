@@ -678,7 +678,7 @@ class EvidenceStore:
     def bm25_query(
         self, query: str, scopes: Sequence[str], kinds: Optional[Sequence[str]] = None, limit: int = 40,
         *, accept=None, per_source: Optional[int] = None, include_cold=False, cold_only=False,
-        scan_limit: Optional[int] = None,
+        scan_limit: Optional[int] = None, prefer_recent=False,
     ) -> List[Tuple[str, float]]:
         """Return (key_id, raw FTS5 bm25), ascending: smaller is more relevant."""
         scopes = _strings(scopes)
@@ -701,11 +701,13 @@ class EvidenceStore:
         # Generated tokens are always quoted data, never caller-supplied FTS syntax.
         params.append(" OR ".join('"' + term.replace('"', '""') + '"' for term in terms))
         hits, source_counts = [], {}
+        # Decide equal relevance before paging, using event time even for late imports.
+        order = "score, COALESCE(u.ts,m.end_ts,m.start_ts,m.created_at) DESC, k.id" if prefer_recent else "score, k.id"
         with self._atomic():
             cursor = self.conn.execute(
                 "SELECT k.*, bm25(retrieval_keys_fts) AS score FROM retrieval_keys_fts "
                 "JOIN retrieval_keys k ON k.rowid = retrieval_keys_fts.rowid AND k.id = retrieval_keys_fts.id "
-                f"{_SOURCE_JOIN} WHERE {' AND '.join(conditions)} ORDER BY score, k.id", params,
+                f"{_SOURCE_JOIN} WHERE {' AND '.join(conditions)} ORDER BY {order}", params,
             )
             # Apply the limit after freshness checks so stale hits cannot crowd
             # out valid ones. Scope/kind filtering is already done inside SQL.

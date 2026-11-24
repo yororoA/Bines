@@ -3,6 +3,16 @@ import json
 import re
 
 from chatBot.messages import segments
+from common.clock import now
+
+
+def sent_time(value):
+    """Parse a known OneBot send time without substituting the observation time."""
+    try:
+        stamp = float(value)
+        return now(stamp) if stamp > 0 and not isinstance(value, bool) else None
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def message_id(value):

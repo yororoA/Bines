@@ -160,12 +160,20 @@ class AssociationStore:
             messages = [self._message(i) for i in node["message_ids"]]
             if not messages or any(not self._message_valid(i, node["scope"]) for i in node["message_ids"]):
                 return None
-            text = "\n".join(f"[{m['id']}][{m['role']}][{m['actor_id']}] {m['content']}" for m in messages)
+            lines, message_ranges = [], {}
+            offset = 0
+            for message in messages:
+                header = f"[{message['id']}][{message['role']}][{message['actor_id']}] "
+                line = header + message["content"]
+                message_ranges[message["id"]] = (offset + len(header), offset + len(line))
+                lines.append(line)
+                offset += len(line) + 1
+            text = "\n".join(lines)
             corrections = getattr(self.repo, "corrections", None)
             facts = corrections.facts(node["id"], node["scope"]) if corrections else []
             if facts:
                 text += "\n【已核实的事实纠正；以上原话仅保留历史，不可沿用被纠正事实】\n" + json.dumps(facts, ensure_ascii=False)
-            return {"text": text, "sources": messages}
+            return {"text": text, "sources": messages, "message_ranges": message_ranges}
         memory = self._memory(node["memory_id"])
         if not memory or memory["scope"] != node["scope"] or not _active(memory, "memory"):
             return None
@@ -548,11 +556,13 @@ class AssociationStore:
                         evidence=evidence, meta={})
         if not view["evidence"]:
             return None
-        return dict(view, node_id=node["id"], citation_id=node["id"], node_digest=node["digest"],
-                    source_family=node["family"], evidence_family=sorted(self.evidence_family(node)),
-                    corrections=getattr(self.repo, "corrections").inherited_facts(node)
-                    if getattr(self.repo, "corrections", None) else [],
-                    retrieval_status=node["retrieval_status"])
+        return dict(view, **self.citation(node), retrieval_status=node["retrieval_status"])
+
+    def citation(self, node):
+        corrections = getattr(self.repo, "corrections", None)
+        return {"node_id": node["id"], "citation_id": node["id"], "node_digest": node["digest"],
+                "source_family": node["family"], "evidence_family": sorted(self.evidence_family(node)),
+                "corrections": corrections.inherited_facts(node) if corrections else []}
 
     def expand(self, query, seeds, scopes, visible):
         terms, activations, chain_ids = query_terms(query), {}, {}

@@ -54,6 +54,13 @@ class MemoryEfficiencyTests(unittest.TestCase):
         self.assertEqual(original["result"], raw)
         self.assertTrue(original["memory_diagnostics"]["important_for_audit"])
 
+    def test_old_owner_chat_reason_does_not_become_summary_evidence(self):
+        for reason in ("主人当前消息授权的持续活动", "主人本机消息授权的持续活动", "等专辑更新"):
+            candidate = {"topic": "专辑", "reason": reason}
+            intent = summary_projection({"autonomous": False, "candidate": candidate})["intent"]
+            self.assertEqual(intent.get("reason"), reason if reason == "等专辑更新" else None)
+            self.assertEqual(intent["topic"], "专辑")
+
     def test_batch_wait_is_bounded_and_never_mixes_scopes(self):
         self.record("one")
         self.record("two", status="failed", result="网页请求失败")

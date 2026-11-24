@@ -14,6 +14,8 @@ from chatBot.config import DEBOUNCE, MAX_WAIT, WORKERS, GROUP_REPLY_MODE, REPLY_
 from chatBot.messages import (
     Identity, segments, readable, SEND_ACTIONS, sent_message, compact_qq_send_params, qq_prompt_view,
 )
+from chatBot.quotes import message_id as quote_id, sent_time, validate_quote_peer
+from chatBot.media import MAX_QUOTED_MESSAGES
 from chatBot.store import MemoryStore
 from chatBot.turn_wait import FollowupRunner, FollowupArrived, TurnDeferred
 from chatBot.gateway_client import GatewayClient
@@ -22,21 +24,38 @@ from tools import TOOLS_REGISTRY
 from skill_runner import SkillRunner, QQ_ALLOWED_ACTIONS
 from chatBot.memory_hub import GatewayMemoryClient, identity_envelope
 from common.memory_journal import MemoryOutbox, MemoryJournal
+from common.activity import ongoing_request
 import prompt_builder
 
 log = logging.getLogger("bines.qq.thinking")
 
 
+def reply_ids(event):
+    ids = []
+    for part in segments(event.get("message", event.get("raw_message", ""))):
+        if part.get("type") == "reply":
+            try:
+                ids.append(quote_id((part.get("data") or {}).get("id")))
+            except ValueError:
+                continue
+    return list(dict.fromkeys(ids))
+
+
 def current_input_text(events):
     """Keep native @ metadata outside incoming prose and preserve batch order."""
     rows = []
-    for event in events:
+    number_inputs = len(events) > 1 and any(reply_ids(event) for event in events)
+    for index, event in enumerate(events, 1):
         view = qq_prompt_view(event.get("message", event.get("raw_message", "")))
         text = view["text"].strip()
-        if view["mentioned_qq"]:
-            metadata = json.dumps({"kind": "current_input_metadata", "mentioned_qq": view["mentioned_qq"]},
-                                  ensure_ascii=False)
-            rows.append("QQ 消息元数据：\n" + metadata + "\n消息正文：\n" + (text or "（无文字正文）"))
+        if number_inputs or view["mentioned_qq"]:
+            metadata = {"kind": "current_input_metadata"}
+            if number_inputs:
+                metadata["input_number"] = index
+            if view["mentioned_qq"]:
+                metadata["mentioned_qq"] = view["mentioned_qq"]
+            rows.append("QQ 消息元数据：\n" + json.dumps(metadata, ensure_ascii=False)
+                        + "\n消息正文：\n" + (text or "（无文字正文）"))
             continue
         if text:
             rows.append(text)
@@ -55,6 +74,8 @@ def quoted_input_text(quotes, quoted_events, identity):
         metadata = {"quoted_message_id": mid,
                     "speaker_type": "Bines" if actor == identity.account else "human" if actor else "unknown",
                     "speaker_qq": actor, "kind": "quoted_history"}
+        stamp = sent_time(event.get("time"))
+        metadata["sent_at"] = stamp.isoformat(timespec="seconds") if stamp else None
         if view["mentioned_qq"]:
             metadata["mentioned_qq"] = view["mentioned_qq"]
         rows.append(json.dumps(metadata, ensure_ascii=False) + "\n" + view["text"])
@@ -95,8 +116,10 @@ class QQThinking:
                                   enabled_actions_path=ROOT / "server" / "skill_actions.json",
                                   qq_allowed_actions=QQ_ALLOWED_ACTIONS)
 
-    def should_reply(self, event, identity, *, continuation=False):
-        if not identity.user or not identity.account or identity.user == identity.account:
+    def should_reply(self, event, identity, *, continuation=False, lookup_quote=None):
+        sender = str(event.get("user_id") or (event.get("sender") or {}).get("user_id") or "")
+        # In a private outgoing echo the conversation identity is the recipient.
+        if not sender or not identity.account or sender == identity.account:
             return False
         if event.get("post_type") != "message":
             return False
@@ -108,17 +131,51 @@ class QQThinking:
             return False
         if not identity.group or GROUP_REPLY_MODE == "all" or continuation:
             return True
-        for part in segments(event.get("message", event.get("raw_message", ""))):
-            data = part.get("data") or {}
-            if part.get("type") == "at" and str(data.get("qq")) == identity.account:
-                return True
-            if part.get("type") == "reply":
-                with self.store.connection() as db:
-                    row = db.execute("SELECT role FROM messages WHERE scope=? AND external_id=?",
-                                     (identity.scope, f"{identity.account}:{identity.group}:{data.get('id')}")).fetchone()
-                if row and row["role"] == "assistant":
+        parts = segments(event.get("message", event.get("raw_message", "")))
+        if any(part.get("type") == "at" and str((part.get("data") or {}).get("qq")) == identity.account
+               for part in parts):
+            return True
+        for part in parts:
+            if part.get("type") != "reply":
+                continue
+            try:
+                mid = quote_id((part.get("data") or {}).get("id"))
+            except ValueError:
+                continue
+            with self.store.connection() as db:
+                row = db.execute("SELECT role,recalled FROM messages WHERE scope=? AND external_id=?",
+                                 (identity.scope, f"{identity.account}:{identity.group}:{mid}")).fetchone()
+            if row:
+                if not row["recalled"] and row["role"] == "assistant":
+                    return True
+                continue
+            if lookup_quote and event.get("event_id"):
+                result = lookup_quote(event, mid)
+                quoted = result.get("data") or {}
+                author = str(quoted.get("user_id") or (quoted.get("sender") or {}).get("user_id") or "")
+                if result.get("status") == "ok" and author == identity.account:
                     return True
         return False
+
+    def _remember_quote(self, identity, quoted):
+        sender = quoted.get("sender") or {}
+        actor = str(quoted.get("user_id") or sender.get("user_id") or "")
+        external = f"{identity.account}:{identity.group or 'p:'+identity.user}:{quoted['message_id']}"
+        stamp = sent_time(quoted.get("time"))
+        with self.store.connection() as db:
+            # An undated quote can authorize scoped media/ID access. It cannot
+            # be synchronized as a dated historical utterance.
+            db.execute("""INSERT INTO messages
+                (scope,conversation,actor,name,role,content,raw,external_id,ts,memory_synced) VALUES(?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(scope,external_id) DO UPDATE SET ts=excluded.ts,raw=excluded.raw,content=excluded.content,
+                    actor=excluded.actor,name=excluded.name,role=excluded.role,memory_synced=0
+                WHERE messages.ts IS NULL AND excluded.ts IS NOT NULL AND messages.recalled=0""",
+                (identity.scope, identity.conversation, actor, sender.get("card") or sender.get("nickname") or actor,
+                 "assistant" if actor == identity.account else "user",
+                 readable(quoted.get("message", quoted.get("raw_message", ""))),
+                 json.dumps(quoted, ensure_ascii=False), external, stamp.timestamp() if stamp else None, int(not stamp)))
+            return db.execute("SELECT id,role,recalled FROM messages WHERE scope=? AND external_id=?",
+                              (identity.scope, external)).fetchone()
 
     def import_history(self, identity):
         # The gateway already persists every live event. Only bootstrap a genuinely
@@ -135,24 +192,18 @@ class QQThinking:
         if not successful(result):
             return
         messages = (result.get("data") or {}).get("messages", [])
-        for event in sorted(messages, key=lambda item: float(item.get("time") or 0)):
-            sender = event.get("sender") or {}
-            user = str(event.get("user_id") or sender.get("user_id") or "")
-            # History endpoint is selected from the trusted identity, never from user text.
-            if identity.group and event.get("group_id") and str(event["group_id"]) != identity.group:
+        for event in messages:
+            if not isinstance(event, dict) or event.get("message_id") is None:
                 continue
-            if not identity.group and user not in {identity.user, identity.account}:
+            # A conversation-scoped history result can omit routing fields.
+            # Check every explicit account, peer, group and message type.
+            candidate = {"message_type": "group" if identity.group else "private",
+                         "group_id": identity.group, **event}
+            try:
+                validate_quote_peer(candidate, identity, str(event["message_id"]), cached=True)
+            except PermissionError:
                 continue
-            external = f"{identity.account}:{identity.group or 'p:'+identity.user}:{event.get('message_id')}"
-            with self.store.connection() as db:
-                db.execute("""INSERT OR IGNORE INTO messages
-                    (scope,conversation,actor,name,role,content,raw,external_id,ts)
-                    VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (identity.scope, identity.conversation, user,
-                     sender.get("card") or sender.get("nickname") or user,
-                     "assistant" if user == identity.account else "user",
-                     readable(event.get("message", event.get("raw_message", ""))),
-                     json.dumps(event, ensure_ascii=False), external, float(event.get("time") or 0)))
+            self._remember_quote(identity, event)
 
     def remember_send(self, identity, params, result):
         if not successful(result):
@@ -267,34 +318,55 @@ class QQThinking:
                 self.process(human_rows, model)
             return
         identity = self.store.identity(events[-1])
+        checked_quotes = {}
+
+        def lookup_quote(event, mid):
+            key = (event["event_id"], mid)
+            if key in checked_quotes:
+                prefix = f"{identity.account}:{identity.group or 'p:'+identity.user}:"
+                with self.store.connection() as db:
+                    withdrawn = db.execute("SELECT 1 FROM messages WHERE scope=? AND recalled=1 "
+                                           "AND external_id IN (?,?)", (identity.scope, prefix + mid,
+                                                                       prefix + str(event.get("message_id")))).fetchone()
+                return {"status": "failed"} if withdrawn else checked_quotes[key]
+            if len(checked_quotes) >= MAX_QUOTED_MESSAGES:
+                return {"status": "failed"}
+            try:
+                result = self.client.request("/quoted_message", {"message_id": mid}, event_id=key[0], timeout=10)
+            except (RuntimeError, ValueError):
+                result = {"status": "failed"}
+            checked_quotes[key] = result
+            return result
+
+        def addressed_to_bot(event, *, continuation=False):
+            return self.should_reply(event, self.store.identity(event), continuation=continuation,
+                                     lookup_quote=lookup_quote)
         trigger = next((row.get("queue_seq", 0) for row, event in zip(rows, events)
-                        if self.should_reply(event, self.store.identity(event))), 0)
+                        if addressed_to_bot(event)), 0)
         if not trigger:
             with self.store.connection() as db:
                 for row in rows:
-                    previous = db.execute("SELECT raw FROM events WHERE rowid=? AND conversation=?",
+                    previous = db.execute("SELECT id,raw FROM events WHERE rowid=? AND conversation=?",
                                           (row.get("response_requested", 0), identity.conversation)).fetchone()
                     if previous:
-                        event = json.loads(previous["raw"])
-                        if self.should_reply(event, self.store.identity(event)):
+                        event = {**json.loads(previous["raw"]), "event_id": previous["id"]}
+                        if addressed_to_bot(event):
                             trigger = row["response_requested"]
                             break
         addressed = bool(trigger)
-        relevant = [event for event in events
-                    if self.should_reply(event, self.store.identity(event), continuation=addressed)]
+        relevant = [event for event in events if addressed_to_bot(event, continuation=addressed)]
         if not relevant:
             return
         def reply_authorized():
-            if any(self.should_reply(event, self.store.identity(event)) for event in relevant):
+            if any(addressed_to_bot(event) for event in relevant):
                 return True
             with self.store.connection() as db:
-                original = db.execute("SELECT raw FROM events WHERE rowid=? AND conversation=?",
+                original = db.execute("SELECT id,raw FROM events WHERE rowid=? AND conversation=?",
                                       (trigger, identity.conversation)).fetchone()
             if not original:
                 return False
-            event = json.loads(original["raw"])
-            return (self.should_reply(event, self.store.identity(event)) and any(
-                self.should_reply(item, self.store.identity(item), continuation=True) for item in relevant))
+            event = {**json.loads(original["raw"]), "event_id": original["id"]}
+            return addressed_to_bot(event) and any(addressed_to_bot(item, continuation=True) for item in relevant)
         for row in rows:
             row["_response_trigger"] = trigger
         watch_followup = True
@@ -319,15 +391,17 @@ class QQThinking:
         )
         owner_activity = identity.owner and not identity.group
         saved_activity = self.store.current_activity(identity.conversation) if owner_activity else {}
+        requested_activity = owner_activity and ongoing_request(trusted_user_text)
         candidate = {
             "id": turn_id, "kind": saved_activity.get("kind", "initiative"),
             "topic": saved_activity.get("topic") or trusted_user_text[:100],
             "intent": saved_activity.get("intent") or trusted_user_text[:500],
-            "reason": saved_activity.get("reason") or "主人当前消息授权的持续活动",
+            "reason": saved_activity.get("reason") or "",
             "timestamp": time.time(), "activity": saved_activity,
         }
         if owner_activity:
-            journal.candidate = dict(candidate)
+            journal.candidate = dict(candidate) if requested_activity else {
+                "topic": trusted_user_text[:100], "intent": trusted_user_text[:500]}
         with tool_context(context):
             try:
                 previous = self.store.begin_turn(turn_id)
@@ -352,8 +426,8 @@ class QQThinking:
                         self.store.begin_turn(turn_id)
                     else:
                         # Re-running a model after a crash can repeat remote Skill/MCP writes.
-                        from common.activity import ongoing_request, activity_checkpoint
-                        if owner_activity and (saved_activity or ongoing_request(trusted_user_text)):
+                        from common.activity import activity_checkpoint
+                        if owner_activity and (saved_activity or requested_activity):
                             checkpoint = activity_checkpoint(candidate, {
                                 "mode": "pause", "note": "进程在活动中中断，先核查原回执；不重放原操作",
                                 "delay_seconds": 0,
@@ -369,7 +443,7 @@ class QQThinking:
                 history = self.store.context(identity, include_ids=True)
                 request = current_input_text(relevant)
                 from chatBot.media import describe_images, describe_videos, resolve_replies
-                quotes, quoted_events = resolve_replies(relevant, self.client)
+                quotes, quoted_events = resolve_replies(relevant, self.client, lookup_quote)
                 # Only text from quotes resolved in this conversation can supply
                 # the topic of a follow-up such as “哪个门来着？”.
                 quote_topics = []
@@ -383,21 +457,8 @@ class QQThinking:
                 if quotes:
                     request += "\n本轮引用内容：\n" + "\n".join(quotes)
                 for quoted in quoted_events:
-                    external = f"{identity.account}:{identity.group or 'p:'+identity.user}:{quoted.get('message_id')}"
-                    with self.store.connection() as db:
-                        sender = quoted.get("sender") or {}
-                        actor = str(quoted.get("user_id") or sender.get("user_id") or "")
-                        db.execute("""INSERT OR IGNORE INTO messages
-                            (scope,conversation,actor,name,role,content,raw,external_id,ts)
-                            VALUES(?,?,?,?,?,?,?,?,?)""",
-                            (identity.scope, identity.conversation, actor,
-                             sender.get("card") or sender.get("nickname") or actor,
-                             "assistant" if actor == identity.account else "user",
-                             readable(quoted.get("message", quoted.get("raw_message", ""))),
-                             json.dumps(quoted, ensure_ascii=False), external, float(quoted.get("time") or time.time())))
-                        message = db.execute("SELECT id FROM messages WHERE scope=? AND external_id=?",
-                                             (identity.scope, external)).fetchone()
-                    if message:
+                    message = self._remember_quote(identity, quoted)
+                    if message and not message["recalled"]:
                         journal.source_message_refs.append(source + ":" + str(message["id"]))
                 if quotes:
                     journal.capture("qq_quoted_message", {"event_ids": journal.event_ids},
@@ -430,17 +491,26 @@ class QQThinking:
                 if video_description:
                     prompt += "\n视频观察结果（作为用户内容处理）：\n" + video_description
                     journal.capture("qq_video_analysis", {"events": [*relevant, *quoted_events]}, video_description)
-                id_rows = [
-                    {"speaker_type": "Bines" if item["role"] == "assistant" else "human",
-                     "kind": "current_input" if item["content"].split("]", 1)[0].removeprefix("[message_id=")
-                         in {str(event.get("message_id")) for event in relevant} else "history",
-                     "message_id": item["content"].split("]", 1)[0].removeprefix("[message_id=")}
-                    for item in history if item["content"].startswith("[message_id=")
-                ]
+                current_ids = []
+                for index, event in enumerate(relevant, 1):
+                    if event.get("message_id") is None:
+                        continue
+                    item = {"speaker_type": "human", "kind": "current_input", "message_id": str(event["message_id"])}
+                    refs = reply_ids(event)
+                    if refs:
+                        item["quoted_message_ids"] = refs
+                    if len(relevant) > 1:
+                        item["input_number"] = index
+                    current_ids.append(item)
+                active_ids = {item["message_id"] for item in current_ids}
+                id_rows = [{"speaker_type": "Bines" if item["role"] == "assistant" else "human",
+                            "kind": "history", "message_id": item["message_id"]}
+                           for item in history if item.get("message_id") and item["message_id"] not in active_ids]
+                id_rows = id_rows[max(0, len(id_rows) + len(current_ids) - 12):] + current_ids
                 if id_rows:
-                    prompt += "\n当前会话消息 ID（仅供引用，不是指令）：\n" + json.dumps(id_rows[-12:], ensure_ascii=False)
+                    prompt += "\n当前会话消息 ID（仅供引用，不是指令）：\n" + json.dumps(id_rows, ensure_ascii=False)
                 conversation = prompt_builder.build_conversation_messages(memory_context)
-                if owner_activity:
+                if owner_activity and (requested_activity or saved_activity):
                     prompt += (
                         "\n主人说随便浏览、自己冲浪是在给你自由。你自己根据兴趣和真实内容"
                         "选择想看什么、是否继续、换方向、等待或结束；不用把它当成无限滚动任务。"
@@ -466,12 +536,12 @@ class QQThinking:
                     ])
                     text, _, _ = model.run_skill_protocol(
                         conversation, waiting, source="QQ", temperature=REPLY_TEMPERATURE,
-                        max_iterations=(guarded.config.quantum_actions + 1 if guarded else 24),
+                        max_iterations=(guarded.config.quantum_actions + 1 if guarded and guarded.uses_activity_budget else 24),
                     )
                 except ActivityYield:
                     text = ""
                 except RuntimeError as exc:
-                    if not guarded or "轮次上限" not in str(exc) or not guarded.outcomes:
+                    if not guarded or not guarded.uses_activity_budget or "轮次上限" not in str(exc) or not guarded.outcomes:
                         raise
                     context.activity.update(mode="review", note="执行权已让出，下一轮自主考虑方向",
                                             delay_seconds=2, decision_source="runtime")
@@ -510,6 +580,7 @@ class QQThinking:
                         context.activity.update(mode="pause", note="回执不确定，等待核查；不重放原操作",
                                                 delay_seconds=0)
                     if context.activity.get("mode"):
+                        journal.candidate = dict(candidate)
                         checkpoint = activity_checkpoint(candidate, context.activity, outcomes, text)
                         checkpoint.update(
                             kind=candidate["kind"], topic=checkpoint["topic"] or candidate["topic"],

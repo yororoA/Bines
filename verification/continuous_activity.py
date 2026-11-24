@@ -29,6 +29,15 @@ class ContinuousPolicyTests(unittest.TestCase):
         self.candidate = {**intention("curiosity"), "id": "test", "based_on_user": "1",
                           "timestamp": self.now, "contact_allowed": True}
 
+    def test_ongoing_request_distinguishes_instructions_from_conversation(self):
+        from common.activity import ongoing_request
+        for text in ("持续浏览", "那你刷去吧，随便你刷", "我希望你持续关注更新，有消息告诉我",
+                     "先别看。可以继续浏览了", "你能不能持续关注这个展览？"):
+            self.assertTrue(ongoing_request(text), text)
+        for text in ("我一直喜欢听歌", "这场展览会持续多久？", "我自己逛了一会", "请持续浏览\n算了，别看了",
+                     "你一直看的是哪部电影？", "你一直看起来挺开心的", "继续看吧。先不用了"):
+            self.assertFalse(ongoing_request(text), text)
+
     def test_continuation_preserves_drive_bypasses_threshold_and_counts_one_session(self):
         before = self.policy.state.drives["curiosity"]
         self.policy.reserve(self.candidate)
@@ -288,6 +297,46 @@ class QQContinuousTests(unittest.TestCase):
     tearDown = fixtures.QQTests.tearDown
     insert = fixtures.QQTests.insert
     prepare = fixtures.QQTests.prepare
+
+    def test_ordinary_questions_and_one_off_lookups_do_not_start_an_activity(self):
+        for idx, request in enumerate(("我一直喜欢这首歌", "别继续看视频了", "查一下页面现在是什么样")):
+            with self.subTest(request=request):
+                incoming = event("1", msg_id=12000 + idx, text=request)
+                self.insert(incoming)
+                rows = self.store.claim("worker", 0, 0)
+
+                class Model:
+                    def run_skill_protocol(inner, conversation, runner, **kwargs):
+                        from tools.context import CURRENT_CONTEXT
+                        self.assertNotIn("主人说随便浏览", str(conversation))
+                        self.assertEqual(CURRENT_CONTEXT.get().journal.candidate, {"topic": request, "intent": request})
+                        if idx == 2:
+                            runner.execute({"skill": "website", "action": "website_snapshot",
+                                            "args": {"platform": "bilibili"}}, source="QQ")
+                        return "收到啦", [], []
+
+                with patch("tools.website_tool._request", return_value='{"status":"ok"}'):
+                    QQThinking(self.store, self.client).process(rows, Model())
+                self.store.finish([row["id"] for row in rows], "worker")
+                with self.store.connection() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM activity_handoffs").fetchone()[0], 0)
+
+    def test_one_off_question_keeps_existing_activity_and_records_its_own_topic(self):
+        old = {"id": "watch", "mode": "continue", "topic": "观察海鸟", "intent": "留意海鸟起飞"}
+        request = "今天周几？"
+        self.insert(event("1", msg_id=12010, text=request))
+        rows = self.store.claim("worker", 0, 0)
+
+        class Model:
+            def run_skill_protocol(inner, conversation, runner, **kwargs):
+                from tools.context import CURRENT_CONTEXT
+                self.assertEqual(CURRENT_CONTEXT.get().journal.candidate["topic"], request)
+                return "周二", [], []
+
+        with patch.object(self.store, "current_activity", return_value=old):
+            QQThinking(self.store, self.client).process(rows, Model())
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM activity_handoffs").fetchone()[0], 0)
 
     def test_owner_chat_hands_off_three_batches_and_survives_scheduler_restart(self):
         self.insert(event("1", msg_id=700, text="那你刷去吧，随便你刷"))

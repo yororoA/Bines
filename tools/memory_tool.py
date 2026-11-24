@@ -66,7 +66,10 @@ def search_memory(query: str, k: int = 8):
                      "content": span, "kind": hit["kind"], "day_key": hit.get("day_key"),
                      "evidence": evidence, "corrections": hit.get("corrections") or [],
                      "is_excerpt": span != hit["content"],
-                     "expand": {"source_id": hit.get("citation_id"), "offset": max(0, hit["content"].find(span))}}
+                     "expand": {"source_id": hit.get("citation_id"),
+                                "offset": hit.get("citation_offset", 0) + max(0, hit["content"].find(span))}}
+        if hit.get("temporal"):
+            candidate["temporal"] = hit["temporal"]
         if hit.get("retrieval_role") == "exploration":
             candidate["retrieval_role"] = "exploration"
             candidate["notice"] = "探索线索，须核验；不能当作当前问题的已确认事实"

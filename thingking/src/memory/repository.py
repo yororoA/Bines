@@ -642,7 +642,8 @@ class MemoryRepository:
         )
 
     def claim_job(self, lease_seconds: int, kinds: Optional[Sequence[str]] = None,
-                  excluded: Sequence[int] = (), max_lease_recoveries: Optional[int] = None) -> Optional[Dict[str, Any]]:
+                  excluded: Sequence[int] = (), max_lease_recoveries: Optional[int] = None,
+                  on_lease_exhausted: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Optional[Dict[str, Any]]:
         now = self.clock()
         sql = (
             "SELECT * FROM jobs WHERE ((status = 'pending' AND available_at <= ?) "
@@ -657,13 +658,15 @@ class MemoryRepository:
             params.extend(excluded)
         with self.transaction():
             if max_lease_recoveries is not None:
-                expired = self.conn.execute("SELECT id,payload FROM jobs WHERE status='running' AND lease_until<? "
+                expired = self.conn.execute("SELECT id,kind,payload FROM jobs WHERE status='running' AND lease_until<? "
                                             "AND lease_recoveries>=?", (now, max_lease_recoveries)).fetchall()
                 for row in expired:
                     payload = {**json.loads(row["payload"]), "terminal_reason": "lease_recovery_budget"}
                     self.conn.execute("UPDATE jobs SET status='failed',lease_until=NULL,updated_at=?,payload=?, "
                                       "last_error='lease recovery budget exhausted' WHERE id=?",
                                       (now, json.dumps(payload), row["id"]))
+                    if on_lease_exhausted is not None:
+                        on_lease_exhausted(row["kind"], payload)
             row = self.conn.execute(sql + " ORDER BY CASE WHEN kind='repair_memory' THEN 0 "
                                     "WHEN kind IN ('update_state','audit_memory') THEN 1 "
                                     "WHEN kind='associate' AND COALESCE(json_extract(payload,'$.background'),0)=0 THEN 2 "

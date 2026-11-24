@@ -95,30 +95,32 @@ def activity_checkpoint(candidate, control, outcomes, text=""):
 
 
 def ongoing_request(text):
-    """Recognize an owner's open-ended request; never infer it from website text."""
-    return bool(re.search(
-        r"持续|一直|接着(?:刷|看|浏览|搜)|继续(?:刷|浏览|探索|活动)|"
-        r"刷去|随便你刷|自己(?:刷|逛|浏览)|慢慢(?:刷|逛|看)|不停地",
-        str(text or ""),
-    ))
+    """Fallback for a direct ongoing request when the model gave no activity decision."""
+    for clause in reversed(re.split(r"[，。！？；,;!?\n]+", str(text or ""))):
+        clause = clause.strip()
+        if re.match(r"(?:那|你|请|就|先)*(?:算了|停下|停止|别|不要|不许|不用)(?:$|再|继续|用|刷|看|浏览|搜|了)", clause):
+            return False
+        if re.match(r"你一直(?:看起来|(?:看|读|关注)的是|.*(?:什么|哪[个些部本]|多久|干嘛|吗$))", clause):
+            continue
+        if re.match(
+            r"(?:那|请|麻烦|你|可以|能不能|可不可以|帮我|我希望你|我想让你|接下来|就|去)*"
+            r"(?:(?:持续|一直|不停地?|接着|继续|慢慢)(?:帮我|自己)?"
+            r"(?:浏览|观察|关注|跟进|探索|活动|追踪|监测|留意|刷|逛|搜|看|读|查)"
+            r"|刷去|随便你刷|自己(?:刷|逛|浏览))", clause,
+        ):
+            return True
+    return False
 
 
 def complete_activity(context, candidate, outcomes, text="", *, ordinary=False):
     """An undecided boundary asks the model; it does not choose continuation."""
     if context.activity.get("mode"):
         return
-    if ordinary and (candidate.get("activity") or {}).get("mode") == "pause":
-        # A casual reply does not revoke a timed/manual pause. An explicit
-        # activity tool above may still update it at the owner's request.
-        return
-    browsing = any(row.get("action") in {
-        "website_open", "website_snapshot", "website_scroll", "website_interact",
-        "website_media_status", "website_watch", "website_tabs", "browser_search", "web_fetch",
-    } for row in outcomes)
-    needs_choice = (candidate.get("activity") or
-                    (ongoing_request(context.user_text) or browsing if ordinary
-                     else candidate.get("kind") != "connection"))
-    if not needs_choice:
+    if ordinary:
+        # A one-off lookup or a casual reply leaves the existing activity alone.
+        if not ongoing_request(context.user_text) or (candidate.get("activity") or {}).get("mode") == "pause":
+            return
+    elif not candidate.get("activity") and candidate.get("kind") == "connection":
         return
     # The former progress->continue / no-progress->fixed-pause rule delegated
     # interest to the program. Keep the observation and let Bines choose instead.

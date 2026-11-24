@@ -62,6 +62,11 @@ def summary_projection(record):
     projected["result"] = excerpt(record.get("result") or "", 9000)
     candidate = record.get("candidate") or {}
     projected["intent"] = {key: candidate[key] for key in ("topic", "intent", "reason") if key in candidate}
+    # Older chat producers attached this placeholder even to greetings and one-off questions.
+    if not record.get("autonomous") and candidate.get("reason") in (
+        "主人当前消息授权的持续活动", "主人本机消息授权的持续活动",
+    ):
+        projected["intent"].pop("reason", None)
     activity = record.get("activity") or {}
     projected["activity"] = {key: activity[key] for key in (
         "id", "sequence", "mode", "intent", "note", "topic", "reason", "decision_source", "decision",

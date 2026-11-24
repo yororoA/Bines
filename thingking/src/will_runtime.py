@@ -72,9 +72,12 @@ def desktop_idle_seconds():
 class WillSkillRunner:
     """Guard an activity's model requests and actual actions at quantum boundaries."""
     def __init__(self, runner, candidate, check, *, desktop=False, ordinary=False):
+        from common.activity import ongoing_request
+        from tools.context import CURRENT_CONTEXT
         self.runner, self.candidate, self.check = runner, candidate, check
         self.desktop = desktop
         self.ordinary = ordinary
+        self.uses_activity_budget = not ordinary or ongoing_request(CURRENT_CONTEXT.get().user_text)
         self.outcomes = []
         self.last_desktop_action = 0
         self.called = 0
@@ -103,7 +106,7 @@ class WillSkillRunner:
             raise RuntimeError(f"自主行动已取消：{reason}")
         # Unlike execute(), no successful action is required: malformed model
         # arguments and refused tools must not bypass the batch's time boundary.
-        if time.monotonic() - self.started >= self.config.quantum_seconds:
+        if self.uses_activity_budget and time.monotonic() - self.started >= self.config.quantum_seconds:
             context.activity.update(mode="review", note="执行权已让出，下一轮由你自主选择方向",
                                     delay_seconds=context.activity.get("delay_seconds", 2),
                                     decision_source="runtime")
@@ -121,7 +124,7 @@ class WillSkillRunner:
         if context.activity.get("mode") in {"continue", "finish", "pause", "review"}:
             raise ActivityYield()
         self.called += 1
-        if (self.called > self.config.quantum_actions
+        if self.uses_activity_budget and (self.called > self.config.quantum_actions
                 or (self.outcomes and time.monotonic() - self.started >= self.config.quantum_seconds)):
             context.activity.update(mode="review", note="执行权已让出，下一轮由你自主选择方向",
                                     delay_seconds=context.activity.get("delay_seconds", 2),
