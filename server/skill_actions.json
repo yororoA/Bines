@@ -71,6 +71,11 @@
       "enabled": true
     },
     {
+      "name": "search_meme",
+      "description": "用当前消息中的短梗词查询梗 Wiki，供闲聊接梗或解释含义。",
+      "enabled": true
+    },
+    {
       "name": "web_fetch",
       "description": "使用 DeepSeek Fetch API 读取指定网页正文与标题，保留来源 URL。",
       "enabled": true

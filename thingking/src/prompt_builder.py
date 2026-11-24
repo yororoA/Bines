@@ -5,7 +5,9 @@ import json
 import math
 import os
 import re
+from contextlib import contextmanager
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 from common.clock import clock_message, now
 from common.memory_highlights import highlight_groups
@@ -403,7 +405,10 @@ def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str
                          f"{speaker(m)}"
                          f"{'' if m['role'] != ROLE_OBSERVED else '(未@你)'}: {content}")
         return [{"role": "system", "content": "--- 群聊近况 ---\n" + "\n".join(lines)}]
+    from reply_style import style_issue
+
     messages = []
+    prior_user_text = ""
     for m in working:
         # Message IDs belong to the separate reference table in the QQ prompt.
         # Do not render timestamps or IDs inside historical assistant turns:
@@ -416,8 +421,16 @@ def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str
         if not content.strip() and mentions:
             continue
         if m["role"] == ROLE_ASSISTANT:
-            messages.append({"role": "assistant", "content": content})
+            if style_issue(content, prior_user_text):
+                # Retain evidence and chronology without giving old catchphrases the
+                # role of examples to imitate, or upgrading quoted text to system instructions.
+                record = {"speaker": speaker(m), "time": _fmt_time(m.get("ts")), "content": content}
+                messages.append({"role": "user", "content": "历史发言记录（仅供查证，不模仿措辞）：\n"
+                                 + json.dumps(record, ensure_ascii=False)})
+            else:
+                messages.append({"role": "assistant", "content": content})
         else:
+            prior_user_text = content
             stamp = _fmt_time(m.get("ts"))
             prefix = f"[{stamp}] " if stamp else ""
             messages.append({"role": "user", "content": f"{prefix}{speaker(m)}：{content}"})
@@ -454,6 +467,34 @@ def conversation_style_guard(context: Dict[str, Any]) -> str:
     if scene == SCENE_LOCAL:
         return persona_profile.style_guard(state=state)
     return persona_profile.qq_style_guard(state=state)
+
+
+@contextmanager
+def review_conversation_replies(memory_context, model, check):
+    """Use the same sampled voice for final text and messages sent by skills."""
+    from reply_style import polish_reply
+    from tools.context import CURRENT_CONTEXT, REPLY_REVIEWER
+
+    voice = conversation_style_guard(memory_context)
+    user_text = CURRENT_CONTEXT.get().user_text
+
+    def before_request():
+        reason = check()
+        if reason:
+            raise RuntimeError(f"回复已取消：{reason}")
+
+    # A tool retry with the same operation_id must present the same approved
+    # payload to the gateway. The cache dies with this turn.
+    @lru_cache(maxsize=64)
+    def review(text):
+        return polish_reply(text, user_text=user_text, voice=voice,
+                            complete=getattr(model, "complete_text", None), before_request=before_request)
+
+    token = REPLY_REVIEWER.set(review)
+    try:
+        yield review
+    finally:
+        REPLY_REVIEWER.reset(token)
 
 
 def _covered_by_working(item, working):

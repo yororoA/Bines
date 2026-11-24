@@ -265,6 +265,28 @@ class TurnWaitProcessTests(TurnWaitFixture):
         self.assertIn("will it work offline?", request)
         self.assertEqual(len(self.sent), 1)
 
+    def test_reviewed_fallback_is_the_only_message_in_history_and_is_not_resent(self):
+        event = self.incoming(text="我说的是后天")
+        rows = self.claim()
+        with patch("reply_style.polish_reply", return_value="哦，后天") as review:
+            self.process(rows, lambda *_: "这话我记下了")
+            self.bot.process(rows, None)
+        self.assertEqual(review.call_count, 1)
+        self.assertEqual(review.call_args.kwargs["user_text"], "我说的是后天")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][1]["message"][0]["data"]["text"], "哦，后天")
+        history = self.store.context(self.store.identity(event))
+        self.assertEqual([msg["content"] for msg in history if msg["role"] == "assistant"], ["哦，后天"])
+
+    def test_failed_style_review_does_not_send_or_retry_the_turns_tools(self):
+        from reply_style import ReplyStyleRejected
+        self.incoming()
+        error = ReplyStyleRejected("语气润色超时")
+        with patch("reply_style.polish_reply", side_effect=error), self.assertRaises(ReplyStyleRejected):
+            self.process(self.claim(), lambda *_: "这话我记下了")
+        self.assertEqual(self.sent, [])
+        self.assertFalse(self.qq.retryable_failure(error))
+
     def test_group_trigger_includes_unaddressed_continuation_but_unaddressed_group_stays_quiet(self):
         self.incoming(group="10", addressed=True, text="first half")
         self.incoming(2, group="10", text="second half")

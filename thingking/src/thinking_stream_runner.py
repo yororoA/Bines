@@ -4,7 +4,7 @@ import threading
 from contextvars import copy_context
 from typing import Any, Callable, Dict
 
-from skill_runner import CALL_END, CALL_START, SkillProtocolError, SkillRunner
+from skill_runner import CALL_START, SkillProtocolError, SkillRunner
 from will_runtime import ActivityYield
 
 
@@ -18,28 +18,16 @@ def run_main_agent_rounds(
     enable_audio: bool,
     source: str,
     interrupt_requested: Callable[[], bool],
+    review_reply: Callable[[str], str] | None = None,
     max_skill_rounds: int = 12,
 ) -> Dict[str, Any]:
-    """Stream normal replies; buffer protocol directives so they never reach TTS/UI."""
+    """Read the cancellable stream, then publish only a complete, approved reply."""
     final_text = ""
     exited_due_to_interrupt = False
     last_skill_result = ""
     state_updated = False
     error = ""
     cleanup_pending = False
-
-    def send_text(text: str, segment_state: dict) -> None:
-        for char in text:
-            if char == " " and segment_state["buffer"].endswith(" "):
-                segment = segment_state["buffer"][:-1].strip()
-                if segment and not is_only_action_or_empty(segment):
-                    cough = "start" if segment_state["first"] else None
-                    zmq_send(segment, lang="zh", cough=cough, enable_audio=enable_audio)
-                    segment_state["sent"].append(segment)
-                    segment_state["first"] = False
-                segment_state["buffer"] = ""
-            else:
-                segment_state["buffer"] += char
 
     for round_index in range(1, max_skill_rounds + 1):
         if interrupt_requested():
@@ -98,11 +86,6 @@ def run_main_agent_rounds(
         producer = threading.Thread(target=copy_context().run, args=(produce,), name="MainAgentStream", daemon=True)
         producer.start()
         full_response = []
-        pending_prefix = ""
-        directive_mode = False
-        normal_mode = False
-        directive_text = ""
-        segment_state = {"buffer": "", "first": True, "sent": []}
         memory_confirmed = False
         stream_completed = False
 
@@ -130,22 +113,6 @@ def run_main_agent_rounds(
                         _confirm_memory_request(holder["submitted_messages"])
                     memory_confirmed = True
                 full_response.append(chunk)
-                if directive_mode:
-                    directive_text += chunk
-                elif normal_mode:
-                    send_text(chunk, segment_state)
-                else:
-                    pending_prefix += chunk
-                    trimmed = pending_prefix.lstrip()
-                    if trimmed.startswith(CALL_START):
-                        directive_mode = True
-                        directive_text = trimmed
-                    elif CALL_START.startswith(trimmed):
-                        continue
-                    else:
-                        normal_mode = True
-                        send_text(pending_prefix, segment_state)
-                        pending_prefix = ""
         finally:
             stream_stop.set()
             if producer.is_alive() and not stream_completed:
@@ -164,9 +131,6 @@ def run_main_agent_rounds(
 
         exited_due_to_interrupt = bool(exited_due_to_interrupt or holder.get("interrupted") or interrupt_requested())
         if exited_due_to_interrupt or holder.get("error"):
-            # Preserve only already emitted sentences. Never flush a buffered
-            # partial sentence or execute a directive from an incomplete stream.
-            final_text = "  ".join(segment_state["sent"])
             error = "" if exited_due_to_interrupt else str(holder["error"])
             if error:
                 zmq_send("请求出错，回答未完成，请稍后再试。", lang="zh", cough="end", enable_audio=enable_audio)
@@ -175,12 +139,8 @@ def run_main_agent_rounds(
         raw_response = "".join(full_response)
         if holder.get("submitted_messages") is not None:
             messages[:] = holder["submitted_messages"]
-        if not normal_mode and not directive_mode:
-            # Short response was a prefix of the marker, but never completed it.
-            normal_mode = True
-            send_text(pending_prefix, segment_state)
-
-        if directive_mode:
+        if raw_response.lstrip().startswith(CALL_START):
+            directive_text = raw_response.lstrip()
             try:
                 if interrupt_requested():
                     exited_due_to_interrupt = True
@@ -219,12 +179,29 @@ def run_main_agent_rounds(
                     error = str(exc)
                 break
 
-        if segment_state["buffer"].strip():
-            segment = segment_state["buffer"].strip()
-            if not is_only_action_or_empty(segment):
-                cough = "start" if segment_state["first"] else None
-                zmq_send(segment, lang="zh", cough=cough, enable_audio=enable_audio)
-        final_text = raw_response.strip()
+        approved = raw_response.strip()
+        if approved and review_reply:
+            try:
+                approved = review_reply(approved)
+            except RuntimeError as exc:
+                exited_due_to_interrupt = interrupt_requested()
+                if not exited_due_to_interrupt:
+                    error = str(exc)
+                    zmq_send("这条回复没能整理好，请再试一次。", lang="zh", cough="end", enable_audio=enable_audio)
+                break
+        emitted = []
+        for part in approved.split("  "):
+            if interrupt_requested():
+                exited_due_to_interrupt = True
+                break
+            segment = part.strip()
+            if segment and not is_only_action_or_empty(segment):
+                zmq_send(segment, lang="zh", cough=None if emitted else "start", enable_audio=enable_audio)
+                emitted.append(segment)
+        if exited_due_to_interrupt:
+            final_text = "  ".join(emitted)
+            break
+        final_text = approved
         if final_text:
             break
 

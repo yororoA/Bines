@@ -90,7 +90,7 @@ class ExpressionVectorTest(unittest.TestCase):
     def test_empty_vector_result_does_not_fall_back_to_lexical(self):
         class EmptyVector:
             def search(self, scope, query, limit=3):
-                return []
+                return [] if query == "帮我修函数" else [{"id": "stale-context"}]
 
         class ForbiddenLearning:
             def snapshot(self, *args, **kwargs):
@@ -98,7 +98,8 @@ class ExpressionVectorTest(unittest.TestCase):
 
         dummy = SimpleNamespace(expression_vector=EmptyVector(),
                                 expression_learning=ForbiddenLearning())
-        self.assertEqual(MemoryService._expression_notes(dummy, "owner", "帮我修函数"), [])
+        self.assertEqual(MemoryService._expression_notes(
+            dummy, "owner", "帮我修函数", context_query="上一句在开玩笑"), [])
 
     def test_vector_error_falls_back_to_lexical(self):
         class BrokenVector:

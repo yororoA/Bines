@@ -43,12 +43,12 @@ def agent_with_stream(stream):
     return agent
 
 
-def run_stream(agent, *, runner=None, interrupt=lambda: False, send=None):
+def run_stream(agent, *, runner=None, interrupt=lambda: False, send=None, review=None):
     return run_main_agent_rounds(
         messages=[{"role": "user", "content": "测试"}], main_agent=agent,
         skill_runner=runner or Mock(), zmq_send=send or Mock(),
         is_only_action_or_empty=lambda text: not text.strip(), enable_audio=False,
-        source="MANUAL", interrupt_requested=interrupt, max_skill_rounds=1,
+        source="MANUAL", interrupt_requested=interrupt, review_reply=review, max_skill_rounds=1,
     )
 
 
@@ -75,15 +75,12 @@ class StreamReliabilityTests(unittest.TestCase):
         agent.run_one_turn_streaming.assert_not_called()
         send.assert_not_called()
 
-    def test_midstream_exception_keeps_only_already_emitted_sentence(self):
-        emitted = threading.Event()
+    def test_midstream_exception_does_not_publish_unreviewed_sentences(self):
         closed = threading.Event()
 
         def generate():
             try:
                 yield "已经说完。  "
-                if not emitted.wait(2):
-                    raise AssertionError("consumer did not emit the first sentence")
                 yield "尚未说完"
                 raise OSError("fake stream disconnected")
             finally:
@@ -95,15 +92,36 @@ class StreamReliabilityTests(unittest.TestCase):
 
         def send(text, **kwargs):
             sent.append(text)
-            if text == "已经说完。":
-                emitted.set()
 
         result = run_stream(agent, send=send)
-        self.assertEqual(result["full_raw_response"], "已经说完。")
+        self.assertEqual(result["full_raw_response"], "")
         self.assertIn("disconnected", result["error"])
+        self.assertNotIn("已经说完。", sent)
         self.assertNotIn("尚未说完", sent)
         self.assertTrue(closed.is_set())
         self.assertFalse(result["stream_cleanup_pending"])
+
+    def test_review_happens_before_the_first_bubble_and_memory_uses_approved_text(self):
+        agent, send = Mock(), Mock()
+        agent.run_one_turn_streaming.return_value = (iter(["这话我记下了。  ", "后天开会。"]), {})
+        def review(text):
+            send.assert_not_called()
+            self.assertEqual(text, "这话我记下了。  后天开会。")
+            return "哦对  是后天开会"
+        result = run_stream(agent, send=send, review=review)
+        self.assertEqual([call.args[0] for call in send.call_args_list], ["哦对", "是后天开会"])
+        self.assertEqual(result["full_raw_response"], "哦对  是后天开会")
+
+    def test_interrupt_during_review_discards_candidate(self):
+        agent, send, cancelled = Mock(), Mock(), threading.Event()
+        agent.run_one_turn_streaming.return_value = (iter(["草稿"]), {})
+        def review(_):
+            cancelled.set()
+            return "过期的改写"
+        result = run_stream(agent, send=send, review=review, interrupt=cancelled.is_set)
+        self.assertTrue(result["exited_due_to_interrupt"])
+        self.assertEqual(result["full_raw_response"], "")
+        send.assert_not_called()
 
     def test_incomplete_skill_stream_is_never_dispatched(self):
         def generate():

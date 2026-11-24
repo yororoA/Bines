@@ -22,9 +22,12 @@ class ToolContext:
     planning_only: bool = False
     owner_ids: frozenset = OWNER_QQ_IDS
     website_observation_ids: set = field(default_factory=set, compare=False)
+    quoted_meme_terms: set[str] = field(default_factory=set, compare=False)
 
 
 CURRENT_CONTEXT = ContextVar("bines_tool_context", default=ToolContext())
+# Active only while a conversation model is composing speech or using tools.
+REPLY_REVIEWER = ContextVar("bines_reply_reviewer", default=None)
 
 
 @contextmanager

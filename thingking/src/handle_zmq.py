@@ -740,17 +740,19 @@ def _process_message(user_input, img_descr, source=None, extra_data=None):
 
         guarded = WillSkillRunner(skill_runner, candidate,
                                   lambda: "incoming_message" if _interrupt_check() else "", ordinary=True)
-        stream_result = run_main_agent_rounds(
-            messages=messages,
-            main_agent=main_agent,
-            skill_runner=guarded,
-            zmq_send=zmq_send,
-            is_only_action_or_empty=_is_only_action_or_empty,
-            enable_audio=enable_audio,
-            source=source,
-            interrupt_requested=_interrupt_check,
-            max_skill_rounds=guarded.config.quantum_actions + 1 if guarded.uses_activity_budget else 12,
-        )
+        with prompt_builder.review_conversation_replies(memory_context, thinking_model_helper, _interrupt_check) as review:
+            stream_result = run_main_agent_rounds(
+                messages=messages,
+                main_agent=main_agent,
+                skill_runner=guarded,
+                zmq_send=zmq_send,
+                is_only_action_or_empty=_is_only_action_or_empty,
+                enable_audio=enable_audio,
+                source=source,
+                interrupt_requested=_interrupt_check,
+                review_reply=review,
+                max_skill_rounds=guarded.config.quantum_actions + 1 if guarded.uses_activity_budget else 12,
+            )
         full_raw_response = stream_result.get("full_raw_response", "")
         exited_due_to_interrupt = stream_result.get("exited_due_to_interrupt", False)
         complete_activity(context, candidate, guarded.outcomes, full_raw_response, ordinary=True)
@@ -1082,14 +1084,16 @@ def start_zmq_listener():
                                             journal=MemoryJournal(memory_outbox, envelope, "will:" + candidate["id"],
                                                                   autonomous=True, candidate=candidate),
                                         )
-                                        with tool_context(will_context):
+                                        with tool_context(will_context), prompt_builder.review_conversation_replies(
+                                            memory_context, thinking_model_helper, check
+                                        ) as review:
                                             text, outcomes = run_intention(
-                                                ThinkingModelHelper(), skill_runner, memory_context, candidate, check,
+                                                thinking_model_helper, skill_runner, memory_context, candidate, check,
                                                 source=None,
                                             )
-                                        from chatBot.messages import SEND_ACTIONS
+                                        from chatBot.recipients import send_action
                                         contacted = any(
-                                            receipt["action"] in SEND_ACTIONS | {"send_qzone_msg"}
+                                            (send_action(receipt["action"]) or receipt["action"] == "send_qzone_msg")
                                             and (receipt.get("result") or {}).get("status") == "ok"
                                             for receipt in will_context.receipts)
                                         if contacted:
@@ -1097,6 +1101,9 @@ def start_zmq_listener():
                                         desktop_spoken = False
                                         if (not contacted and candidate["kind"] == "connection" and text
                                                 and not will_context.activity and not check()):
+                                            text = review(text)
+                                            if check():
+                                                raise RuntimeError("主动回复已取消")
                                             zmq_send(text, enable_audio=True)
                                             zmq_send("", cough="end", origin=text)
                                             status = "sent"

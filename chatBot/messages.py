@@ -63,6 +63,41 @@ def sent_message(params):
     return params.get("messages", params.get("message"))
 
 
+def review_qq_send_params(action, params, review):
+    """Review Bines' prose. Preserve quoted messages, mentions and native media."""
+    if action not in SEND_ACTIONS or action in FORWARD_ACTIONS:
+        return params
+    key = "messages" if "messages" in params else "message"
+    if key not in params:
+        return params
+    message = params[key]
+    chain = outgoing_segments(message, auto_escape=params.get("auto_escape") in {True, "true"})
+    changed, result, fragments = False, [], []
+
+    def flush():
+        nonlocal changed
+        if not fragments:
+            return
+        original = "".join(part["data"]["text"] for part in fragments)
+        approved = review(original)
+        if approved == original:
+            result.extend(fragments)
+        else:
+            changed = True
+            first = fragments[0]
+            result.append({**first, "data": {**first["data"], "text": approved}})
+        fragments.clear()
+
+    for part in chain:
+        if part["type"] == "text" and isinstance(part["data"].get("text"), str):
+            fragments.append(part)
+        else:
+            flush()
+            result.append(part)
+    flush()
+    return {**params, key: result} if changed else params
+
+
 def _compact_text_fragments(fragments):
     """Remove empty rows across adjacent text segments without merging segments."""
     text = "".join(fragments)

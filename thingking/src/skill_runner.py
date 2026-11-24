@@ -20,7 +20,7 @@ QQ_ALLOWED_ACTIONS = {
     "napcat_call", "napcat_discover", "napcat_catalog", "napcat_send", "napcat_forward",
     "napcat_events", "update_status", "search_memory", "read_memory_source", "cite_memory", "browser_search", "web_fetch",
     "napcat_collect_sticker", "napcat_search_stickers", "napcat_send_sticker",
-    "learn_expression",
+    "learn_expression", "search_meme",
 }
 QQ_GROUP_OWNER_ACTIONS = {"napcat_custom_faces", "napcat_send_custom_face"}
 NAPCAT_ACTIONS = {

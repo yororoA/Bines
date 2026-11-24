@@ -12,8 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 from chatBot.config import DEBOUNCE, MAX_WAIT, WORKERS, GROUP_REPLY_MODE, REPLY_TEMPERATURE
 from chatBot.messages import (
-    Identity, segments, readable, SEND_ACTIONS, sent_message, compact_qq_send_params, qq_prompt_view,
+    Identity, segments, readable, sent_message, compact_qq_send_params, qq_prompt_view,
 )
+from chatBot.recipients import send_action
 from chatBot.quotes import message_id as quote_id, sent_time, validate_quote_peer
 from chatBot.media import MAX_QUOTED_MESSAGES
 from chatBot.store import MemoryStore
@@ -92,7 +93,10 @@ def successful(result):
 
 def retryable_failure(exc):
     """Transient generation/transport failures only; receipt checks stay in SQLite."""
-    if isinstance(exc, (PermissionError, ValueError, TypeError, KeyError)):
+    from reply_style import ReplyStyleRejected
+    # Style repair has its own bounded retries. Re-running the whole dialogue
+    # could repeat a tool the model executed before composing its last message.
+    if isinstance(exc, (ReplyStyleRejected, PermissionError, ValueError, TypeError, KeyError)):
         return False
     status = getattr(exc, "status_code", None)
     if isinstance(status, int):
@@ -444,6 +448,9 @@ class QQThinking:
                 request = current_input_text(relevant)
                 from chatBot.media import describe_images, describe_videos, resolve_replies
                 quotes, quoted_events = resolve_replies(relevant, self.client, lookup_quote)
+                if quoted_events:
+                    from tools.meme_tool import quoted_meme_terms
+                    context.quoted_meme_terms.update(quoted_meme_terms(relevant, quoted_events))
                 # Only text from quotes resolved in this conversation can supply
                 # the topic of a follow-up such as “哪个门来着？”.
                 quote_topics = []
@@ -474,8 +481,8 @@ class QQThinking:
                     "你自主选择 NapCat 接口和消息段，决定分几条、如何聚合媒体与文字、"
                     "引用哪条消息、是否@以及发送给谁。主人可在群聊或私聊调用完整接口。"
                     "每次发送均按你给出的参数立即执行，系统不再自动拆分、拼接或添加@。"
-                    "遇到不熟悉的网络用语、缩写或梗，可以先用 browser_search 查真实含义再回应；"
-                    "查不到就直接问，不硬猜。"
+                    "遇到想接但拿不准的梗，我可以用 search_meme 查本轮的梗词，按场景接话。"
+                    "对方问含义时我再解释，查不到可以直接问。"
                 )
                 if quotes or quoted_events:
                     prompt += (
@@ -534,10 +541,11 @@ class QQThinking:
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": f"对方刚刚发来：\n{request}"},
                     ])
-                    text, _, _ = model.run_skill_protocol(
-                        conversation, waiting, source="QQ", temperature=REPLY_TEMPERATURE,
-                        max_iterations=(guarded.config.quantum_actions + 1 if guarded and guarded.uses_activity_budget else 24),
-                    )
+                    with prompt_builder.review_conversation_replies(memory_context, model, lease_check) as review:
+                        text, _, _ = model.run_skill_protocol(
+                            conversation, waiting, source="QQ", temperature=REPLY_TEMPERATURE,
+                            max_iterations=(guarded.config.quantum_actions + 1 if guarded and guarded.uses_activity_budget else 24),
+                        )
                 except ActivityYield:
                     text = ""
                 except RuntimeError as exc:
@@ -550,28 +558,27 @@ class QQThinking:
                     outcomes = guarded.outcomes if guarded else []
                     # Keep successful cross-target sends even if a later model/API step fails.
                     for receipt in context.receipts:
-                        if receipt["action"] in SEND_ACTIONS:
+                        if send_action(receipt["action"]):
                             self.remember_send(identity, receipt["params"], receipt.get("result") or {})
                 reason = lease_check()
                 if reason:
                     raise RuntimeError(f"QQ 轮次已取消：{reason}")
-                sent_texts = []
                 delivered = False
                 uncertain = False
                 for receipt in context.receipts:
                     action, params, result = receipt["action"], receipt.get("params") or {}, receipt.get("result") or {}
-                    if action not in SEND_ACTIONS:
+                    if not send_action(action):
                         uncertain |= result.get("status") == "uncertain"
                         continue
                     same_target = (str(params.get("group_id", "")) == identity.group and identity.group) or (
                         not identity.group and str(params.get("user_id")) == identity.user)
-                    if same_target:
-                        if successful(result):
-                            delivered = True
-                            sent_texts.extend(str((part.get("data") or {}).get("text", "")).strip()
-                                              for part in segments(sent_message(params))
-                                              if part.get("type") == "text")
+                    if same_target and successful(result):
+                        delivered = True
                     uncertain |= result.get("status") == "uncertain"
+                # A checkpoint can reuse the final text as its activity note too.
+                # Review only an actual outgoing draft, never a tool result or a second acknowledgement.
+                if text and not delivered and not uncertain and not text.strip().startswith("[[SKILL_CALL]]"):
+                    text = review(text)
                 checkpoint, handoff = None, None
                 if owner_activity:
                     from common.activity import complete_activity, activity_checkpoint
@@ -598,12 +605,10 @@ class QQThinking:
                 if text and text.strip().startswith("[[SKILL_CALL]]"):
                     raise RuntimeError("模型技能调用超过上限，未生成最终回复")
                 # Explicit sends are the final reply; never append an extra automatic receipt.
-                final_text = "".join((text or "").split())
-                duplicate = any(final_text == "".join(sent.split())
-                                for sent in [*sent_texts, "".join(sent_texts)] if sent)
-                if not text or duplicate or delivered:
+                if not text or delivered:
                     self.store.save_turn(turn_id, "done", {"activity": checkpoint}, handoff=handoff)
                     return
+                # Persist the approved text before dispatch so recovery reuses the same payload.
                 self.send_actions(identity, turn_id, self.reply_actions(identity, [text]),
                                   activity=checkpoint, handoff=handoff)
 
@@ -686,20 +691,21 @@ class QQThinking:
                         identity_envelope(identity), query=event["proactive"]["topic"],
                     )
                     try:
-                        text, outcomes = run_intention(
-                            model, self.runner, memory_context, event["proactive"], check,
-                        )
+                        with prompt_builder.review_conversation_replies(memory_context, model, check) as review:
+                            text, outcomes = run_intention(
+                                model, self.runner, memory_context, event["proactive"], check,
+                            )
                     finally:
                         for receipt in context.receipts:
-                            if receipt["action"] in SEND_ACTIONS:
+                            if send_action(receipt["action"]):
                                 self.remember_send(identity, receipt["params"], receipt.get("result") or {})
                     if any((r.get("result") or {}).get("status") == "uncertain" for r in context.receipts):
                         raise RuntimeError("自主操作回执不确定，暂停本轮")
-                    sent = any(r["action"] in SEND_ACTIONS and successful(r.get("result"))
+                    sent = any(send_action(r["action"]) and successful(r.get("result"))
                                for r in context.receipts)
                     if (event["proactive"]["kind"] == "connection" and text.strip()
                             and not sent and not context.activity and not check()):
-                        self.send_actions(identity, turn_id, self.reply_actions(identity, [text]))
+                        self.send_actions(identity, turn_id, self.reply_actions(identity, [review(text)]))
                         completed = True
                     else:
                         from common.activity import activity_checkpoint

@@ -5,6 +5,7 @@ from pathlib import Path
 from chatBot.store import MemoryStore
 from chatBot.messages import LOCAL_IDENTITY
 from config import ROOT_DIR
+from persona_profile import character_prompt
 
 
 class ShortTermMemory:
@@ -59,7 +60,7 @@ class PermanentMemory:
 
     def load(self):
         path = Path(self.file_path)
-        self.content = path.read_text(encoding="utf-8") if path.exists() else "你是 Bines，情感对话助手。"
+        self.content = path.read_text(encoding="utf-8") if path.exists() else character_prompt()
         return self.content
 
     def to_prompt_str(self):

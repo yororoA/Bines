@@ -3,6 +3,7 @@ import copy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 from chatBot.capabilities import CapabilityService
 from chatBot.messages import LOCAL_IDENTITY
@@ -16,6 +17,29 @@ PARAMS = {"user_id": "12345", "message": "synthetic"}
 
 
 class SendReceiptTests(unittest.TestCase):
+    def test_model_tool_send_reviews_adjacent_text_before_receipt_and_preserves_media(self):
+        from chatBot.gateway_client import GatewayClient
+        from tools.context import REPLY_REVIEWER, ToolContext, tool_context
+        client = GatewayClient.__new__(GatewayClient)
+        client.request = Mock(return_value={"status": "ok"})
+        quote = {"type": "reply", "data": {"id": "4"}}
+        image = {"type": "image", "data": {"file": "local-image"}}
+        media = [quote, {"type": "text", "data": {"text": "这话"}},
+                {"type": "text", "data": {"text": "我记下了"}}, image]
+        review = Mock(return_value="后天呀")
+        ctx = ToolContext(turn_id="sample")
+        with tool_context(ctx):
+            token = REPLY_REVIEWER.set(review)
+            try:
+                client.raw_api("send_private_msg_async", {"user_id": "1", "message": media})
+                client.raw_api("send_forward_msg", {"messages": [{"type": "node", "data": {"id": "4"}}]})
+            finally:
+                REPLY_REVIEWER.reset(token)
+        review.assert_called_once_with("这话我记下了")
+        params = {"user_id": "1", "message": [quote, {"type": "text", "data": {"text": "后天呀"}}, image]}
+        self.assertEqual(ctx.receipts[0]["params"], params)
+        self.assertEqual(client.request.call_args_list[0].args[1]["params"], params)
+
     def test_generic_send_aliases_keep_owner_contact_cooldown(self):
         from common.proactive import owner_contact
         for action in ("send_msg", "send_msg_async", "send_msg_rate_limited"):

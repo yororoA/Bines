@@ -72,8 +72,8 @@ class RequestBudgetCompatibilityTests(unittest.TestCase):
             # Optional dialogue is intentionally much larger than either target.
             messages.insert(-1, {"role": "user", "content": "OLD_OPTIONAL " + "旧对话" * 40000})
             expected_tools = runner.function_tools("QQ")
-            self.assertEqual(len(expected_tools), 57 if owner else 19)
-            self.assertTrue({"learn_expression", "napcat_collect_sticker", "napcat_search_stickers",
+            self.assertEqual(len(expected_tools), 58 if owner else 20)
+            self.assertTrue({"search_meme", "learn_expression", "napcat_collect_sticker", "napcat_search_stickers",
                              "napcat_send_sticker"} <= {tool["function"]["name"] for tool in expected_tools})
             rules = runner.instructions_for_source("QQ", native=True)
             observations = [{"platform": "bilibili", "status": "ok", "source_url": "https://www.bilibili.com/",

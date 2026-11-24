@@ -80,11 +80,21 @@ def _bigrams(text):
 
 def _query_score(query, row):
     query_grams = _bigrams(query)
-    document = (_description(row["technique"], row["situation"]) + " "
-                + str(row["quote"] or "") + " " + str(row["situation"] or ""))
-    overlap = len(query_grams & _bigrams(document)) / max(1, len(query_grams))
+    # Shared prompt wording (e.g. “对方”, “事实”) is not evidence that the
+    # source utterance fits the current conversation.
+    matches = len(query_grams & _bigrams(row["quote"]))
+    overlap = matches / max(1, len(query_grams))
+    if matches < min(2, len(query_grams)) or overlap < 0.25:
+        overlap = 0.0
     boost = 0.8 if any(cue in query for cue in _SITUATION_CUES.get(row["situation"], ())) else 0.0
     return overlap + boost
+
+
+def lexical_matches(query, rows):
+    """Rank relevant rows, preserving input order (recency) for tied scores."""
+    scored = [(_query_score(query, row), row) for row in rows]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [row for score, row in scored if score > 0]
 
 
 def render_expression_notes(rows, limit=MAX_ACTIVE, include_samples=False):
@@ -333,7 +343,7 @@ class ExpressionLearning:
                 "SELECT * FROM expression_learning WHERE scope=? ORDER BY created_at DESC,id LIMIT ?",
                 (scope, _MAX_SCAN)).fetchall() if self._valid(row)]
         if query:
-            rows.sort(key=lambda row: (_query_score(query, row), row["created_at"]), reverse=True)
+            rows = lexical_matches(query, rows)
         result, seen = [], set()
         for row in rows:
             if row["technique"] in seen:

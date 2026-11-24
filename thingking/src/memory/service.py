@@ -523,6 +523,8 @@ class MemoryService:
 
     def _expression_notes(self, scope: str, query: str, *, context_query: str = "") -> List[Dict[str, Any]]:
         """Prefer the dedicated semantic corpus; fall back to lexical selection."""
+        if not query.strip():
+            return []
         if self.expression_vector is not None and scope == OWNER_SCOPE:
             try:
                 # A successful empty result means "no sufficiently close
@@ -531,7 +533,7 @@ class MemoryService:
             except Exception as exc:
                 logger.warning("expression vector search failed, using lexical fallback: %s", exc)
             else:
-                if not context_query or context_query == query:
+                if not rows or not context_query or context_query == query:
                     return rows
                 try:
                     context_rows = self.expression_vector.search(scope, context_query, limit=1)

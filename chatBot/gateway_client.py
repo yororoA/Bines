@@ -45,12 +45,14 @@ class GatewayClient:
             return {"status": "uncertain", "msg": "网关断开或超时；写操作不能自动重发"}
 
     def raw_api(self, action, params=None, timeout=30, operation_id=None):
-        from tools.context import CURRENT_CONTEXT
+        from tools.context import CURRENT_CONTEXT, REPLY_REVIEWER
         from chatBot.capabilities import is_read
-        from chatBot.messages import compact_qq_send_params
+        from chatBot.messages import compact_qq_send_params, review_qq_send_params
+        from chatBot.recipients import send_action
         from common.proactive import owner_contact
         # Receipts must contain the same compact text the gateway dispatches.
-        params = compact_qq_send_params(action, params or {})
+        canonical_send = send_action(action)
+        params = compact_qq_send_params(canonical_send, params or {})
         context = CURRENT_CONTEXT.get()
 
         def check_turn():
@@ -70,6 +72,9 @@ class GatewayClient:
         if not is_read(action):
             if any((item.get("result") or {}).get("status") == "uncertain" for item in context.receipts):
                 raise RuntimeError("本轮已有不确定写操作；先核查原回执，禁止继续发送或重试")
+            review = REPLY_REVIEWER.get()
+            if review is not None and canonical_send:
+                params = review_qq_send_params(canonical_send, params, review)
             if operation_id is None:
                 index = len(context.receipts)
                 operation_id = f"{context.turn_id}:tool:{index}" if context.turn_id else str(uuid.uuid4())

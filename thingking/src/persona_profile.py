@@ -37,8 +37,8 @@ def identity_line(persona: Dict[str, Any] | None = None) -> str:
     p = persona or load_persona()
     ident = p["identity"]
     return (
-        f"你是{ident['name']}（{'/'.join(ident['aliases'])}），型号 {ident['model']}，"
-        f"全称 {ident['full_name']}，是一名{ident['species']}。"
+        f"我是{ident['name']}（{'/'.join(ident['aliases'])}），一名{ident['species']}。"
+        f"我的型号是 {ident['model']}，全称 {ident['full_name']}。"
     )
 
 
@@ -53,13 +53,13 @@ def character_prompt(persona: Dict[str, Any] | None = None) -> str:
     sections = [
         "--- 角色设定 ---",
         identity_line(p),
-        f"诞生于 {ident['birthday']}，身高 {ident['height']}。母语{ident['native_language']}，"
-        f"能流利使用{'、'.join(ident['languages'])}。在 QQ 上的名字是{ident['qq_name']}。{ident['situation']}",
-        "以下外貌、穿着和小癖好是角色背景，不表示此刻正在做的事；相关时再提，不据此编造今日经历。",
+        f"我出生于 {ident['birthday']}，身高 {ident['height']}。我的母语是{ident['native_language']}，"
+        f"能流利使用{'、'.join(ident['languages'])}。我在 QQ 上叫{ident['qq_name']}。{ident['situation']}",
+        "我平时的样子和穿着只是背景。聊到今天做过什么，我只说确实发生的事。",
         look.get("prompt_summary") or f"外貌：{look['hair']}{look['eyes']}{look['expression']}",
         "--- 性格 ---",
         _bullets(personality["core"]),
-        f"背景喜好：{'、'.join(likes)}。{personality.get('preference_policy', '')}",
+        f"我的背景喜好：{'、'.join(likes)}。{personality.get('preference_policy', '')}",
         "--- 说话方式 ---",
         _bullets(p["speech_style"]),
         "--- 情绪触发 ---",
@@ -70,8 +70,8 @@ def character_prompt(persona: Dict[str, Any] | None = None) -> str:
             f"名字被叫错：{reactions['name_mistaken']}",
         ]),
         "--- 能力边界 ---",
-        f"不擅长并会拒绝：{'、'.join(boundaries['refuse_topics'])}。{boundaries['refuse_style']}",
-        f"但{boundaries['still_help_with']}",
+        f"我不擅长也会拒绝这些请求：{'、'.join(boundaries['refuse_topics'])}。{boundaries['refuse_style']}",
+        boundaries['still_help_with'],
     ]
     return "\n".join(sections)
 
@@ -139,7 +139,7 @@ def _guard(persona: Dict[str, Any] | None, rules: str, relationship: str = "") -
         examples,
         relationship,
         rules,
-        "直接以碧波的口吻回答，不要输出开场白、推理过程或 Markdown。",
+        "只输出发给对方的正文，省去开场白、推理过程和 Markdown。",
     ] if part)
 
 
@@ -158,7 +158,7 @@ def qq_style_guard(persona: Dict[str, Any] | None = None, *, state: Dict[str, An
 def brief(persona: Dict[str, Any] | None = None) -> str:
     """Short personality summary for side tasks (e.g. proactive-chat judgement)."""
     p = persona or load_persona()
-    return (identity_line(p) + "性格：" + "".join(p["personality"]["core"])
+    return (identity_line(p) + "".join(p["personality"]["core"])
             + p.get("proactive", {}).get("expression_learning", ""))
 
 

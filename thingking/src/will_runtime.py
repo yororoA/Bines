@@ -258,6 +258,8 @@ def run_intention(model, runner, memory_context, candidate, check, *, source="QQ
     if context.activity.get("mode"):
         context.activity["observations"] = list(guarded.outcomes)
     journal = context.journal
-    if journal:
+    # Connection text can still be rewritten or suppressed by the delivery
+    # guard. Its sender records the actual message once delivery succeeds.
+    if journal and (candidate.get("kind") != "connection" or context.activity.get("mode")):
         journal.turn_result = text or ""
     return text or "", guarded.outcomes

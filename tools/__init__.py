@@ -20,6 +20,7 @@ _MODULES = {
     "screen_tool": {"get_screen_info": "get_screen_info_wrapper"},
     "app_tool": {"open_application": "open_application"},
     "browser_tool": {"browser_search": "browser_search", "web_fetch": "web_fetch"},
+    "meme_tool": {"search_meme": "search_meme"},
     "website_tool": {name: name for name in (
         "website_status", "website_open", "website_snapshot", "website_scroll",
         "website_create_draft", "website_plan", "website_approve", "website_execute", "website_interact",

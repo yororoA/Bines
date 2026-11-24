@@ -302,6 +302,23 @@ class ExpressionLearningTest(unittest.TestCase):
         for limit in (True, -1, "3"):
             with self.assertRaises(ValueError): self.learning.snapshot("owner", limit=limit)
 
+    def test_chat_only_uses_relevant_lexical_samples(self):
+        self.service.expression_vector = None
+        source, _ = self.experience()
+        self.learn(source)
+        other, _ = self.experience(quote="那就改天再一起玩嘛")
+        self.learn(other, quote="那就改天再一起玩嘛", technique="warm_direct", situation="parting")
+        for query in ("明天会议几点开始", "我指的是后天", ""):
+            with self.subTest(query=query):
+                notes = self.service.build_context(self.local_env(content=query))["expression_notes"]
+                self.assertEqual(notes, [])
+        for query in ("你真厉害", "这种小事倒也难不住你"):
+            with self.subTest(query=query):
+                notes = self.service.build_context(self.local_env(content=query))["expression_notes"]
+                self.assertEqual([row["situation"] for row in notes], ["praised"])
+        # The no-query snapshot is also used by diary generation.
+        self.assertEqual(len(self.learning.snapshot("owner")), 2)
+
     def test_original_snapshot_valid_after_new_learning_but_not_tampered_or_cross_scope(self):
         source, _ = self.experience()
         self.learn(source)

@@ -1,4 +1,5 @@
 import re
+import json
 import subprocess
 import sys
 import unittest
@@ -37,13 +38,14 @@ class PersonaSourceTest(unittest.TestCase):
 
     def test_character_prompt_contains_core_sections(self):
         text = persona_profile.character_prompt()
-        for expected in ("碧波", "能力边界", "傲娇", "操作类请求照常帮忙"):
+        for expected in ("我是碧波", "闲聊时我倾向于", "能力边界", "傲娇", "操作类请求照常帮忙"):
             self.assertIn(expected, text)
         self.assertIn("两个空格", persona_profile.output_rules())
         guard = persona_profile.style_guard()
         self.assertIn("本轮角色口吻（高优先级）", guard)
-        self.assertIn("不能退化成通用助手", guard)
-        self.assertIn("安抚套话", guard)
+        self.assertIn("我是碧波", guard)
+        self.assertNotIn("你是碧波", guard)
+        self.assertIn("我的关心落在这件事上", guard)
         self.assertIn("不在回复中谈论人格提示", guard)
         self.assertIn("以下示例只约束语气", guard)
 
@@ -104,7 +106,7 @@ class PersonaSourceTest(unittest.TestCase):
     def test_closeness_modulates_character_without_erasing_it_or_pressuring_user(self):
         for renderer in (persona_profile.style_guard, persona_profile.qq_style_guard):
             guard = renderer(state={"relationship_score": 200})
-            for requirement in ("不能替换活泼、自然和奇趣", "自己的主意",
+            for requirement in ("接着刚才的气氛聊", "自己的主意",
                                 "不索取回应、施压或让他内疚", "不靠撒娇糊弄反馈",
                                 "坦率承认具体问题", "直接回应原话题或收住",
                                 "调整宣言或承诺尾句", "道歉和关心落在这次具体事情上",
@@ -175,7 +177,7 @@ class PromptBuilderTest(unittest.TestCase):
         _, messages = self._system_text(local_env())
         self.assertEqual(messages[-1]["role"], "system")
         self.assertIn("本轮角色口吻（高优先级）", messages[-1]["content"])
-        self.assertIn("直接以碧波的口吻回答", messages[-1]["content"])
+        self.assertIn("只输出发给对方的正文", messages[-1]["content"])
         self.assertIn("本轮关系口吻：非常亲密", messages[-1]["content"])
 
     def test_desktop_and_qq_share_restored_character_with_distinct_output_formats(self):
@@ -310,6 +312,26 @@ class PromptBuilderTest(unittest.TestCase):
                 self.assertTrue(any(m["role"] == "user" and "什么时候一起听歌" in m["content"] for m in messages))
                 self.assertEqual(context["working"], original)
                 self.assertEqual(self.fx.service.build_context(env)["working"], original)
+
+    def test_flagged_history_keeps_attribution_and_text_without_teaching_the_tone(self):
+        old_reply = "这话我记下了。会议改到周四下午三点。"
+        for env in (local_env(), qq_private_env(OWNER_QQ), qq_private_env(STRANGER_QQ)):
+            with self.subTest(channel=env["channel_type"], scope=env["scope"]):
+                self.fx.service.record_turn(env, "周四下午三点见", old_reply)
+                self.fx.service.record_turn(env, "帮我记一下这句话", "这话我记下了")
+                context = self.fx.service.build_context(env)
+                original = deepcopy(context["working"])
+                messages = prompt_builder.build_conversation_messages(context)
+                history = [m["content"] for m in messages if m["role"] == "assistant"]
+                self.assertEqual(history, ["这话我记下了"])
+                notes = [m for m in messages if m["content"].startswith("历史发言记录")]
+                self.assertEqual(len(notes), 1)
+                self.assertEqual(notes[0]["role"], "user")
+                record = json.loads(notes[0]["content"].split("\n", 1)[1])
+                self.assertEqual(record["content"], old_reply)
+                self.assertEqual(record["speaker"], "Bines(role=assistant)")
+                self.assertTrue(record["time"])
+                self.assertEqual(context["working"], original)
 
     def test_same_words_keep_their_authority_as_current_user_input(self):
         context = {"working": [

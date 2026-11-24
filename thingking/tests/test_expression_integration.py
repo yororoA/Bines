@@ -71,8 +71,8 @@ class ExpressionIntegrationTests(unittest.TestCase):
             result = learn_expression("understated_pride", "praised", QUOTE)
             self.assertEqual(result["status"], "accepted")
             self.assertEqual(learn_expression("understated_pride", "praised", QUOTE)["status"], "duplicate")
-        local = self.service.build_context(local_env())
-        qq = self.service.build_context(qq_private_env(OWNER_QQ))
+        local = self.service.build_context(local_env(content="真厉害"))
+        qq = self.service.build_context(qq_private_env(OWNER_QQ, content="真厉害"))
         self.assertEqual(local["expression_notes"], qq["expression_notes"])
         for context in (local, qq):
             messages = build_conversation_messages(context)

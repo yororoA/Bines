@@ -18,7 +18,7 @@ for key, value in read_env(ROOT / ".env").items():
 
 import config
 from memory.embedding import load_expression_embedder
-from memory.expression_learning import _query_score
+from memory.expression_learning import lexical_matches
 from memory.expression_vector import ExpressionVectorStore, load_corpus
 
 QUERIES = [
@@ -34,7 +34,7 @@ QUERIES = [
 
 
 def lexical_top(corpus, query, limit=3):
-    ranked = sorted(corpus, key=lambda item: _query_score(query, item), reverse=True)
+    ranked = lexical_matches(query, corpus)
     return [item["quote"] for item in ranked[:limit]]
 
 
