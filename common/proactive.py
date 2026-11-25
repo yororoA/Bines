@@ -824,13 +824,18 @@ def appraise_history(context, state, now, *, model=None):
 def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowed_kinds=DRIVES):
     import persona_profile
     from common.intention_note import review_intention_note
+    independent_only = "connection" not in allowed_kinds or context.get("owner_contact_allowed") is False
+    if independent_only:
+        focus = "这次只看看我自己想做什么。联系的事已经另有安排。没别的念头，我就把 reason 留空。"
+        waits = "本轮可以选 review 或 all。原有的 owner_contact_wait_until 继续生效。"
+    else:
+        focus = "想接着聊时，followup 顺着刚才的话说，initiate 要看现在找人合不合适。新消息由正常聊天处理。"
+        waits = "也可以选 contact 暂缓联系，让其他活动照常。在 reason 留下促使我暂缓联系的那件事。"
     result = inspect_decision(_complete(
         f"{persona_profile.brief()}\n{persona_profile.intention_voice()}\n"
         "这会儿没人问我问题。我可以按自己的心情和精力，挑一件真想做的事，也可以什么都不挑。"
         "我只把真实发现、经历和还在意的事算进去。提到别人的安排，我只用他亲口说过的，以新消息为准。"
-        "想聊天时，followup 可以顺着刚才的话说，initiate 要看现在找人合不合适。"
-        "等回复的工夫我也能去玩自己的。新消息会由正常聊天处理。"
-        + EXPLORATION_REVIEW +
+        + focus + EXPLORATION_REVIEW +
         "\n本次只选择，不执行工具。按以下协议输出一个 JSON 对象。\n"
         "有新目标时 should_act=true，写 kind、topic、intent 和 reason。topic 写主题，intent 写接下来想做的事。"
         "kind 只取 allowed_kinds 中的一项，connection 是交流，curiosity 是探索，initiative 是主动操作。"
@@ -839,15 +844,14 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
         "ongoing_intention、queued_intentions、waiting_intentions 里的目标已保存，可以另选新事，不重复创建。\n"
         "这次不行动时 should_act=false，只写 wait_scope、delay_seconds（30 到 3600 秒）和 reason。"
         "review 是照常下次再看，已有活动继续。没什么新念头就选 review，reason 填空字符串。"
-        "contact 是主动决定暂缓联系，其他活动照常。all 只在我确实想把所有活动都停一阵时选。"
-        "这两种主动等待，在 reason 留下促使我停一停的那件事。"
-        "联系已在等待或 connection 不在 allowed_kinds 时，只考虑独立活动，保留原 owner_contact_wait_until。"
+        "all 只在我确实想把所有活动都停一阵时选，reason 写想歇一阵的缘由。"
+        + waits +
         "到期只恢复选择权。planning_only 时遵守休息阶段的取舍间隔。\n"
         "有缘由时，reason 里只留我心里闪过的那一点。权限、时间和历史用来作选择，不抄成一段检查经过。"
         "旧事真让我起了新念头才提，写眼前牵动我的细节就够了。",
         {"context": context, "willingness": state.drives, "emotion": state.emotion,
          "interests": state.interests, "previous_topics": state.topics,
-         **({"social_interests": state.social_interests} if "connection" in allowed_kinds else {}),
+         **({"social_interests": state.social_interests} if not independent_only else {}),
          "background_interests": persona_profile.load_persona()["personality"].get("likes", []),
          "recent_outcomes": state.recent_outcomes, "capabilities": capabilities,
          "recent_intents": state.recent_intents,
@@ -858,6 +862,7 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
         choice = decision["kind"] if decision else result["wait_scope"]
         result["reason"] = review_intention_note(
             result["reason"], model=model, choice=choice, optional=choice == "review",
+            independent_review=choice == "review" and independent_only,
             topic=decision["topic"] if decision else "", intent=decision["intent"] if decision else "",
         )
         if decision:

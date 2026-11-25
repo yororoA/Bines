@@ -75,3 +75,46 @@ class IntentionNoteTest(unittest.TestCase):
         self.assertIn("TimeoutError", log.output[0])
         self.assertNotIn(self.report, log.output[0])
         model.complete_text.assert_called_once()
+
+    def test_closed_contact_window_cannot_be_reissued_as_an_independent_reason(self):
+        for note in ("他还没接，我想先等一会儿，看他回不回",
+                     "刚把换乘线路说给她听，正等着看她怎么接；这会儿不想自己另起一摊，就窝着等她回",
+                     "刚把那句「第3站，别下车」发出去，他还没接，我想先等一会儿，看他回不回",
+                     "我想看看她会不会回话"):
+            for answer in ('{"verdict":"keep"}', '{"verdict":"excerpt","first":0,"last":0}', '{"verdict":"routine"}'):
+                with self.subTest(note=note, answer=answer):
+                    model = Mock()
+                    model.complete_text.return_value = answer
+                    result = review_intention_note(note, model=model, optional=True, choice="review",
+                                                   independent_review=True)
+                    self.assertEqual(result, "")
+                    model.complete_text.assert_called_once()
+                    self.assertTrue(json.loads(model.complete_text.call_args.args[0][1]["content"])["只考虑独立活动"])
+
+    def test_independent_note_keeps_the_real_observation_even_if_reviewer_selects_only_wait(self):
+        core = "我想看看第4站那条「临时线」到底绕哪儿"
+        note = "刚把「明天8点」说给他听，正等他回话，" + core + "，我想先等一会儿"
+        for answer in ('{"verdict":"keep"}', '{"verdict":"excerpt","first":0,"last":1}', '{"verdict":"routine"}'):
+            model = Mock()
+            model.complete_text.return_value = answer
+            self.assertEqual(review_intention_note(note, model=model, optional=True, choice="review",
+                                                  independent_review=True), core)
+        for verdict in ('{"verdict":"excerpt","first":1,"last":1}', '{"verdict":"routine"}'):
+            model.complete_text.return_value = verdict
+            self.assertEqual(review_intention_note("我还在等她选纪念贴纸，" + core, model=model, optional=True,
+                                                   choice="review", independent_review=True), core)
+        prerequisite = "得等她选好尺码才能发货，我想看看订单上那张尺码表"
+        self.assertEqual(review_intention_note(prerequisite, model=model, optional=True, choice="review",
+                                               independent_review=True), prerequisite)
+
+    def test_normal_contact_choices_and_short_independent_notes_still_bypass_review(self):
+        model = Mock()
+        for note in ("还等着资料扫描完", "我想看看他怎么接这个发球", "她还没回家", "那张图怎么缺了一角",
+                     "得等他签收包裹再领回执", "等她把画送来才能装框",
+                     "我想擦掉「他还没接，我等他回」这行字"):
+            self.assertEqual(review_intention_note(note, optional=True, choice="review",
+                                                   independent_review=True, model=model), note)
+        self.assertEqual(review_intention_note("等她回复", optional=True, choice="review", model=model), "等她回复")
+        self.assertEqual(review_intention_note("等她回复", choice="contact", independent_review=True, model=model),
+                         "等她回复")
+        model.complete_text.assert_not_called()

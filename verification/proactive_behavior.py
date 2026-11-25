@@ -418,8 +418,9 @@ class PolicyTests(unittest.TestCase):
         model.complete_text.return_value = json.dumps(
             {"should_act": False, "reason": "旧事又数了一遍", "wait_scope": "review", "delay_seconds": 95})
         with patch("common.intention_note.review_intention_note", return_value="") as review:
-            self.assertIsNone(draft_decision({}, self.policy.state, self.now, model=model))
+            self.assertIsNone(draft_decision({}, self.policy.state, self.now, model=model, allowed_kinds=["curiosity"]))
         self.assertTrue(review.call_args.kwargs["optional"])
+        self.assertTrue(review.call_args.kwargs["independent_review"])
         self.assertEqual(self.policy.state.last_decision,
                          {"at": self.now, "status": "quiet", "reason": "", "delay_seconds": 95, "wait_scope": "review"})
 
