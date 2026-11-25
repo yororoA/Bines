@@ -15,6 +15,8 @@ from common.memory_highlights import bounded_highlight_state
 
 from . import scope_policy
 from .models import (
+    CHANNEL_QQ_GROUP,
+    CHANNEL_QQ_PRIVATE,
     KIND_DIARY,
     KIND_EPISODE,
     KIND_EXCERPT,
@@ -53,6 +55,7 @@ ASSISTANT_ACTOR = "assistant"
 SEMANTIC_DUPLICATE_DISTANCE = 0.08
 DIARY_CHECK_INTERVAL = 600
 INDEX_CHECK_INTERVAL = 5
+QQ_TURN_ASSOCIATION_GRACE_SECONDS = 60
 CROSS_CHANNEL_SECONDS = 12 * 3600
 CROSS_CHANNEL_LIMIT = 8
 
@@ -462,7 +465,12 @@ class MemoryService:
                         self.repo.conn.execute("UPDATE association_nodes SET waiting_until=? WHERE id=?",
                                                (self.clock() + 2 * self.settings.job_lease_seconds, node["id"]))
                 elif not previous:
-                    self.graph.register_raw([self.repo.get_message(message_id)])
+                    # QQ sync can deliver either side before the journal identifies the turn.
+                    # Keep raw text visible now; only the standalone association job waits.
+                    available_at = None
+                    if env.channel_type in (CHANNEL_QQ_PRIVATE, CHANNEL_QQ_GROUP):
+                        available_at = min(message["ts"], self.clock()) + QQ_TURN_ASSOCIATION_GRACE_SECONDS
+                    self.graph.register_raw([message], available_at=available_at)
             self._maybe_enqueue_summary(env.conversation_id, env.scope)
             if state_update and role == ROLE_USER and not recalled and not is_system_event(content):
                 self._enqueue_state(env, message_id)

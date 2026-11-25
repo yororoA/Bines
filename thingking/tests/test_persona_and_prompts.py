@@ -51,7 +51,7 @@ class PersonaSourceTest(unittest.TestCase):
 
     def test_casual_voice_and_factual_punctuation_reach_both_channels(self):
         for guard in (persona_profile.qq_style_guard(), persona_profile.style_guard()):
-            for preference in ("发半句", "重复对方刚说的词", "话题岔开", "常省掉句号",
+            for preference in ("发半句", "偶尔会学对方说一句", "真聊起措辞", "话题岔开", "常省掉句号",
                                "可以连打", "“嗯”或“哦”", "明说自己站哪边", "说不知道",
                                "话停在这儿", "保留有意义的标点"):
                 self.assertIn(preference, guard)

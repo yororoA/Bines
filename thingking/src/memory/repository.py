@@ -612,12 +612,15 @@ class MemoryRepository:
         payload: Dict[str, Any],
         dedupe_key: str,
         conversation_id: Optional[str] = None,
+        *,
+        available_at: Optional[float] = None,
     ) -> Optional[int]:
         now = self.clock()
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO jobs(kind, scope, conversation_id, payload, status, available_at, dedupe_key, "
             "created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-            (kind, scope, conversation_id, json.dumps(payload, ensure_ascii=False), now, dedupe_key, now, now),
+            (kind, scope, conversation_id, json.dumps(payload, ensure_ascii=False),
+             max(now, available_at) if available_at is not None else now, dedupe_key, now, now),
         )
         return int(cursor.lastrowid) if cursor.rowcount else None
 

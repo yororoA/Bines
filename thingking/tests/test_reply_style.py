@@ -135,6 +135,74 @@ class ReplyStyleTests(unittest.TestCase):
         self.assertEqual(polish_reply(draft, user_text="周末再见呗", voice="我常说半句", complete=complete),
                          "行，周末见")
 
+    def test_reaction_followed_by_unsolicited_word_grading_gets_reviewed(self):
+        for user, draft in [
+            ("闹麻了", "闹麻了\n这词听着比呃呃有精神多了"),
+            ("可算下班了", "你这说法比刚才有水平多了"),
+        ]:
+            with self.subTest(user=user):
+                complete = Mock(side_effect=['{"verdict":"wording"}', "喟然一叹耳。", "啧",
+                                             '{"acceptable":true}'])
+                self.assertEqual(polish_reply(draft, user_text=user, voice="我平时说大白话", complete=complete), "啧")
+                self.assertEqual(complete.call_count, 4)
+        unused = Mock(side_effect=AssertionError("echoes and jokes can stand on their own"))
+        for draft in ("闹麻了", "你也麻了啊", "再闹会儿沙发都该申请工伤了", "总算换了个不用加班的工作"):
+            self.assertEqual(polish_reply(draft, user_text="闹麻了", complete=unused), draft)
+        unused.assert_not_called()
+
+    def test_removes_only_a_quoted_comparison_term_and_checks_factual_reply(self):
+        source = "这词听着比「呃呃」有精神多了，我答应周五带两张票，小夏还说了「呃呃」"
+        answer = "我答应周五带两张票，小夏还说了「呃呃」"
+        for invalid in (answer.replace("周五", "周四"), answer.replace("「呃呃」", "「等等」"),
+                        answer.replace("两张票", "一张票"), "这词比上次传神多了，" + answer):
+            with self.subTest(invalid=invalid):
+                complete = Mock(side_effect=['{"verdict":"wording"}', "吾应携券。", invalid, answer,
+                                             '{"acceptable":true}'])
+                self.assertEqual(polish_reply(source, user_text="闹麻了", voice="我说大白话", complete=complete),
+                                 answer)
+                material = json.loads(complete.call_args_list[2].args[0][1]["content"])
+                self.assertEqual(material["逐字保留的引文"], ["「呃呃」"])
+                self.assertNotIn(source, material.values())
+                self.assertEqual(complete.call_count, 5)
+
+    def test_wording_judgment_uses_only_relevant_previous_user_context(self):
+        draft = "这词听着比上个有精神多了"
+        for user, previous, relevant in [
+            ("闹麻了", "我发两个候选词，你帮我选更有劲的", True),
+            ("两个词哪个好", "奶茶送到了", False),
+            ("闹麻了", "刚去背单词了", False),
+        ]:
+            with self.subTest(user=user):
+                complete = Mock(return_value='{"verdict":"ok"}')
+                self.assertEqual(polish_reply(draft, user_text=user, previous_user_text=previous,
+                                              complete=complete), draft)
+                complete.assert_called_once()
+                sent = json.loads(complete.call_args.args[0][1]["content"])
+                self.assertEqual(previous in sent.values(), relevant)
+
+    def test_review_history_stops_at_other_speakers_channels_and_long_gaps(self):
+        from prompt_builder import review_conversation_replies
+        from tools.context import ToolContext, tool_context
+        previous = {"role": "user", "actor_id": "qq:1", "ts": 99, "content": "来比比词"}
+        context = {"envelope": {"actor_id": "qq:1", "conversation_id": "group:5", "timestamp": 100,
+                                "channel_type": "qq_group"}, "other_channels": [previous]}
+        for rows, autonomous, keep in [
+            ([previous, {"role": "assistant", "content": "旧助手的想法"}], False, True),
+            ([previous, {**previous, "role": "observed", "actor_id": "qq:2"}], False, False),
+            ([{**previous, "conversation_id": "other"}], False, False),
+            ([{**previous, "ts": -500}], False, False),
+            ([previous], True, False),
+        ]:
+            with self.subTest(rows=rows, autonomous=autonomous):
+                model = Mock()
+                model.complete_text.return_value = '{"verdict":"ok"}'
+                with tool_context(ToolContext(user_text="闹麻了", autonomous=autonomous)):
+                    with review_conversation_replies({**context, "working": rows}, model, lambda: "") as review:
+                        review("这词听着比上一个有精神")
+                request = json.loads(model.complete_text.call_args.args[0][1]["content"])
+                self.assertEqual(previous["content"] in request.values(), keep)
+                self.assertNotIn("旧助手的想法", str(request))
+
     def test_synonym_for_the_same_permission_posture_is_rejected_again(self):
         complete = Mock(side_effect=["彼将用膳，暂别。", "好，那我不拦你了", "好呀，回头聊",
                                      '{"acceptable":true}'])

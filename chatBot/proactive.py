@@ -52,6 +52,7 @@ def enabled():
 
 def latest_private(store, conversation=None):
     """Only real inbound owner events establish a private recipient."""
+    result, seen = [], set()
     with store.connection() as db:
         rows = db.execute(
             "SELECT m.* FROM messages m JOIN events e ON e.id='message:'||m.external_id "
@@ -59,17 +60,19 @@ def latest_private(store, conversation=None):
             + ("AND m.conversation=? " if conversation else "")
             + "ORDER BY m.ts DESC,m.id DESC",
             (conversation,) if conversation else (),
-        ).fetchall()
-    result, seen = [], set()
-    for row in rows:
-        event = json.loads(row["raw"] or "{}")
-        identity = store.identity(event)
-        if (event.get("post_type") != "message" or not identity.owner or identity.group
-                or not identity.account or identity.user == identity.account
-                or identity.conversation in seen):
-            continue
-        seen.add(identity.conversation)
-        result.append((dict(row), event, identity))
+        )
+        for row in rows:
+            if row["conversation"] in seen:
+                continue
+            event = json.loads(row["raw"] or "{}")
+            identity = store.identity(event)
+            if (event.get("post_type") != "message" or not identity.owner or identity.group
+                    or not identity.account or identity.user == identity.account):
+                continue
+            seen.add(identity.conversation)
+            result.append((dict(row), event, identity))
+            if conversation:
+                break
     return result
 
 
@@ -80,6 +83,22 @@ def owner_activity(store):
             + ",".join("?" for _ in store.owners) + ")", tuple(store.owners),
         ).fetchone() if store.owners else None
     return float(row["ts"] or 0) if row else 0
+
+
+def _pending_user_message(db, conversation):
+    return db.execute(
+        "SELECT 1 FROM events WHERE conversation=? AND status IN ('pending','working') "
+        "AND json_extract(raw,'$.post_type')='message' LIMIT 1", (conversation,),
+    ).fetchone() is not None
+
+
+def _inbound_since(db, conversation, receipt):
+    return db.execute(
+        "SELECT 1 FROM events WHERE conversation=? AND rowid>? "
+        "AND json_extract(raw,'$.post_type')='message' "
+        "AND CAST(COALESCE(json_extract(raw,'$.user_id'),json_extract(raw,'$.sender.user_id')) AS TEXT) "
+        "!= CAST(json_extract(raw,'$.self_id') AS TEXT) LIMIT 1", (conversation, receipt),
+    ).fetchone() is not None
 
 
 def guard(store, event, now=None, *, config=None, central_activity=0):
@@ -99,15 +118,12 @@ def guard(store, event, now=None, *, config=None, central_activity=0):
         if not run or json.loads(run["candidate"]) != candidate:
             return "unknown_candidate"
         execution = db.execute("SELECT status,lease FROM events WHERE id=?", (event.get("event_id"),)).fetchone()
-        pending = db.execute(
-            "SELECT raw FROM events WHERE conversation=? AND status IN ('pending','working')",
-            (identity.conversation,),
-        ).fetchall()
+        user_pending = _pending_user_message(db, identity.conversation)
     active = execution and execution["status"] == "working" and execution["lease"] > now
     age = now - float(candidate.get("timestamp") or 0)
     if age < 0 or (age > config.expiry and not active):
         return "expired"
-    if any(json.loads(row["raw"]).get("post_type") == "message" for row in pending):
+    if user_pending:
         return "incoming_message"
     latest = latest_private(store, identity.conversation)
     if not latest or human_ref(latest[0][0]) != candidate.get("based_on_user"):
@@ -193,8 +209,10 @@ class QQProactive:
         detail = ""
         if next_at:
             detail = f" · 下次 {self._clock_text(next_at)}"
-            if state.last_decision.get("reason"):
-                detail += " · " + _log_text(state.last_decision["reason"])
+            if (reason == "self_rest" and state.last_decision.get("wait_scope") == "all"
+                    and state.last_decision.get("status") == "quiet" and state.last_decision.get("reason")
+                    and state.intention_wait_user_ref == state.user_ref):
+                detail += " · 上次选择休息的理由：" + _log_text(state.last_decision["reason"])
         elif reason == "startup_grace":
             detail = f" · {self.config.startup_grace:g}s 启动缓冲"
         for name, label in (("user_messages", "用户消息"), ("autonomous_tasks", "自主任务"),
@@ -403,9 +421,26 @@ class QQProactive:
         with self.states.scheduler("qq"):
             self._tick()
 
+    def _generation_current(self, policy, conversation, user_ref, receipt):
+        with self.store.connection() as db:
+            user_pending = _pending_user_message(db, conversation)
+            changed = user_pending or _inbound_since(db, conversation, receipt)
+        if not changed:
+            latest = latest_private(self.store, conversation)
+            if latest and human_ref(latest[0][0]) == user_ref:
+                return True
+        policy.state.last_decision = {"at": self.clock(), "status": "cancelled",
+                                      "cancellation_reason": "incoming_message" if user_pending else "new_user_message"}
+        self.save(conversation, policy)
+        log.info("自主取舍已取消 · 参考的私聊消息已变化")
+        return False
+
     def _generate_intention(self, policy, snapshot, identity, user, now, activity, conversation_activity):
         """Only deliberate and persist a description; worker execution stays serial."""
         from chatBot.memory_hub import identity_envelope
+        # QQ timestamps may arrive out of order. Capture the gateway's insertion order before model I/O.
+        with self.store.connection() as db:
+            receipt = db.execute("SELECT COALESCE(MAX(rowid),0) FROM events").fetchone()[0]
         policy.defer_generation(now)
         self.save(identity.conversation, policy)
         permissions = policy.contact_permissions(now, user, activity, last_reply_at=conversation_activity)
@@ -430,11 +465,17 @@ class QQProactive:
         if self.capabilities is None:
             self.capabilities = capability_summary("QQ")
         materials["available_skills"] = self.capabilities
-        if policy.appraisal_due(human_ref(user), now):
-            policy.appraise(self.appraise(materials, policy.state, now), human_ref(user), now)
+        user_ref = human_ref(user)
+        if policy.appraisal_due(user_ref, now):
+            appraisal = self.appraise(materials, policy.state, now)
+            if not self._generation_current(policy, identity.conversation, user_ref, receipt):
+                return False
+            policy.appraise(appraisal, user_ref, now)
             self.save(identity.conversation, policy)
         kinds = policy.eligible_kinds(now, user, activity, last_reply_at=conversation_activity)
         decision = self.decide(materials, policy.state, now, capabilities="QQ", allowed_kinds=kinds)
+        if not self._generation_current(policy, identity.conversation, user_ref, receipt):
+            return False
         decision = policy.record_decision(decision, now)
         if decision and decision["kind"] not in kinds:
             policy.state.last_decision.update(status="disallowed_kind", proposed=decision)
@@ -450,6 +491,7 @@ class QQProactive:
         policy.state.next_intention_at = max(policy.state.next_intention_at,
                                             self.clock() + self.config.decision_interval)
         self.save(identity.conversation, policy)
+        return True
 
     def _tick(self):
         now = self.clock()
@@ -510,7 +552,8 @@ class QQProactive:
                 log.info("自主意图生成开始 · %s · 执行通道%s",
                          "内部思考" if policy.state.planning_only else "独立取舍",
                          "占用中，目标可排队" if busy or policy.state.pending else "空闲")
-                self._generate_intention(policy, snapshot, identity, user, now, activity, conversation_activity)
+                if not self._generate_intention(policy, snapshot, identity, user, now, activity, conversation_activity):
+                    continue
             if not ready or self.clock() < policy.state.intention_wait_until:
                 continue
             decision, saved_activity = policy.select_intention(

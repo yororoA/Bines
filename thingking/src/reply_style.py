@@ -67,6 +67,21 @@ _GENERIC_MAXIM = re.compile(
 )
 _BLAND = "闲聊只剩可套给许多人的泛泛评价或祝愿"
 _STIFF = "把眼前的聊天写成客服或书面报告"
+_WORDING = "把对方的感叹当作选词练习，顺手点评对方说话水平"
+_WORD_SUBJECT = r"(?:这|那)(?:个|种|两|几个)?(?:词[儿汇]?|说法|用词|措辞|字|句(?:话)?)"
+_WORD_COMMENT = re.compile(
+    _WORD_SUBJECT +
+    r"[^，,。！？!?；;\n]{0,18}(?:比|听(?:起来|着)|用得|说得|更有|有水平|有精神|有进步)"
+    r"|(?:总算|终于)(?:会|知道|舍得|肯|学会)?换(?:了)?(?:个|一种)?(?:词|说法|措辞)"
+    r"|词汇量[^，。！？\n]{0,8}(?:见长|进步|丰富多了)"
+)
+_RATED_TERM_FOLLOWS = re.compile(
+    _WORD_SUBJECT + r"\s*(?:听着|听起来|念起来|说起来|感觉)?\s*比(?:起)?(?:刚才的?|之前的?|原来的?|上次的?)?\s*$"
+)
+_WORD_GAME = re.compile(
+    r"候选词|(?:词语|成语|台词)接龙|(?:选|挑|换|比比|点评|比较|评评).{0,8}(?:词|说法|措辞|语气)"
+    r"|(?:词|说法|措辞|语气).{0,16}(?:哪个好|更好|合适|选一个|怎么用|怎么说|帮我选)"
+)
 _QUOTED = re.compile(r'```[\s\S]*?```|`[^`\n]+`|“[^”\n]+”|‘[^’\n]+’|「[^」\n]+」|『[^』\n]+』|"[^"\n]+"')
 _EXACT_REQUEST = re.compile(
     r"(?:原封不动地?|逐字|照原文|原样)(?:复述|照抄|转发|发给|发送|回我|回复|输出)"
@@ -160,6 +175,7 @@ def _needs_context_check(text, user_text):
     spoken = _QUOTED.sub(" ", text).strip()
     clauses = [part for part in re.split(r"[，,。！？!?；;\n]+| {2,}", spoken) if part.strip()]
     suspect = (_STOCK_RESPONSE.fullmatch(spoken) is not None or _GENERIC_MAXIM.search(spoken) is not None or
+               _WORD_COMMENT.search(spoken) is not None or
                (len(spoken) >= 12 and len(clauses) >= 2 and _GENERIC_LANGUAGE.search(spoken) is not None))
     # A long speech in response to a short personal update can be detached
     # even without a known formula. Lack of shared wording only selects a
@@ -182,13 +198,27 @@ def _keeps_facts(candidate, facts):
     return all(any(part == fact for part in clauses) for fact in facts)
 
 
+def _without_quoted_comparison_terms(draft):
+    # Only exempt a quoted word immediately after the comparison in a wording
+    # assessment. Other quotations, even in the same sentence, retain fidelity.
+    def keep_quote(match):
+        if _RATED_TERM_FOLLOWS.search(draft[:match.start()]):
+            return ""
+        return match.group()
+
+    return _QUOTED.sub(keep_quote, draft)
+
+
 _CONTEXT_CHECK = (
     "比较当前用户的话和回复，判断这个语体是否适合这一次交谈。"
     "如果是分享具体小事，回复却只给一串可换给任何人的赞美、人生感悟、套用祝愿，选 bland。"
     "把朋友间的互动写成公函、业务受理、通用分析报告，选 formal。"
+    "对方只是在感叹或吐槽，草稿却比较他这次和上次用的词、给他的表达打分，选 wording。"
+    "仅在对方真的聊选词、玩接词游戏或这个笑点接上了事情本身时，点评才合适。"
+    "对方先后用了不同的词、草稿自称两人在玩梗，都不能单独说明对方想聊用词。单纯跟着复读、一起吐槽可以选 ok。"
     "简短附和、祝福、平淡的真话、贴合此事的建议、严肃话题、按要求作的解释或专业交付，都可以很自然，选 ok。"
     "只看有没有接上这一句，不要求必须追问、玩梗、活泼或引用关键词。不确定也选 ok。"
-    '用 JSON 返回 {"verdict":"ok"}、{"verdict":"bland"} 或 {"verdict":"formal"}。'
+    '用 JSON 返回 verdict，取值为 ok、bland、formal 或 wording。'
 )
 
 
@@ -198,6 +228,11 @@ _PIVOT = (
     "根据对方的话辨认这一轮实际在做什么。对方向我告别时，自然道别就已传达原意，省去擅自许可或阻拦的姿态。"
     "对方问一件事时，直接留下回答，省去无端表示自己记住了、听懂了的开场。"
     "原样保留数字、外文、链接和引号内的原文。只返回文言译文。"
+)
+_WORDING_PIVOT = (
+    "已确认草稿误把对方的发言当成用词练习。删掉对字词、语气和表达能力的点评及比较对象。"
+    "余下真正要说的意思用一句简短文言表示，有另行约定、事实或实际问答则原样保留要点。"
+    "如果对方只给了一声感叹，草稿也没有别的内容，只写应和这一声的意思。不要替对方猜缘故。"
 )
 _RENDER = (
     "把文言中转稿译回本轮人格会说的现代日常中文，直接回眼前这句话。"
@@ -217,9 +252,22 @@ _VERIFY = (
     "为替掉套话，可以沿用对方本轮自己说过的细节；不要擅自续写经历或强行搞笑。"
     '只返回 JSON 对象 {"acceptable":true} 或 {"acceptable":false}。'
 )
+_VERIFY_WORDING = (
+    "草稿里的用词点评已判为多余，肯定、否定或复述这个点评都不需要。"
+    "只有当候选能直接回应用户、保留点评以外的事实和意图，且没有编造情境、揣测指责对象、"
+    "逼对方解释或换个说法继续点评选词时，才判为可接受。"
+    '只返回 JSON 对象 {"acceptable":true} 或 {"acceptable":false}。'
+)
+_RENDER_WORDING = (
+    "把中转稿写成我会回的现代口语，只发这一条。可以单纯附和或复读。"
+    "不要评论对方怎么说话，不猜缘故，不必认错、追问或故意抖包袱。"
+    "对照原稿其余分句核对事实、承诺、称呼和说话对象。逐字保留的事实分句必须独立照抄、顺序不变；"
+    "逐字保留的引文连同引号照抄。若原稿其余分句已经能回应，就直接沿用。只发正文。"
+)
 
 
-def polish_reply(draft: str, *, user_text: str = "", voice: str = "", complete=None, before_request=None) -> str:
+def polish_reply(draft: str, *, user_text: str = "", voice: str = "", previous_user_text: str = "",
+                 complete=None, before_request=None) -> str:
     """Pass ordinary drafts unchanged. A flagged draft gets one pivot and up to two renditions."""
     detected = style_issue(draft, user_text)
     if not detected and not _needs_context_check(draft, user_text):
@@ -253,35 +301,51 @@ def polish_reply(draft: str, *, user_text: str = "", voice: str = "", complete=N
 
     if not detected:
         # A possible style mismatch alone is insufficient to discard a reply.
+        material = {"对方的话": user_text, "草稿": draft}
+        if previous_user_text and _WORD_COMMENT.search(_QUOTED.sub(" ", draft)):
+            if previous_user_text in draft or _WORD_GAME.search(previous_user_text):
+                material["同一人紧邻的上句话（仅供判断话题）"] = previous_user_text
         try:
-            decision = json.loads(request(_CONTEXT_CHECK, {"对方的话": user_text, "草稿": draft}, verify=True))
+            decision = json.loads(request(_CONTEXT_CHECK, material, verify=True))
         except (ReplyStyleRejected, ValueError):
             return draft
         if not isinstance(decision, dict):
             return draft
-        detected = {"bland": _BLAND, "formal": _STIFF}.get(str(decision.get("verdict")), "")
+        detected = {"bland": _BLAND, "formal": _STIFF, "wording": _WORDING}.get(str(decision.get("verdict")), "")
         if not detected:
             return draft
     if not voice:
         from persona_profile import brief
         voice = brief()
-    bridge = request(_PIVOT, {"草稿": draft, "对方的话": user_text, "待去除的腔调": detected})
+    pivot = _WORDING_PIVOT if detected == _WORDING else _PIVOT
+    bridge = request(pivot, {"草稿": draft, "对方的话": user_text, "待去除的腔调": detected})
     if not bridge:
         raise ReplyStyleRejected("语气润色未得到文言中转稿")
-    details = Counter(_DETAIL.findall(draft))
+    fidelity_text = _without_quoted_comparison_terms(draft) if detected == _WORDING else draft
+    details = Counter(_DETAIL.findall(fidelity_text))
     # A generic response may have no anchor of its own. In this case a
     # grounded reaction may echo e.g. the user's "5公里"; never lose a draft fact.
     user_details = Counter(_DETAIL.findall(user_text)) if detected in {_BLAND, _STIFF} else Counter()
-    quotes = Counter(_QUOTED.findall(draft))
-    facts = [clause for clause in _clauses(draft)
+    quotes = Counter(_QUOTED.findall(fidelity_text))
+    facts = [clause for clause in _clauses(fidelity_text)
              if (_CHINESE_QUANTITY.search(clause) or _FACT_SCOPE.search(clause)) and not style_issue(clause, user_text)]
     issue = detected
     for _ in range(2):
-        candidate = request(_RENDER, {"本轮人格": voice, "对方的话": user_text, "文言中转稿": bridge,
-                                      "原意核对": draft, "逐字保留的事实分句": facts, "待修正": issue})
+        material = {"本轮人格": voice, "对方的话": user_text, "文言中转稿": bridge,
+                    "逐字保留的事实分句": facts, "待修正": issue}
+        if detected == _WORDING:
+            material["逐字保留的引文"] = list(quotes.elements())
+            material["原稿其余分句"] = [
+                clause for clause in _clauses(draft) if not _WORD_COMMENT.search(_QUOTED.sub(" ", clause))]
+            candidate = request(_RENDER_WORDING, material)
+        else:
+            material["原意核对"] = draft
+            candidate = request(_RENDER, material)
         issue = style_issue(candidate, user_text)
         if detected == "套用记账式应答" and _MEMORY_ACK.search(_QUOTED.sub(" ", candidate)):
             issue = "去掉没有被要求的记事表态，直接接这句话"
+        if detected == _WORDING and _WORD_COMMENT.search(_QUOTED.sub(" ", candidate)):
+            issue = "放下对用词的比较，也不提旧词；回应对方刚说的内容"
         if issue:
             continue
         candidate_details = Counter(_DETAIL.findall(candidate))
@@ -289,7 +353,8 @@ def polish_reply(draft: str, *, user_text: str = "", voice: str = "", complete=N
                 or quotes != Counter(_QUOTED.findall(candidate)) or not _keeps_facts(candidate, facts)):
             issue = "按原顺序逐字保留指定的事实分句，核对数字、日期、链接、引文和专名"
             continue
-        verdict = request(_VERIFY, {"对方的话": user_text, "原稿": draft, "候选": candidate,
+        verifier = _VERIFY_WORDING if detected == _WORDING else _VERIFY
+        verdict = request(verifier, {"对方的话": user_text, "原稿": draft, "候选": candidate,
                                     "待去除的腔调": detected}, verify=True)
         try:
             review = json.loads(verdict)

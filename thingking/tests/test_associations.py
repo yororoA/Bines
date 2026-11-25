@@ -6,11 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from helpers import Clock, local_env, qq_group_env
+from helpers import Clock, local_env, qq_group_env, qq_private_env
 from memory.associations import JOB_ASSOCIATE
 from memory.lexical_index import LexicalIndex
 from memory.repository import MemoryRepository
-from memory.service import MemoryService
+from memory.service import MemoryService, QQ_TURN_ASSOCIATION_GRACE_SECONDS
 from memory.settings import MemorySettings
 from memory.worker import MemoryWorker
 
@@ -237,6 +237,52 @@ class AssociationTest(unittest.TestCase):
         self.assertEqual(current["id"], node["id"])
         self.assertEqual(current["message_ids"], [1, 2])
         self.assertEqual(current["waiting_until"], 0)
+
+    def test_qq_journal_associates_the_complete_turn_once(self):
+        env = qq_private_env("111", ts=self.clock())
+        self.service.record_message(env, "user", "上次那条蓝色围巾", source_ref="in")
+        self.assertEqual([m["source_ref"] for m in self.service.build_context(env, "")["working"]], ["in"])
+        self.assertIsNone(self.service.claim_job([JOB_ASSOCIATE]))
+        self.clock.advance(10)
+        self.service.record_message(env, "assistant", "还挂在门口", source_ref="out")
+        self.assertIsNone(self.service.claim_job([JOB_ASSOCIATE]))
+        self.service.record_experience(env, "turn", {
+            "category": "turn", "action": "dialogue_turn", "status": "completed", "result": "还挂在门口",
+            "source_message_refs": ["in", "out"], "turn_message_refs": ["in", "out"]})
+        grouped = self.service.graph.for_message(1)
+        self.assertEqual(grouped["message_ids"], [1, 2])
+        job = self.claim(JOB_ASSOCIATE)["job"]
+        self.assertEqual(job["payload"]["node_id"], grouped["id"])
+        self.service.complete_association(job["id"], [])
+        self.clock.advance(QQ_TURN_ASSOCIATION_GRACE_SECONDS)
+        self.assertIsNone(self.service.claim_job([JOB_ASSOCIATE]))
+        old_jobs = self.repo.conn.execute("SELECT status,attempts FROM jobs WHERE kind=? AND id!=?",
+                                          (JOB_ASSOCIATE, job["id"])).fetchall()
+        self.assertEqual([tuple(row) for row in old_jobs], [("done", 0), ("done", 0)])
+
+    def test_qq_standalone_grace_uses_original_timestamp_across_replay_and_import(self):
+        env = qq_group_env("111", ts=self.clock())
+        self.service.record_message(env, "user", "今天包了饺子", source_ref="live")
+        self.clock.advance(QQ_TURN_ASSOCIATION_GRACE_SECONDS - 1)
+        self.service.record_message(env, "user", "今天包了饺子", source_ref="live")
+        history = qq_group_env("111", ts=self.clock() - 3600)
+        self.service.record_message(history, "user", "今早买了面粉", source_ref="history")
+        historical = self.claim(JOB_ASSOCIATE)["job"]
+        self.assertEqual(historical["payload"]["node_id"], self.service.graph.for_message(2)["id"])
+        self.service.complete_association(historical["id"], [])
+        self.assertIsNone(self.service.claim_job([JOB_ASSOCIATE]))
+        self.clock.advance(1)
+        standalone = self.claim(JOB_ASSOCIATE)["job"]
+        self.assertEqual(standalone["payload"]["node_id"], self.service.graph.for_message(1)["id"])
+        # A late journal can advance without disturbing an outstanding worker's lease.
+        self.service.record_experience(env, "quiet", {
+            "category": "turn", "action": "dialogue_turn", "status": "completed",
+            "source_message_refs": ["live"], "turn_message_refs": ["live"]})
+        self.assertEqual(self.repo.get_job(standalone["id"])["status"], "running")
+        final = self.claim(JOB_ASSOCIATE)["job"]
+        self.assertEqual(final["payload"]["node_id"], self.service.graph.for_message(1)["id"])
+        self.assertNotEqual(final["id"], standalone["id"])
+        self.assertEqual(self.service.complete_association(standalone["id"], [])["status"], "stale")
 
     def test_usage_deduplicated_and_only_visible_citations_count(self):
         node = self.raw("蓝色围巾是你的生日礼物")

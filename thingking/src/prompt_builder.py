@@ -506,7 +506,21 @@ def review_conversation_replies(memory_context, model, check):
     from tools.context import CURRENT_CONTEXT, REPLY_REVIEWER
 
     voice = conversation_style_guard(memory_context)
-    user_text = CURRENT_CONTEXT.get().user_text
+    context = CURRENT_CONTEXT.get()
+    user_text = context.user_text
+    previous_user_text = ""
+    # Only the immediately preceding human turn from this conversation can
+    # establish that the speaker was discussing wording or playing a word game.
+    envelope = memory_context.get("envelope") or {}
+    previous = next((row for row in reversed(memory_context.get("working") or [])
+                     if row.get("role") != ROLE_ASSISTANT), {})
+    if (user_text and not context.autonomous and previous.get("role") == "user"
+            and envelope.get("actor_id") and previous.get("actor_id") == envelope["actor_id"]
+            and envelope.get("conversation_id")
+            and previous.get("conversation_id", envelope["conversation_id"]) == envelope["conversation_id"]
+            and isinstance(envelope.get("timestamp"), (int, float)) and isinstance(previous.get("ts"), (int, float))
+            and 0 <= envelope["timestamp"] - previous["ts"] <= 300):
+        previous_user_text = str(previous.get("content") or "")[:160]
 
     def before_request():
         reason = check()
@@ -517,7 +531,7 @@ def review_conversation_replies(memory_context, model, check):
     # payload to the gateway. The cache dies with this turn.
     @lru_cache(maxsize=64)
     def review(text):
-        return polish_reply(text, user_text=user_text, voice=voice,
+        return polish_reply(text, user_text=user_text, voice=voice, previous_user_text=previous_user_text,
                             complete=getattr(model, "complete_text", None), before_request=before_request)
 
     token = REPLY_REVIEWER.set(review)

@@ -249,7 +249,8 @@ class AssociationStore:
             roots.update("experience:" + sid for kind, sid in dependencies if kind == "experience")
         return roots or {f"memory:{memory['id']}"}
 
-    def _upsert(self, scope, source_type, source_ref, memory_id, message_ids, family, prior=.5, background=False):
+    def _upsert(self, scope, source_type, source_ref, memory_id, message_ids, family, prior=.5, background=False,
+                available_at=None):
         node_id = "n:" + digest([scope, source_type, source_ref])[:32]
         old = self.get(node_id)
         prototype = dict(id=node_id, scope=scope, source_type=source_type, source_ref=source_ref,
@@ -284,6 +285,8 @@ class AssociationStore:
             previous = self.for_message(mid)
             if previous and previous["id"] != node_id:
                 self.conn.execute("UPDATE association_nodes SET superseded=1 WHERE id=?", (previous["id"],))
+                self.conn.execute("UPDATE jobs SET status='done',updated_at=? WHERE dedupe_key=? AND status='pending'",
+                                  (self.repo.clock(), f"associate:{previous['id']}:{previous['revision']}"))
                 self.invalidate(previous["id"])
                 for residual in set(previous["message_ids"]) - set(message_ids):
                     self.conn.execute("DELETE FROM association_message_nodes WHERE message_id=? AND node_id=?",
@@ -301,12 +304,12 @@ class AssociationStore:
         if self.settings.associations_enabled and not awaiting_summary:
             self.repo.enqueue_job(JOB_ASSOCIATE, scope, {"node_id": node_id, "revision": revision,
                                                        "background": background},
-                                  f"associate:{node_id}:{revision}")
+                                  f"associate:{node_id}:{revision}", available_at=available_at)
         elif not self.settings.associations_enabled:
             self.conn.execute("UPDATE association_nodes SET ready=1 WHERE id=?", (node_id,))
         return self.get(node_id)
 
-    def register_raw(self, messages, source_ref=None, background=False):
+    def register_raw(self, messages, source_ref=None, background=False, *, available_at=None):
         if not messages:
             return None
         scopes = {m["scope"] for m in messages}
@@ -321,7 +324,7 @@ class AssociationStore:
                     self.conn.execute("UPDATE messages SET day_key=? WHERE id=?", (first_day, message["id"]))
         ids = sorted({m["id"] for m in messages})
         return self._upsert(messages[0]["scope"], "raw", source_ref or f"message:{ids[0]}",
-                            None, ids, {f"message:{i}" for i in ids}, background=background)
+                            None, ids, {f"message:{i}" for i in ids}, background=background, available_at=available_at)
 
     def register_memory(self, memory_id, background=False):
         memory = self.repo.get_memory(memory_id)

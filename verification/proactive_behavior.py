@@ -653,8 +653,11 @@ class QQTests(unittest.TestCase):
         scheduler.tick()
         appraisal.assert_called_once()
         with self.store.connection() as db:
-            self.assertEqual(db.execute("SELECT status FROM proactive_runs").fetchone()[0], "skipped")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM proactive_runs").fetchone()[0], 0)
         self.assertEqual(len(scheduler.policies), 1)
+        state = next(iter(scheduler.policies.values())).state
+        self.assertFalse(state.intention_queue)
+        self.assertEqual(state.last_decision["status"], "cancelled")
 
     def test_scheduler_followup_queues_after_reply_and_reaches_execution(self):
         now = time.time()

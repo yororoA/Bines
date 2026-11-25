@@ -84,8 +84,56 @@ class ProactiveObservabilityTest(unittest.TestCase):
                             for line in captured.output))
         waits = [line for line in captured.output if "等待下次意图生成" in line]
         self.assertEqual(len(waits), 1)
+        self.assertNotIn("刚说完", waits[0])
+
+    def test_completed_late_message_during_decision_discards_stale_quiet(self):
+        def quiet(materials, state, now, **kwargs):
+            self.store.ingest({**self.event, "message_id": 102, "time": self.event["time"] - 1})
+            with self.store.connection() as db:
+                db.execute("UPDATE events SET status='done'")
+            state.last_decision = {"status": "quiet", "reason": "他还没回",
+                                   "delay_seconds": 900, "wait_scope": "all", "at": now}
+        scheduler = self.scheduler(quiet)
+        with self.assertLogs("bines.qq.proactive", level="INFO") as captured:
+            scheduler.tick()
+        saved, _ = self.store.proactive_state(self.identity.conversation)
+        self.assertEqual(saved["last_decision"]["status"], "cancelled")
+        self.assertEqual(saved["last_decision"]["cancellation_reason"], "new_user_message")
+        self.assertEqual(saved["intention_wait_until"], 0)
+        self.assertEqual(saved["next_intention_at"], self.fx.clock() + self.config.decision_interval)
+        self.assertFalse(any("他还没回" in line for line in captured.output))
+
+    def test_message_during_appraisal_discards_appraisal_and_skips_decision(self):
+        def appraise(materials, state, now):
+            # A delayed inbound event may still be pending behind a newer source timestamp.
+            self.store.ingest({**self.event, "message_id": 102, "time": self.event["time"] - 1})
+            return {"emotion": {"valence": 1}, "interests": ["旧话题"]}
+        decide = Mock()
+        scheduler = self.scheduler(decide)
+        scheduler.appraise = appraise
+        scheduler.tick()
+        decide.assert_not_called()
+        saved, _ = self.store.proactive_state(self.identity.conversation)
+        self.assertEqual(saved["last_decision"]["cancellation_reason"], "incoming_message")
+        self.assertEqual(saved["history_ref"], "")
+        self.assertNotIn("旧话题", saved["interests"])
+
+    def test_other_chat_and_own_message_receipts_do_not_cancel_decision(self):
+        def quiet(materials, state, now, **kwargs):
+            self.store.ingest({**self.event, "message_id": 102, "user_id": 2})
+            self.store.ingest({**self.event, "message_id": 103, "user_id": 99, "target_id": 1})
+            with self.store.connection() as db:
+                db.execute("UPDATE events SET status='done'")
+            state.last_decision = {"status": "quiet", "reason": "先歇会",
+                                   "delay_seconds": 900, "wait_scope": "all", "at": now}
+        scheduler = self.scheduler(quiet)
+        scheduler.tick()
+        saved, _ = self.store.proactive_state(self.identity.conversation)
+        self.assertEqual(saved["last_decision"]["status"], "quiet")
+        self.assertEqual(saved["intention_wait_until"], self.fx.clock() + 900)
 
     def test_restart_reports_persisted_wait_without_calling_decision_provider(self):
+        self.config = ProactiveConfig(startup_grace=0, quiet_start=0, quiet_end=0)
         decide = Mock()
         scheduler = self.scheduler(decide)
         policy = scheduler.policies[self.identity.conversation]
@@ -100,6 +148,15 @@ class ProactiveObservabilityTest(unittest.TestCase):
         decide.assert_not_called()
         self.assertTrue(any("自主整体休息" in line and "上一轮选择等待" in line
                             for line in captured.output))
+        self.store.ingest({**self.event, "message_id": 102, "time": self.fx.clock()})
+        with self.assertLogs("bines.qq.proactive", level="INFO") as changed:
+            scheduler.tick()
+            with self.store.connection() as db:
+                db.execute("UPDATE events SET status='done'")
+            scheduler.tick()
+        decide.assert_not_called()
+        self.assertTrue(any("等待下次意图生成" in line for line in changed.output))
+        self.assertFalse(any("上一轮选择等待" in line for line in changed.output))
 
     def test_selected_intent_reports_goal_and_forwards_samples_to_deliberation(self):
         decision = {"kind": "curiosity", "topic": "同一个地方的碰面",
