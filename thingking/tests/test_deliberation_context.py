@@ -143,6 +143,36 @@ class DeliberationContextTests(unittest.TestCase):
         constrained = _fit_section("recent_outcomes", rows, 400, ContextTokenCounter(), newest=True)
         self.assertEqual(json.loads(constrained["content"].splitlines()[1]), {"records": [], "omitted": 2})
 
+    def test_decision_separates_completed_plans_and_live_goals(self):
+        data = self.data()
+        data["recent_outcomes"] = [{"kind": "curiosity", "outcome": "completed", "activity_mode": "finish",
+                                    "topic": "旧书图例", "intent": "先用工具翻旧索引再换词重查", "result": "那张图缺了右半边"},
+                                   {"kind": "initiative", "outcome": "completed", "topic": "送票",
+                                    "intent": "给小张送周五的票", "result": "送到了"}]
+        data["previous_topics"] = ["更早的旧书书单", "旧书图例", "更早的旧书书单"]
+        data["context"].update(
+            ongoing_intention={"kind": "curiosity", "topic": "新书", "intent": "看看封面上的鸟"},
+            queued_intentions=[{"kind": "initiative", "topic": "画画", "intent": "试试新画笔",
+                                "reason": "模型上回写的一串缘由", "created_at": 80}],
+        )
+        original = copy.deepcopy(data)
+        sections = {m["content"].splitlines()[0]: json.loads(m["content"].splitlines()[1])
+                    for m in self.request(data) if m["content"].startswith("<deliberation_")}
+        current = sections["<deliberation_current>"]
+        self.assertNotIn("previous_topics", current)
+        self.assertEqual(current["ongoing_intention"]["intent"], "看看封面上的鸟")
+        self.assertEqual(current["queued_intentions"], [{"kind": "initiative", "topic": "画画",
+                                                         "intent": "试试新画笔", "created_at": 80}])
+        self.assertFalse(current["owner_contact_allowed"])
+        self.assertEqual(sections["<deliberation_recent_outcomes>"]["records"], [
+            {"previous_topic": "更早的旧书书单"},
+            {"kind": "curiosity", "outcome": "completed", "activity_mode": "finish", "topic": "旧书图例",
+             "result": "那张图缺了右半边"},
+            {"kind": "initiative", "outcome": "completed", "topic": "送票",
+             "intent": "给小张送周五的票", "result": "送到了"},
+        ])
+        self.assertEqual(data, original)
+
     def test_source_budget_keeps_body_evidence_and_required_current_state(self):
         from common.context_budget import ContextTokenCounter
         data = self.data()

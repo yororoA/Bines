@@ -162,6 +162,12 @@ def brief(persona: Dict[str, Any] | None = None) -> str:
             + p.get("proactive", {}).get("expression_learning", ""))
 
 
+def intention_voice(persona: Dict[str, Any] | None = None) -> str:
+    """How Bines words a private note about a choice."""
+    p = persona or load_persona()
+    return p.get("proactive", {}).get("intention_voice") or _bullets(p.get("speech_style") or [])
+
+
 def relationship_mood(level: str, persona: Dict[str, Any] | None = None) -> str:
     p = persona or load_persona()
     mood = p["proactive"]["relationship_moods"].get(level)
@@ -214,6 +220,10 @@ def render_markdown(persona: Dict[str, Any] | None = None) -> str:
         f"日常穿着：{p['appearance']['outfits']['daily']}",
         f"居家状态：{p['appearance']['outfits']['home']}",
         _bullets(p["personality"]["quirks"]),
+        "",
+        "## 自主取舍的口吻",
+        "",
+        intention_voice(p),
         "",
         "## 对话关系口吻（按当前会话的好感度）",
         "",

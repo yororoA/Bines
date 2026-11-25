@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
 from common.proactive import (
     ProactiveConfig, ProactivePolicy, capability_summary, contact_boundary, context_blocked,
-    human_ref, inspect_decision, parse_appraisal, parse_decision,
+    draft_decision, human_ref, inspect_decision, parse_appraisal, parse_decision,
 )
 from chatBot.proactive import QQProactive, guard
 from verification.napcat_integration import Integration, event
@@ -382,6 +382,29 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual((quiet["status"], quiet["delay_seconds"]), ("quiet", 900))
         self.assertEqual(inspect_decision("bad")["status"], "invalid")
         self.assertEqual(inspect_decision(json.dumps({"should_act": True, **intention()}))["status"], "selected")
+
+    def test_ordinary_review_can_stay_empty_without_extending_an_existing_wait(self):
+        self.policy.defer_generation(self.now, 900, wait_scope="contact")
+        model = Mock()
+        model.complete_text.return_value = '{"should_act":false,"wait_scope":"review","reason":"","delay_seconds":60}'
+        context = self.policy.contact_permissions(self.now, self.user)
+        decision = draft_decision(context, self.policy.state, self.now, allowed_kinds=["curiosity"], model=model)
+        self.assertIsNone(self.policy.record_decision(decision, self.now))
+        note = self.policy.state.last_decision
+        self.assertEqual((note["status"], note["wait_scope"], note["reason"]), ("quiet", "review", ""))
+        self.policy.defer_generation(self.now, note["delay_seconds"], wait_scope=note["wait_scope"])
+        self.assertEqual(self.policy.state.contact_wait_until, self.now + 900)
+        self.assertEqual(self.policy.state.intention_wait_until, 0)
+        model.complete_text.assert_called_once()
+
+    def test_specific_notes_survive_for_every_wait_and_remain_required_for_actions(self):
+        for scope in ("review", "all", "contact"):
+            note = inspect_decision(json.dumps({"should_act": False, "wait_scope": scope, "reason": "有点困了"}))
+            self.assertEqual(note["reason"], "有点困了")
+        self.assertEqual(inspect_decision('{"should_act":false}')["reason"], "")
+        self.assertEqual(inspect_decision('{"should_act":false,"reason":["旧情况"]}')["status"], "invalid")
+        self.assertEqual(inspect_decision(json.dumps({**intention(), "should_act": True, "reason": ""}))["status"],
+                         "invalid")
 
     def test_model_changed_focus_updates_feedback_interest_and_appraisal(self):
         self.policy.appraise({"emotion": {"valence": 0, "arousal": .5, "social": .5, "curiosity": .5},

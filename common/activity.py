@@ -94,6 +94,27 @@ def activity_checkpoint(candidate, control, outcomes, text=""):
     }
 
 
+def activity_prompt_view(activity):
+    """Show a checkpoint's observations and previous choice without repeating its wording."""
+    view = dict(activity)
+    decision = view.get("decision")
+    if isinstance(decision, dict):
+        # The stored decision has its own mode and can predate the checkpoint.
+        # Keep differences so an unfinished goal or an earlier choice is still visible.
+        unique = dict(decision)
+        for key, value in decision.items():
+            stored_key = "intent" if key == "next_intent" else key
+            if stored_key in view and value == view[stored_key]:
+                del unique[key]
+        if unique:
+            view["decision"] = unique
+        else:
+            view.pop("decision")
+    if "reason" in view and view["reason"] == view.get("note"):
+        del view["reason"]
+    return view
+
+
 def ongoing_request(text):
     """Fallback for a direct ongoing request when the model gave no activity decision."""
     for clause in reversed(re.split(r"[，。！？；,;!?\n]+", str(text or ""))):

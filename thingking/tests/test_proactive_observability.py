@@ -69,6 +69,14 @@ class ProactiveObservabilityTest(unittest.TestCase):
         )
         return scheduler
 
+    def test_review_without_a_note_logs_only_choice_and_next_check(self):
+        scheduler = self.scheduler(Mock())
+        policy = scheduler.policies[self.identity.conversation]
+        policy.state.last_decision = {"status": "quiet", "wait_scope": "review", "reason": ""}
+        with self.assertLogs("bines.qq.proactive", level="INFO") as captured:
+            scheduler._log_decision(policy, None)
+        self.assertIn("自主意图取舍 · 选择等待 · 下次", captured.records[0].getMessage())
+
     def test_quiet_choice_reports_reason_next_time_and_does_not_log_each_tick(self):
         def quiet(materials, state, now, **kwargs):
             state.last_decision = {"status": "quiet", "reason": "刚说完，先等一会",

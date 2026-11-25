@@ -196,9 +196,16 @@ class PersonaInterestBalanceTests(unittest.TestCase):
 
     def test_activity_review_can_finish_a_satisfied_question(self):
         from common.activity_deliberation import choose_activity
+        from persona_profile import intention_voice
         from tools.context import ToolContext, tool_context
         candidate = self.candidate()
-        candidate["activity"] = {"mode": "review", "note": "合成问题已有可靠答案"}
+        note = "合成问题已有可靠答案"
+        candidate["activity"] = {
+            "mode": "review", "note": note, "reason": note, "intent": candidate["intent"],
+            "decision": {"mode": "pause", "reason": note, "next_intent": candidate["intent"], "interest_level": .2},
+            "observations": [{"action": "lookup", "status": "ok", "result": "两份原件一致"}],
+        }
+        snapshot = copy.deepcopy(candidate)
         model = CaptureModel({"mode": "finish", "reason": "疑问已解决，没有新的发现需要核查",
                               "topic": "合成观察主题", "next_intent": "",
                               "interest_level": .1, "delay_seconds": 0})
@@ -207,7 +214,13 @@ class PersonaInterestBalanceTests(unittest.TestCase):
         self.assertEqual(decision["mode"], "finish")
         self.assertEqual(decision["interest_level"], .1)
         text = "\n".join(m["content"] for m in model.requests[0])
-        self.assertIn("合成问题已有可靠答案", text)
+        self.assertEqual(text.count(note), 1)
+        self.assertIn(intention_voice(), text)
+        review = json.loads(model.requests[0][-1]["content"].split("\n", 1)[1])
+        self.assertEqual(review["previous_direction"], candidate["intent"])
+        self.assertEqual(review["previous_activity"]["decision"], {"mode": "pause", "interest_level": .2})
+        self.assertIn("两份原件一致", text)
+        self.assertEqual(candidate, snapshot)
         self.assertIn("不靠换关键词、换子题或改写目标", text)
         self.assertIn("不是工具执行成功率", text)
 

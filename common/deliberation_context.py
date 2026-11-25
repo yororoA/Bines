@@ -229,11 +229,16 @@ def _recent_outcome(row):
         # Topic, intention, timestamp and delivery status suffice for the next
         # contact decision. The actual message is available in conversation history.
         view.pop("result")
-    elif len(result) > 180:
-        query = " ".join(str(view.get(key) or "") for key in ("topic", "intent"))
-        spans = narrative_spans({"content": result}, query, limit=180)
-        view["result"] = " … ".join(spans)
-        view["presentation"] = "历史行动结果节选"
+    else:
+        if len(result) > 180:
+            query = " ".join(str(view.get(key) or "") for key in ("topic", "intent"))
+            spans = narrative_spans({"content": result}, query, limit=180)
+            view["result"] = " … ".join(spans)
+            view["presentation"] = "历史行动结果节选"
+        # A finished exploration already has a topic and an observed result.
+        # Its original tool-by-tool proposal need not be carried into the next decision.
+        if view.get("kind") == "curiosity" and view.get("topic") and result.strip():
+            view.pop("intent", None)
     return view
 
 
@@ -271,10 +276,20 @@ def build_deliberation_messages(system, data, *, max_output_tokens=4096):
     current = {key: context[key] for key in CURRENT_FIELDS if key in context}
     if current.get("state"):
         current["state"] = bounded_highlight_state(current["state"])
+    if isinstance(current.get("activity"), dict) and current["activity"]:
+        from common.activity import activity_prompt_view
+        current["activity"] = activity_prompt_view(current["activity"])
     current.update({key: copy.deepcopy(data[key]) for key in (
         "previous_emotion", "emotion", "willingness", "interests", "social_interests", "background_interests",
-        "previous_topics", "allowed_kinds",
+        "allowed_kinds",
     ) if key in data})
+    for name in ("ongoing_intention", "queued_intentions"):
+        # These are current work, previously lost when the scheduler's materials
+        # passed through this projection. Keep the goal without replaying its justification.
+        goals = [{k: row[k] for k in ("kind", "topic", "intent", "created_at") if k in row}
+                 for row in _rows(context.get(name)) if isinstance(row, dict) and row.get("intent")]
+        if goals:
+            current[name] = goals[0] if name == "ongoing_intention" else goals
     # Hash-keyed recent_intents is only a server-side duplicate guard. Outcomes
     # carry the actual goals/statuses once, so the evaluator can reason about them.
     outcomes = data.get("recent_outcomes", context.get("recent_outcomes", []))
@@ -283,6 +298,13 @@ def build_deliberation_messages(system, data, *, max_output_tokens=4096):
             or row.get("status") == "uncertain"
             or isinstance(row.get("result"), dict) and row["result"].get("status") == "uncertain")
     unresolved = [copy.deepcopy(row) for row in _rows(outcomes) if uncertain(row)]
+    outcome_topics = {row["topic"] for row in _rows(outcomes)
+                      if isinstance(row, dict) and isinstance(row.get("topic"), str)}
+    # A previous topic belongs with the action history. Avoid presenting it
+    # twice, especially in the required current-state section on every idle tick.
+    prior_topics = [{"previous_topic": topic} for topic in dict.fromkeys(
+        topic for topic in _rows(data.get("previous_topics")) if isinstance(topic, str) and topic
+    ) if topic not in outcome_topics]
     if unresolved:
         # Unknown write outcomes must never disappear because a history section
         # is full. Keep their actual goal and receipt once, in the required tail.
@@ -293,7 +315,7 @@ def build_deliberation_messages(system, data, *, max_output_tokens=4096):
         ("bridge", [project_source(row) for row in _rows(context.get("bridge"))], .10, False),
         ("memories", [project_source(row) for row in _rows(context.get("memories"))], .30, False),
         ("recent", [project_source(row) for row in _rows(context.get("recent"))], .30, True),
-        ("recent_outcomes", [_recent_outcome(row) for row in _rows(outcomes) if not uncertain(row)], .15, True),
+        ("recent_outcomes", prior_topics + [_recent_outcome(row) for row in _rows(outcomes) if not uncertain(row)], .15, True),
     ]
     from memory.expression_learning import render_expression_notes
     notes = render_expression_notes(context.get("expression_notes") or [], include_samples=True)

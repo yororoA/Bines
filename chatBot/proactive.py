@@ -244,8 +244,9 @@ class QQProactive:
                      _log_text(result.get("reason")), self._clock_text(
                          policy.state.next_intention_at or policy.state.next_decision))
             return
-        log.info("自主意图取舍 · %s · %s · 下次 %s", label,
-                 _log_text(result.get("reason")), self._clock_text(
+        reason = _log_text(result.get("reason"))
+        log.info("自主意图取舍 · %s%s · 下次 %s", label,
+                 f" · {reason}" if reason else "", self._clock_text(
                      policy.state.next_intention_at or policy.state.next_decision))
 
     def save(self, conversation, policy):
