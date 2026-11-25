@@ -73,6 +73,42 @@ class DiaryMaterialBalanceTest(unittest.TestCase):
         self.assertGreater(packed["material_selection"]["presented_activity_groups"], 0)
         self.assertLessEqual(packed["material_selection"]["selected_bytes"], 4000)
 
+    def test_turn_reflection_does_not_feed_the_next_diary(self):
+        turn = self.experience(1, status="skipped")
+        turn["meta"]["action"] = "autonomous_turn"
+        turn["content"] = "这条生成的长篇反思不应被日记用作材料"
+        result = select_materials(self.repo, [turn], "owner", self.day)
+        shown = "\n".join(result["episodes"])
+        self.assertIn(turn["id"], shown)
+        self.assertIn("autonomous_turn", shown)
+        self.assertIn("skipped", shown)
+        self.assertNotIn(turn["content"], shown)
+
+    def test_real_observation_between_two_turns_survives_grouping(self):
+        start, observation, end = [self.experience(i) for i in range(3)]
+        for turn, status in ((start, "completed"), (end, "failed")):
+            turn["meta"].update(action="autonomous_turn", status=status)
+            turn["content"] = "此前轮次的机器口吻"
+        observation["content"] = "湖边的桥今天开放"
+        result = select_materials(self.repo, [start, observation, end], "owner", self.day, budget=4000)
+        shown = "\n".join(result["episodes"])
+        self.assertIn(observation["content"], shown)
+        self.assertIn("failed", shown)
+        self.assertNotIn(start["content"], shown)
+
+    def test_diary_writer_keeps_grounded_summary_and_literal_reply_fragments(self):
+        episode = self.episode("路上坐了车。" * 80 + "周末看电影要带票。")
+        assistant_id = episode["meta"]["source_message_ids"][-1]
+        self.repo.conn.execute("UPDATE messages SET content=? WHERE id=?",
+                               ("你说得对。影院周六下午三点开门。", assistant_id))
+        result = select_materials(self.repo, [episode], "owner", self.day)
+        shown = "\n".join(result["episodes"] + result["interaction_evidence"])
+        self.assertIn("周末看电影要带票。", shown)
+        self.assertIn("影院周六下午三点开门。", shown)
+        self.assertIn("我今天其实有点委屈", shown)
+        self.assertNotIn("你说得对", shown)
+        self.assertNotIn(episode["content"], shown)
+
     def test_raw_evidence_is_same_scope_same_day_and_active(self):
         episode = self.episode()
         foreign = self.repo.add_message("local", "qq_group:other", "user", "FOREIGN_SECRET", self.ts,

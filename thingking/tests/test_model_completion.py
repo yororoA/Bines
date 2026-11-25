@@ -33,6 +33,48 @@ def model_with_responses(*responses):
 
 
 class ModelCompletionTest(unittest.TestCase):
+    def test_prior_reasoning_is_omitted_but_original_history_is_preserved(self):
+        from agents import _clean_legacy_messages
+        history = [{"role": "user", "content": "上一个话题"},
+                   {"role": "assistant", "content": "周五", "reasoning_content": "旧轮内部推理"},
+                   {"role": "user", "content": "那几点？"}]
+        model = model_with_responses(response("三点"))
+        runner = Mock()
+        runner.instructions_for_source.return_value = "规则"
+        runner.function_tools.return_value = []
+        model.run_tool_calls(history, runner)
+        for items in (_clean_legacy_messages(history), model.client.chat.completions.create.call_args.kwargs["messages"]):
+            self.assertIn({"role": "assistant", "content": "周五"}, items)
+        self.assertEqual(history[1]["reasoning_content"], "旧轮内部推理")
+
+    def test_quiet_end_in_batch_preserves_sibling_tool(self):
+        def call(action):
+            data = {"id": action, "type": "function", "function": {"name": action, "arguments": "{}"}}
+            return SimpleNamespace(id=action, function=SimpleNamespace(**data["function"]),
+                                   model_dump=lambda **_: data)
+        model = model_with_responses(response(finish_reason="tool_calls",
+                                              tool_calls=[call("end_without_reply"), call("read")]),
+                                     response("三点"))
+        runner = Mock()
+        runner.action_to_skill = {"end_without_reply": "qq_turn", "read": "local"}
+        runner.instructions_for_source.return_value = "规则"
+        runner.function_tools.return_value = []
+        runner.execute.return_value = "三点"
+        model.run_tool_calls([{"role": "user", "content": "看下时间"}], runner)
+        runner.execute.assert_called_once_with({"skill": "local", "action": "read", "args": {}},
+                                               source="QQ", allowed_skills=None)
+        last_request = model.client.chat.completions.create.call_args.kwargs["messages"]
+        self.assertIn("单独调用", next(m["content"] for m in last_request if m.get("tool_call_id") == "end_without_reply"))
+
+    def test_empty_qq_response_without_control_call_remains_a_failure(self):
+        model = model_with_responses(response(finish_reason="stop"))
+        runner = Mock()
+        runner.instructions_for_source.return_value = "规则"
+        runner.function_tools.return_value = []
+        with self.assertRaises(ModelCompletionError):
+            model.run_tool_calls([{"role": "user", "content": "几点集合？"}], runner)
+        runner.execute.assert_not_called()
+
     def test_text_tool_continuation_uses_actual_bounded_request(self):
         model = model_with_responses(response("工具指令"), response("已完成"))
         runner = Mock()

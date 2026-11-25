@@ -47,8 +47,8 @@ class GatewayClient:
     def raw_api(self, action, params=None, timeout=30, operation_id=None):
         from tools.context import CURRENT_CONTEXT, REPLY_REVIEWER
         from chatBot.capabilities import is_read
-        from chatBot.messages import compact_qq_send_params, review_qq_send_params
-        from chatBot.recipients import send_action
+        from chatBot.messages import FORWARD_ACTIONS, compact_qq_send_params, review_qq_send_params
+        from chatBot.recipients import destinations, send_action
         from common.proactive import owner_contact
         # Receipts must contain the same compact text the gateway dispatches.
         canonical_send = send_action(action)
@@ -73,8 +73,17 @@ class GatewayClient:
             if any((item.get("result") or {}).get("status") == "uncertain" for item in context.receipts):
                 raise RuntimeError("本轮已有不确定写操作；先核查原回执，禁止继续发送或重试")
             review = REPLY_REVIEWER.get()
-            if review is not None and canonical_send:
-                params = review_qq_send_params(canonical_send, params, review)
+            identity = context.identity
+            if review is not None and not identity.local and canonical_send and canonical_send not in FORWARD_ACTIONS:
+                # This reviewer knows the current speaker, their request, and this
+                # conversation's relationship. None of that belongs in another chat.
+                peer = ("group", identity.group) if identity.group else ("private", identity.user)
+                try:
+                    targets = destinations(canonical_send, params)
+                except (ValueError, TypeError):
+                    targets = []  # Leave validation of a malformed destination to the gateway.
+                if targets == [peer]:
+                    params = review_qq_send_params(canonical_send, params, review)
             if operation_id is None:
                 index = len(context.receipts)
                 operation_id = f"{context.turn_id}:tool:{index}" if context.turn_id else str(uuid.uuid4())

@@ -859,10 +859,9 @@ class ThinkingTurnTests(unittest.TestCase):
                          ["先确认现在的时间", "再查一下可用的资料"])
         self.assertEqual([msg["tool_call_id"] for msg in requests[-1] if msg["role"] == "tool"],
                          ["time", "search"])
-        self.assertTrue(any(msg["role"] == "assistant"
-                            and "好呀" in str(msg.get("content") or "") for msg in requests[0]))
-        self.assertFalse(any("historical_assistant_message" in str(msg.get("content") or "")
-                             for msg in requests[0]))
+        self.assertFalse(any(msg["role"] == "assistant" for msg in requests[0]))
+        history = next(msg["content"] for msg in requests[0] if msg["content"].startswith("历史发言记录"))
+        self.assertEqual(json.loads(history.split("\n", 1)[1])["content"], "好呀")
 
 
 if __name__ == "__main__":

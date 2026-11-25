@@ -26,6 +26,7 @@ def _clean_legacy_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
     cleaned = []
     for original in messages or []:
         message = dict(original)
+        message.pop("reasoning_content", None)
         if message.get("role") == "assistant" and message.get("tool_calls"):
             message.pop("tool_calls", None)
             if not message.get("content"):
@@ -51,8 +52,7 @@ class MainAgent:
         self.skill_instructions = instructions or ""
 
     def get_system_prompt(self) -> str:
-        base = """理解用户意图并按随后给出的角色设定自然回应。
-- 用户问过去的对话、记忆或聊天记录时，先从已提供的上下文中回答，不要调用屏幕或浏览器动作。
+        base = """用户问过去的对话、记忆或聊天记录时，先从已提供的上下文中回答，不要调用屏幕或浏览器动作。
 - 用户明确要求实际操作时，必须使用已启用的本地技能；不要编造执行结果。
 - 不输出括号内的动作描述。若无需回复则保持空内容。
 """

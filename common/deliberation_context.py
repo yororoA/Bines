@@ -11,6 +11,10 @@ import os
 
 from common.context_budget import ContextTokenCounter, context_limit, diagnostic
 from common.memory_highlights import bounded_highlight_state
+from common.memory_presentation import (
+    diary_witnesses, grouped_message_offset, hide_turn_prose, history_wording,
+    is_firsthand_experience, narrative_spans,
+)
 
 
 SOURCE_FIELDS = (
@@ -59,18 +63,45 @@ def project_source(row):
         return {"content": str(row)}
     projected = {key: copy.deepcopy(row[key]) for key in SOURCE_FIELDS if row.get(key) is not None}
     content = row.get("content")
+    kind = row.get("kind")
+    narrative = kind in {"diary", "episode"}
+    primary = next((ev for ev in row.get("evidence") or [] if isinstance(ev, dict)), {})
     if isinstance(content, str):
+        if hide_turn_prose(row):
+            projected["content"] = ""
+            projected["presentation"] = "历史行动索引"
+        elif narrative:
+            spans = narrative_spans(row)
+            projected["content"] = " … ".join(spans)
+            if projected["content"] != content:
+                projected["presentation"] = "历史叙述节选" if spans else "日记来源索引"
+        elif grouped_message_offset(row, primary) is not None:
+            # A transcript contains several speakers. The ranked evidence
+            # below renders each speaker separately with their own attribution.
+            projected["content"] = ""
+        elif row.get("role") == "assistant" or (kind == "message" and primary.get("role") == "assistant"):
+            projected["content"], _ = history_wording(content, verbatim=False)
         projected["_matched_spans"] = [span for span in row.get("matched_spans") or []
-                                       if isinstance(span, str) and span and span in content]
+                                       if isinstance(span, str) and span and span in projected["content"]]
     meta = row.get("meta")
     if isinstance(meta, dict):
         visible = {key: copy.deepcopy(meta[key]) for key in META_FIELDS if key in meta}
         if visible:
             projected["meta"] = visible
     evidence = []
-    for item in row.get("evidence") or []:
+    sources = diary_witnesses(row)[:2] if kind == "diary" else row.get("evidence") or []
+    for item in sources:
         if isinstance(item, dict):
-            evidence.append({key: copy.deepcopy(item[key]) for key in EVIDENCE_FIELDS if item.get(key) is not None})
+            source = {key: copy.deepcopy(item[key]) for key in EVIDENCE_FIELDS if item.get(key) is not None}
+            if isinstance(source.get("content"), str):
+                if ((narrative and source.get("source_type") in {"summary", "legacy_memory"}) or
+                        (source.get("source_type") == "experience" and not is_firsthand_experience(source))):
+                    # Keep provenance and event status without importing the model's own narration.
+                    source.pop("content")
+                    source.pop("args", None)
+                elif source.get("role") == "assistant":
+                    source["content"], _ = history_wording(source["content"], verbatim=False)
+            evidence.append(source)
         elif isinstance(item, str):
             evidence.append({"content": item})
     if evidence:
@@ -160,8 +191,12 @@ def _fit_section(name, rows, budget, counter, *, newest=False):
     if cost(full) <= budget:
         return full
     while selected:
-        minimum = render(96)
+        # Outcome prose is already bounded. Retain complete receipts and
+        # unfinished checkpoints, or report an omitted card if they cannot fit.
+        minimum = render(None if name == "recent_outcomes" else 96)
         if cost(minimum) <= budget:
+            if name == "recent_outcomes":
+                return minimum
             low, high = 96, max(96, budget)
             while low < high:
                 mid = (low + high + 1) // 2
@@ -180,6 +215,26 @@ def _rows(value):
     if isinstance(value, list):
         return value
     return [value] if value else []
+
+
+def _recent_outcome(row):
+    view = copy.deepcopy(row)
+    if not isinstance(view, dict):
+        return {"result": view}
+    result = view.get("result")
+    if (view.get("outcome") not in {"completed", "sent"} or view.get("activity_mode", "finish") != "finish"
+            or not isinstance(result, str)):
+        return view
+    if view.get("kind") == "connection":
+        # Topic, intention, timestamp and delivery status suffice for the next
+        # contact decision. The actual message is available in conversation history.
+        view.pop("result")
+    elif len(result) > 180:
+        query = " ".join(str(view.get(key) or "") for key in ("topic", "intent"))
+        spans = narrative_spans({"content": result}, query, limit=180)
+        view["result"] = " … ".join(spans)
+        view["presentation"] = "历史行动结果节选"
+    return view
 
 
 def build_deliberation_messages(system, data, *, max_output_tokens=4096):
@@ -238,7 +293,7 @@ def build_deliberation_messages(system, data, *, max_output_tokens=4096):
         ("bridge", [project_source(row) for row in _rows(context.get("bridge"))], .10, False),
         ("memories", [project_source(row) for row in _rows(context.get("memories"))], .30, False),
         ("recent", [project_source(row) for row in _rows(context.get("recent"))], .30, True),
-        ("recent_outcomes", [copy.deepcopy(row) for row in _rows(outcomes) if not uncertain(row)], .15, True),
+        ("recent_outcomes", [_recent_outcome(row) for row in _rows(outcomes) if not uncertain(row)], .15, True),
     ]
     from memory.expression_learning import render_expression_notes
     notes = render_expression_notes(context.get("expression_notes") or [], include_samples=True)

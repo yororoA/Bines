@@ -18,6 +18,15 @@ class ExpressionCorpusTest(unittest.TestCase):
         self.addCleanup(self.fx.close)
         self.path = Path(__file__).resolve().parent / "fixtures" / "lccc_samples.jsonl"
 
+    def test_public_sample_supplies_the_expression_even_when_its_tag_is_wrong(self):
+        row = {"technique": "understated_pride", "situation": "praised"}
+        examples = [{**row, "sample": "如果您还有其他问题，欢迎随时联系我"},
+                    {**row, "sample": "你也觉得香吗", "context": "甲: 刚开了一罐芝麻酱 乙: 你也觉得香吗"}]
+        rendered = render_expression_notes(examples, include_samples=True)
+        self.assertIn("你也觉得香吗", rendered)
+        self.assertNotIn("还有其他问题", rendered)
+        self.assertNotIn("得意可以", rendered)
+
     def test_corpus_is_source_backed_and_renders_real_samples(self):
         records = load_corpus(self.path)
         groups = grouped(records)

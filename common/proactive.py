@@ -825,7 +825,8 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
     import persona_profile
     result = inspect_decision(_complete(
         f"角色基础性格：{persona_profile.brief()}\n"
-        "这是可信自主意愿评估，没有新用户提问。结合意愿强度、时间、情绪、历史兴趣及行动结果，"
+        "这是可信自主意愿评估，没有新用户提问。我在 reason 里写此刻惦记的具体事情，没兴致也直说。"
+        "结合意愿强度、时间、情绪、历史兴趣及行动结果，"
         "决定现在是否真想做一件具体的事，也可以继续安静。生命状态包含真实昼夜阶段、精力、"
         "睡眠压力、当天经历和未完成目标。planning_only=true时可思考、整理记忆、选择休息或用regulate_life调整状态；"
         "本批不会执行浏览、联系或键鼠操作，恢复后再自主选择行动。"

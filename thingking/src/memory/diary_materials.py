@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 
+from common.memory_presentation import hide_turn_prose, history_wording, narrative_spans
 from .dependencies import direct_dependencies
 from .evidence import _active
 from .attribution import speaker
@@ -126,9 +127,16 @@ def _interactions(repo, episodes, scope, day):
             for message in pair:
                 corrections = _message_corrections(repo, message)
                 constraints.extend(corrections)
+                body = message["content"]
+                if message["role"] == "assistant" and not corrections:
+                    _, literals = history_wording(body, verbatim=False)
+                    if not literals:
+                        continue
+                    body = " … ".join(literals)
                 annotation = ("[已核验纠正，原话中的旧事实已失效：" + json.dumps(
                     [{"quote": c["quote"], "replacement": c["replacement"]} for c in corrections], ensure_ascii=False) + "]\n") if corrections else ""
-                pieces.append(annotation + f"[原话#{message['id']} {speaker(message)}] " + _excerpt(message["content"], 900))
+                limit = 480 if message["role"] == "assistant" and not corrections else 900
+                pieces.append(annotation + f"[原话#{message['id']} {speaker(message)}] " + _excerpt(body, limit))
             exchanges.append({"text": "\n".join(pieces), "messages": pair, "source_ids": [episode["id"]],
                               "corrections": constraints, "atomic": bool(constraints)})
     return exchanges
@@ -152,10 +160,14 @@ def _activities(repo, episodes):
         # uncertain receipts must not be silently rewritten as success.
         exceptional = [e for e in entries if e["meta"].get("status") in
                        {"failed", "uncertain", "interrupted", "skipped"}]
-        selected = {e["id"]: e for e in [entries[0], *exceptional[-2:], entries[-1]]}
-        selected = sorted(selected.values(), key=lambda e: (_stamp(e), e["id"]))
-        body = "\n".join(f"[经历 {e['id']}; 状态={e['meta'].get('status', 'unknown')}] "
-                         + _excerpt(e["content"], 1100) for e in selected)
+        observed = [e for e in entries if not hide_turn_prose(e)]
+        selected = {e["id"]: e for e in [entries[0], *observed[:1], *observed[-1:], *exceptional[-2:], entries[-1]]}
+        selected = sorted(selected.values(), key=lambda e: (hide_turn_prose(e), _stamp(e), e["id"]))
+        lines = []
+        for e in selected:
+            detail = e["meta"]["action"] if hide_turn_prose(e) else _excerpt(e["content"], 1100)
+            lines.append(f"[经历 {e['id']}; 状态={e['meta'].get('status', 'unknown')}] {detail}")
+        body = "\n".join(lines)
         rows.append({"text": "[同一活动的证据节选；状态覆盖="
                      + ",".join(sorted(statuses)) + "]\n" + body,
                      "source_ids": [e["id"] for e in selected], "all_source_ids": [e["id"] for e in entries],
@@ -171,9 +183,16 @@ def select_materials(repo, episodes, scope, day, *, budget=None):
                       and _active(e, "memory")), key=lambda e: (_stamp(e), e["id"]))
     conversations = [e for e in ordered if not e["meta"].get("experience_ref")]
     experiences = [e for e in ordered if e["meta"].get("experience_ref")]
-    summaries = [{"text": f"[当日对话摘要 {e['id']}] " + e["content"], "source_ids": [e["id"]]}
-                 for e in conversations]
     interactions = _interactions(repo, conversations, scope, day)
+    topics = defaultdict(list)
+    for exchange in interactions:
+        topics[exchange["source_ids"][0]].extend(m["content"][:160] for m in exchange["messages"] if m["role"] == "user")
+    summaries = []
+    for episode in conversations:
+        body = episode["content"]
+        if len(body) > 220:
+            body = " … ".join(narrative_spans(episode, " ".join(topics[episode["id"]])))
+        summaries.append({"text": f"[当日对话摘要 {episode['id']}] " + body, "source_ids": [episode["id"]]})
     activities = _activities(repo, experiences)
     if summaries or interactions:
         summary_rows = _fit(summaries, budget * 2 // 5, item_limit=3000)
@@ -191,7 +210,8 @@ def select_materials(repo, episodes, scope, day, *, budget=None):
         "interaction_evidence": [row["text"] for row in quote_rows],
         "participants": list(dict.fromkeys(speaker(m) for row in quote_rows for m in row["messages"])),
         "material_selection": {
-            "policy": POLICY, "budget_bytes": budget, "selected_bytes": text_bytes,
+            "policy": POLICY, "turn_result_policy": "action-status-only",
+            "budget_bytes": budget, "selected_bytes": text_bytes,
             "conversation_episodes": len(conversations), "experience_episodes": len(experiences),
             "activity_groups": len(activities), "presented_activity_groups": len(activity_rows),
             "presented_interactions": len(quote_rows),

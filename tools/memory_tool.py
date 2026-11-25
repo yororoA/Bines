@@ -35,6 +35,56 @@ def _snippet(text, query, counter, units):
     return best
 
 
+def _search_view(hit, query, turn_text, counter):
+    from common.memory_presentation import (
+        diary_witnesses, grouped_message_offset, hide_turn_prose, history_wording, narrative_original_spans,
+        narrative_spans, supported_evidence, wants_narrative_original, wants_turn_record, wants_verbatim,
+    )
+    source = hit["content"]
+    kind = hit["kind"]
+    quoted = wants_verbatim({"current_query": turn_text}) or bool((hit.get("meta") or {}).get("curated_quote"))
+    original = wants_narrative_original(turn_text, kind)
+    rows = (supported_evidence(hit, turn_text) if kind in {"episode", "diary", "semantic"}
+            else hit.get("evidence") or [])
+    # Vector/alias retrieval can locate a passage with no literal query match.
+    if hide_turn_prose(hit, turn_text):
+        selected = []
+    elif kind in {"episode", "diary"}:
+        selected = narrative_original_spans(hit, query, 700) if original else narrative_spans(hit, query)
+        if original:
+            rows = []
+        elif kind == "diary" and not quoted and not wants_turn_record(turn_text):
+            rows = diary_witnesses(hit)
+    else:
+        selected = [next((s for s in hit.get("matched_spans") or [] if isinstance(s, str) and s and s in source), source)]
+    spans = [_snippet(s, query, counter, 640) for s in selected]
+    span = spans[0] if spans else ""
+    shown = " … ".join(spans)
+    offset = hit.get("citation_offset", 0) + source.find(span)
+    evidence = []
+    for row in rows[:3]:
+        text = row.get("content") or ""
+        excerpt = _snippet(text, query, counter, 256)
+        display, literals = excerpt, [excerpt]
+        assistant = row.get("source_type") == "message" and row.get("role") == "assistant"
+        if assistant:
+            display, literals = history_wording(excerpt, verbatim=quoted)
+        if kind == "message" and not evidence:
+            speaker_offset = grouped_message_offset(hit, row)
+            if speaker_offset is not None:
+                # A grouped transcript can include unselected speakers and old
+                # replies. Show the ranked speaker, with its exact page offset.
+                offset = speaker_offset + text.index(excerpt)
+                shown, spans = display, []
+            elif assistant:
+                shown, spans = history_wording(span, verbatim=quoted)
+        evidence.append({key: row.get(key) for key in (
+            "source_type", "source_id", "source_ref", "role", "actor_id", "actor_name", "ts", "action", "status",
+        )} | {"content": display})
+        spans.extend(literals)
+    return shown, evidence, offset, [s for s in dict.fromkeys(spans) if s]
+
+
 def search_memory(query: str, k: int = 8):
     """检索有界主题片段；通过返回的citation_id调用read_memory_source分页展开。"""
     import json
@@ -42,23 +92,16 @@ def search_memory(query: str, k: int = 8):
     from tools.context import CURRENT_CONTEXT
     client, identity = _memory_client()
     k = max(1, min(int(k), 20))
-    mode = "explore" if CURRENT_CONTEXT.get().autonomous else "auto"
+    context = CURRENT_CONTEXT.get()
+    mode = "explore" if context.autonomous else "auto"
+    turn_text = "" if context.autonomous else context.user_text or query
     reply = client.search_with_trace(query, [identity.scope], k=k, retrieval_mode=mode)
     hits, trace = reply["hits"], reply.get("trace") or {}
     counter = ContextTokenCounter()
     budget = max(128, min(8192, context_limit() // 4))
     result, shown = [], []
     for hit in hits:
-        matched = [span for span in (hit.get("matched_spans") or [])
-                   if isinstance(span, str) and span and span in hit["content"]]
-        # Vector/alias retrieval can locate a passage without any literal query
-        # term in the original. Keep that located span instead of searching the
-        # whole source again and accidentally returning its unrelated opening.
-        span = _snippet(matched[0] if matched else hit["content"], query, counter, 640)
-        evidence = [{key: ev.get(key) for key in
-                     ("source_type", "source_id", "source_ref", "role", "actor_id", "actor_name", "ts", "action", "status")}
-                    | {"content": _snippet(ev.get("content") or "", query, counter, 256)}
-                    for ev in (hit.get("evidence") or [])[:3]]
+        span, evidence, offset, source_spans = _search_view(hit, query, turn_text, counter)
         associations = [{"id": row["id"], "reason": counter.prefix(str(row.get("reason") or ""), 160)}
                         for row in (hit.get("associations") or [])[:2]]
         candidate = {"id": hit["id"], "citation_id": hit.get("citation_id"),
@@ -66,10 +109,13 @@ def search_memory(query: str, k: int = 8):
                      "content": span, "kind": hit["kind"], "day_key": hit.get("day_key"),
                      "evidence": evidence, "corrections": hit.get("corrections") or [],
                      "is_excerpt": span != hit["content"],
-                     "expand": {"source_id": hit.get("citation_id"),
-                                "offset": hit.get("citation_offset", 0) + max(0, hit["content"].find(span))}}
+                     "expand": {"source_id": hit.get("citation_id"), "offset": offset}}
         if hit.get("temporal"):
             candidate["temporal"] = hit["temporal"]
+        meta = hit.get("meta") or {}
+        for field in ("action", "status"):
+            if value := hit.get(field) or meta.get(field):
+                candidate[field] = value
         if hit.get("retrieval_role") == "exploration":
             candidate["retrieval_role"] = "exploration"
             candidate["notice"] = "探索线索，须核验；不能当作当前问题的已确认事实"
@@ -77,12 +123,10 @@ def search_memory(query: str, k: int = 8):
         if counter.count(json.dumps([*result, candidate], ensure_ascii=False)) > budget:
             continue
         result.append(candidate)
-        shown.append((hit, candidate))
-    journal = CURRENT_CONTEXT.get().journal
-    if journal:
-        for hit, candidate in shown:
-            journal.present_memory({**hit, "chain_ids": candidate["chain_ids"]},
-                                   [candidate["content"], *[e["content"] for e in candidate["evidence"] if e["content"]]])
+        shown.append(({**hit, "chain_ids": candidate["chain_ids"]}, source_spans))
+    if context.journal:
+        for hit, source_spans in shown:
+            context.journal.present_memory(hit, source_spans)
     diagnostic("tool", {"action": "search_memory", "retrieval": trace, "candidates": len(hits),
                         "shown": len(result), "omitted": len(hits) - len(result), "limit": budget,
                         "input_units": counter.count(json.dumps(result, ensure_ascii=False)),

@@ -16,6 +16,10 @@ class TurnDeferred(RuntimeError):
     """A deliberate wait released its durable queue claim without a failure."""
 
 
+class EndWithoutReply(RuntimeError):
+    """The model chose to end this ordinary conversation turn without a message."""
+
+
 def human_input(event):
     return (event.get("post_type") == "message" and event.get("message_id") is not None
             and str(event.get("user_id") or "") not in {"", str(event.get("self_id") or "")})
@@ -158,12 +162,12 @@ class TurnWaits:
 
 
 class FollowupRunner:
-    """One runtime control tool on an ordinary QQ turn, without a separate model call."""
+    """Ordinary QQ turns can reply, wait for the rest of an input, or end quietly."""
     action = "wait_for_followup"
 
     def __init__(self, runner, waits, claims, check):
         self.runner, self.waits, self.claims, self.check = runner, waits, claims, check
-        self.action_to_skill = {**runner.action_to_skill, self.action: "qq_turn"}
+        self.action_to_skill = {**runner.action_to_skill, self.action: "qq_turn", "end_without_reply": "qq_turn"}
 
     def __getattr__(self, name):
         return getattr(self.runner, name)
@@ -178,16 +182,20 @@ class FollowupRunner:
                     "seconds": {"type": "number", "minimum": 1, "maximum": self.waits.step},
                     "reason": {"type": "string", "description": "哪一处真实输入还未完整"},
                 }, "required": ["seconds", "reason"], "additionalProperties": False},
+            }}, {"type": "function", "function": {
+                "name": "end_without_reply",
+                "description": "结束本轮，不发消息。对方说不用回或闲聊自然结束时可以单独调用。如果对方还交代了操作，先执行并核对结果。",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
             }}]
 
     def instructions_for_source(self, *args, **kwargs):
         rules = self.runner.instructions_for_source(*args, **kwargs)
         return rules + (
-            "\n本轮是已收到的连续输入。明确完整的内容正常回应，不统一拖延；"
+            "\n本轮是已收到的连续输入。具体问题直接回应。闲聊可以就此结束，决定不回时单独调用 end_without_reply。"
             "如果语义明显未完、对方说还要补充，可在任何工具动作和发送之前调用wait_for_followup。"
             "它只短等同一人接着输入，不是等待回复、猜测对方在打字或轮询；调用后本轮立即让出。"
             f"每次最多等{self.waits.step:g}秒，从首次输入起最多{self.waits.total:g}秒、最多{self.waits.requests}次。"
-            "本轮末尾提供剩余等待状态；没有后续或次数/窗口已用完就依据现有内容回应，不编造补充，不继续请求等待。"
+            "本轮末尾提供剩余等待状态；没有后续或次数/窗口用完时，根据现有内容决定要不要接话，不编造补充。"
         )
 
     def prompt_state(self):
@@ -208,6 +216,10 @@ class FollowupRunner:
         reason = self.check()
         if reason:
             raise RuntimeError(reason)
+        if command.get("action") == "end_without_reply":
+            if command.get("args") != {}:
+                return json.dumps({"status": "failed", "error": "结束本轮无需参数"}, ensure_ascii=False)
+            raise EndWithoutReply()
         if command.get("action") != self.action:
             return self.runner.execute(command, **kwargs)
         args = command.get("args")

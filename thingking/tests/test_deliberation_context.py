@@ -106,6 +106,43 @@ class DeliberationContextTests(unittest.TestCase):
                       '"planning_only":true', '"mode":"pause"', "waiting for login", "resting"):
             self.assertIn(value, text.replace(": ", ":"))
 
+    def test_finished_contacts_and_explorations_do_not_replay_full_reflections(self):
+        from common.proactive import ProactiveConfig, ProactivePolicy
+        policy = ProactivePolicy(100, ProactiveConfig())
+        chat = "这里是之前发出的整段问候。" * 40
+        finding = "观测记录里，燕鸥在清晨五点离巢。"
+        reflection = "整理一下今天的收获。" * 50 + finding + "期待下次还有机会继续探索。" * 40
+        for kind, topic, result in (("connection", "问候", chat), ("curiosity", "燕鸥离巢", reflection)):
+            policy.reserve({"kind": kind, "topic": topic, "intent": topic, "based_on_user": "turn-1", "id": kind})
+            policy.resolve(102, delivered=True, reflection=result,
+                           activity={"mode": "finish", "decision_source": "model",
+                                     "decision": {"interest_level": .7, "reason": "还有想确认的细节"}})
+        snapshot = copy.deepcopy(policy.state.recent_outcomes)
+        data = {**self.data(), "recent_outcomes": policy.state.recent_outcomes}
+        messages = self.request(data)
+        section = next(m["content"] for m in messages if m["content"].startswith("<deliberation_recent_outcomes>"))
+        contact, exploration = json.loads(section.splitlines()[1])["records"]
+        self.assertEqual(contact, {k: v for k, v in snapshot[0].items() if k != "result"})
+        self.assertNotIn(chat[:12], section)
+        self.assertIn(finding, exploration["result"])
+        self.assertLessEqual(len(exploration["result"]), 183)
+        self.assertEqual(exploration["interest_level"], .7)
+        self.assertEqual(policy.state.recent_outcomes, snapshot)
+        self.assertEqual(snapshot[0]["result"], chat)
+
+    def test_structured_receipts_and_unfinished_checkpoints_are_intact_when_selected(self):
+        from common.context_budget import ContextTokenCounter
+        from common.deliberation_context import _fit_section
+        checkpoint = "等待操作继续，核验这个字段。" * 120
+        rows = [{"kind": "connection", "outcome": "completed", "activity_mode": "pause", "result": checkpoint},
+                {"kind": "connection", "outcome": "completed", "activity_mode": "finish",
+                 "result": {"status": "sent", "operation_id": "send-14", "detail": checkpoint}}]
+        messages = self.request({**self.data(), "recent_outcomes": rows})
+        section = next(m["content"] for m in messages if m["content"].startswith("<deliberation_recent_outcomes>"))
+        self.assertEqual(json.loads(section.splitlines()[1])["records"], rows)
+        constrained = _fit_section("recent_outcomes", rows, 400, ContextTokenCounter(), newest=True)
+        self.assertEqual(json.loads(constrained["content"].splitlines()[1]), {"records": [], "omitted": 2})
+
     def test_source_budget_keeps_body_evidence_and_required_current_state(self):
         from common.context_budget import ContextTokenCounter
         data = self.data()

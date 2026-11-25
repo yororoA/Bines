@@ -204,6 +204,9 @@ class TurnWaitStoreTests(TurnWaitFixture):
         self.incoming()
         rows = self.claim()
         runner = FollowupRunner(BaseRunner(), self.store.turn_waits, rows, lambda: "")
+        self.assertIn("end_without_reply", [tool["function"]["name"] for tool in runner.function_tools()])
+        result = runner.execute({"action": "end_without_reply", "args": {"seconds": 1}})
+        self.assertEqual(json.loads(result)["status"], "failed")
         for seconds in (True, float("nan"), 0, 7, "3"):
             result = runner.execute({"action": runner.action, "args": {"seconds": seconds, "reason": "unfinished"}})
             self.assertEqual(json.loads(result)["status"], "failed")
@@ -264,6 +267,15 @@ class TurnWaitProcessTests(TurnWaitFixture):
         self.assertIn("if I use this", request)
         self.assertIn("will it work offline?", request)
         self.assertEqual(len(self.sent), 1)
+
+    def test_deliberate_silence_finishes_without_reply_or_queued_retry(self):
+        event = self.incoming(text="先走啦，不用回")
+        rows = self.claim()
+        self.process(rows, lambda _c, runner: runner.execute({"action": "end_without_reply", "args": {}}))
+        self.assertEqual(self.row(rows[0]["id"])["status"], "done")
+        self.assertFalse(self.claim())
+        self.assertEqual(self.sent, [])
+        self.assertFalse(any(m["role"] == "assistant" for m in self.store.context(self.store.identity(event))))
 
     def test_reviewed_fallback_is_the_only_message_in_history_and_is_not_resent(self):
         event = self.incoming(text="我说的是后天")

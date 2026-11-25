@@ -11,6 +11,11 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 from common.clock import clock_message, now
 from common.memory_highlights import highlight_groups
+from common.memory_presentation import (
+    diary_witnesses, hide_turn_prose, history_wording, narrative_original_spans, narrative_spans,
+    supported_evidence, turn_record_label, wants_turn_record,
+    relevant_scene_state, wants_narrative_original, wants_verbatim,
+)
 from chatBot.messages import qq_native_at_spans, qq_prompt_body
 
 import persona_profile
@@ -189,7 +194,7 @@ def _render_state(lines, highlights):
 
 def _state_block(state: Dict[str, Any], query: str = "") -> str:
     matched, recent = highlight_groups(state, query)
-    return _render_state(_state_lines(state), [*matched, *recent])
+    return _render_state(_state_lines(relevant_scene_state(state, query)), [*matched, *recent])
 
 
 def _profile_block(context: Dict[str, Any], scene: str, *, record=True) -> str:
@@ -245,7 +250,8 @@ def _budget_state_blocks(context, scene, counter, quota):
         return counter.messages([{"content": text}]) if text else 0
 
     state, life = context.get("state") or {}, context.get("life") or {}
-    scalar_lines = _state_lines(state)
+    current_query = context.get("current_query") or context.get("recall_query") or ""
+    scalar_lines = _state_lines(relevant_scene_state(state, current_query))
     matched, recent = highlight_groups(state, context.get("recall_query") or "",
                                        context.get("current_query") or "")
     full_state = _render_state(scalar_lines, [*matched, *recent])
@@ -324,16 +330,19 @@ def _memory_recall_block(context: Dict[str, Any], *, record=True) -> str:
         parts.append(part)
         presentations.append((item, list(spans)))
 
+    query = str(context.get("current_query", context.get("recall_query")) or "")
     seen_sources = set()
     bridge = context.get("bridge")
     if bridge:
-        spans = _matched_spans(bridge, context.get("recall_query", ""), bridge.get("_display_limit", 700))
-        text = _temporal_label(bridge) + " … ".join(spans)
+        render_spans = narrative_original_spans if wants_narrative_original(query, "episode") else narrative_spans
+        hidden = hide_turn_prose(bridge, query)
+        spans = [] if hidden else render_spans(bridge, query, bridge.get("_display_limit", 700))
+        text = _temporal_label(bridge) + (turn_record_label(bridge) if hidden else " … ".join(spans))
         reference = bridge.get("citation_id") or bridge.get("id") or ""
         add(f"[较早的对话摘要 {bridge.get('day_key') or ''}{' · 来源 ' + reference if reference else ''}]\n{text}",
             bridge, spans)
-    raw_requested = any(marker in str(context.get("recall_query") or "")
-                        for marker in ("原话", "逐字", "原文", "怎么说", "说了什么", "哪句话"))
+    raw_requested = wants_verbatim(context)
+    logs_requested = wants_turn_record(query)
     for item in context.get("recalled") or []:
         label = {"diary": "日记", "episode": "回忆", "excerpt": "对话片段",
                  "message": "原始消息"}.get(item["kind"], "回忆")
@@ -341,40 +350,68 @@ def _memory_recall_block(context: Dict[str, Any], *, record=True) -> str:
         curated = bool((item.get("meta") or {}).get("curated_quote"))
         reference = item.get("citation_id") or item.get("id") or ""
         reference_label = f" · 来源 {reference}" if reference else ""
+        original = wants_narrative_original(query, item["kind"])
+        witnesses = diary_witnesses(item)
+        hidden = hide_turn_prose(item, query)
         if item["kind"] in {"episode", "diary", "semantic"}:
-            spans = _matched_spans(item, context.get("recall_query", ""), item.get("_display_limit", 700))
+            if item["kind"] == "semantic":
+                render_spans = _matched_spans
+            else:
+                render_spans = narrative_original_spans if original else narrative_spans
+            spans = [] if hidden else render_spans(item, query, item.get("_display_limit", 700))
             text = _temporal_label(item) + " … ".join(spans)
             if spans:
-                add(f"[{label}摘要 {item.get('day_key') or ''}{reference_label}]\n{text}", item, spans)
-        if evidence and (raw_requested or curated or item["kind"] == "message"):
+                heading = f"{label}原文节选" if original else f"{label}摘要"
+                add(f"[{heading} {item.get('day_key') or ''}{reference_label}]\n{text}", item, spans)
+            elif hidden:
+                add(f"[行动记录 {item.get('day_key') or ''}{reference_label}] {turn_record_label(item)}", item)
+            elif item["kind"] == "diary" and not witnesses and reference:
+                add(f"[日记 {item.get('day_key') or ''}{reference_label}] 可按来源查阅正文。", item)
+        if item["kind"] in {"diary", "episode", "semantic"}:
+            # A retrieval fallback can be a copy of the diary itself. A question
+            # about someone's words must never turn this copy into their speech.
+            if original:
+                evidence = []
+            elif raw_requested or curated or logs_requested:
+                evidence = supported_evidence(item, query)
+            elif item["kind"] == "diary":
+                evidence = witnesses[:2]
+        if evidence and (raw_requested or curated or witnesses or logs_requested or item["kind"] == "message"):
             # Original dialogue is only recalled on demand, as bounded evidence,
             # not a default example of how the character should answer now.
             for source in evidence[:3]:
-                source_key = (source.get("source_type"), source.get("source_ref"))
-                if source_key in seen_sources:
-                    continue
-                seen_sources.add(source_key)
+                source_id = source.get("source_ref") or source.get("source_id")
+                if source_id is not None:
+                    source_key = (source.get("source_type"), str(source_id))
+                    if source_key in seen_sources:
+                        continue
+                    seen_sources.add(source_key)
                 stamp = _fmt_time(source.get("ts"))
                 role = _evidence_speaker(source)
+                if source.get("source_type") == "experience":
+                    role += " " + " ".join(str(source[key]) for key in ("action", "status") if source.get(key))
                 header = f"[{label} {item.get('day_key') or ''}"
                 if stamp:
                     header += f" · {stamp}"
                 header += f" · {source.get('source_type')}{reference_label}]"
                 content = str(source.get("content") or "")
                 from memory.evidence import _short_evidence
-                span = _short_evidence(content, context.get("recall_query", ""),
-                                       min(480, item.get("_display_limit", 480)))
-                content = span + ("…" if len(content) > len(span) else "")
-                add(f"{header}\n{role}: {content}", item, [span])
+                span = _short_evidence(content, query, min(180 if witnesses and not raw_requested else 480,
+                                                           item.get("_display_limit", 480)))
+                display, shown = (span, [span])
+                if source.get("source_type") == "message" and source.get("role") == ROLE_ASSISTANT:
+                    display, shown = history_wording(span, verbatim=raw_requested or curated)
+                add(f"{header}\n{role}: {display}" + ("…" if len(content) > len(span) else ""), item, shown)
         elif item["kind"] == "excerpt" and curated:
             add(f"[保留原话 {item.get('day_key') or ''}]\n{item['content'][:240]}", item, [item["content"][:240]])
     others = context.get("other_channels") or []
     if others:
-        lines = [
-            f"[{_fmt_time(m['ts'])}][{_channel_label(m['conversation_id'])}] "
-            f"{speaker(m)}: {m['content']}"
-            for m in others
-        ]
+        lines = []
+        for m in others:
+            body = str(m["content"])
+            if m["role"] == ROLE_ASSISTANT:
+                body, _ = history_wording(body, verbatim=raw_requested)
+            lines.append(f"[{_fmt_time(m['ts'])}][{_channel_label(m['conversation_id'])}] {speaker(m)}: {body}")
         add("[其他渠道的近期对话]\n" + "\n".join(lines))
     if not parts:
         return ""
@@ -392,27 +429,26 @@ def _memory_recall_block(context: Dict[str, Any], *, record=True) -> str:
 
 def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str]]:
     working = context.get("working") or []
+    verbatim = wants_verbatim(context)
     if scene == SCENE_QQ_GROUP:
         if not working:
             return []
         lines = []
         for m in working:
             content, mentions = qq_prompt_body(str(m["content"]), m.get("qq_at_spans"))
+            if m["role"] == ROLE_ASSISTANT:
+                content, _ = history_wording(content, verbatim=verbatim)
             if mentions:
                 lines.append("QQ 消息元数据：" + json.dumps(
                     {"speaker": speaker(m), "mentioned_qq": mentions}, ensure_ascii=False))
             lines.append(f"[{_fmt_time(m['ts'])}] "
                          f"{speaker(m)}"
                          f"{'' if m['role'] != ROLE_OBSERVED else '(未@你)'}: {content}")
-        return [{"role": "system", "content": "--- 群聊近况 ---\n" + "\n".join(lines)}]
-    from reply_style import style_issue
+        return [{"role": "user", "content": "--- 群聊近况 ---\n以下是历史发言记录。\n" + "\n".join(lines)}]
 
     messages = []
-    prior_user_text = ""
     for m in working:
         # Message IDs belong to the separate reference table in the QQ prompt.
-        # Do not render timestamps or IDs inside historical assistant turns:
-        # the model otherwise copies that format into its own reply.
         content, mentions = qq_prompt_body(str(m["content"]), m.get("qq_at_spans"))
         content = _MESSAGE_ID_PREFIX.sub("", content)
         if mentions:
@@ -421,16 +457,10 @@ def _working_messages(context: Dict[str, Any], scene: str) -> List[Dict[str, str
         if not content.strip() and mentions:
             continue
         if m["role"] == ROLE_ASSISTANT:
-            if style_issue(content, prior_user_text):
-                # Retain evidence and chronology without giving old catchphrases the
-                # role of examples to imitate, or upgrading quoted text to system instructions.
-                record = {"speaker": speaker(m), "time": _fmt_time(m.get("ts")), "content": content}
-                messages.append({"role": "user", "content": "历史发言记录（仅供查证，不模仿措辞）：\n"
-                                 + json.dumps(record, ensure_ascii=False)})
-            else:
-                messages.append({"role": "assistant", "content": content})
+            content, _ = history_wording(content, verbatim=verbatim)
+            record = {"speaker": speaker(m), "time": _fmt_time(m.get("ts")), "content": content}
+            messages.append({"role": "user", "content": "历史发言记录\n" + json.dumps(record, ensure_ascii=False)})
         else:
-            prior_user_text = content
             stamp = _fmt_time(m.get("ts"))
             prefix = f"[{stamp}] " if stamp else ""
             messages.append({"role": "user", "content": f"{prefix}{speaker(m)}：{content}"})
@@ -559,10 +589,11 @@ def _allocate_context(context, scene, counter, quotas, item_quotas=None):
 
                 def render(candidate):
                     if section == "working":
-                        return _working_messages({"working": [candidate]}, scene)
+                        return _working_messages({**context, "working": [candidate]}, scene)
                     if section == "profile":
                         return [{"content": _profile_block({**context, "profile": [candidate]}, scene, record=False)}]
-                    trial = {"recall_query": context.get("recall_query", ""), section:
+                    trial = {"recall_query": context.get("recall_query", ""),
+                             "current_query": context.get("current_query", context.get("recall_query")), section:
                              candidate if section == "bridge" else [candidate]}
                     return [{"content": _memory_recall_block(trial, record=False)}]
 

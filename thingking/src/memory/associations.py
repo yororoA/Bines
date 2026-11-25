@@ -532,7 +532,8 @@ class AssociationStore:
                                             limit=self.settings.evidence_limit)
             view = dict(memory, memory_id=memory["id"], message_id=None, evidence=evidence)
         else:
-            messages = self.material(node)["sources"]
+            material = self.material(node)
+            messages = material["sources"]
             # A raw node can contain more messages than the evidence budget.
             # Keep the actual retrieved source first, including vector matches
             # with no literal query overlap; then rank remaining scoped sources.
@@ -543,15 +544,19 @@ class AssociationStore:
                 not any(span in m["content"] for span in spans),
                 -len(terms.intersection(_tokens(m["content"]))), m["ts"], m["id"],
             ))
-            evidence = [dict(source_type="message", source_id=m["id"],
-                             source_ref=m["source_ref"] or f"message:{m['id']}", scope=node["scope"],
-                             role=m["role"], actor_id=m["actor_id"], actor_name=m["actor_name"],
-                             content=_short_evidence(next((span for span in spans if span in m["content"]),
-                                                          m["content"]), query), ts=m["ts"])
-                        for m in ranked[:self.settings.evidence_limit]]
+            evidence = []
+            for message in ranked[:self.settings.evidence_limit]:
+                content = message["content"]
+                located = next((span for span in spans if span in content), content)
+                snippet = _short_evidence(located, query)
+                offset = material["message_ranges"][message["id"]][0] + content.index(located) + located.index(snippet)
+                evidence.append(dict(source_type="message", source_id=message["id"],
+                                     source_ref=message["source_ref"] or f"message:{message['id']}", scope=node["scope"],
+                                     role=message["role"], actor_id=message["actor_id"], actor_name=message["actor_name"],
+                                     content=snippet, content_offset=offset, ts=message["ts"]))
             view = dict(id=f"message:{messages[0]['id']}", memory_id=None, message_id=messages[0]["id"],
                         scope=node["scope"], kind="message", conversation_id=messages[0]["conversation_id"],
-                        day_key=messages[0]["day_key"], content=self.material(node)["text"],
+                        day_key=messages[0]["day_key"], content=material["text"],
                         start_ts=min(m["ts"] for m in messages), end_ts=max(m["ts"] for m in messages),
                         evidence=evidence, meta={})
         if not view["evidence"]:

@@ -173,6 +173,9 @@ class ThinkingModelHelper:
                        temperature=0.2, max_tokens=2048, allowed_skills=None):
         """Execute model-selected native calls in order, preserving thinking turns."""
         conversation = [dict(message) for message in messages]
+        last_user = next((i for i in reversed(range(len(conversation))) if conversation[i].get("role") == "user"), 0)
+        for previous in conversation[:last_user]:
+            previous.pop("reasoning_content", None)
         rules = skill_runner.instructions_for_source(source, allowed_skills, native=True)
         # Tool documentation describes capabilities; the following character and
         # scoped context define how the assistant speaks and what it remembers.
@@ -238,12 +241,15 @@ class ThinkingModelHelper:
                 except (TypeError, json.JSONDecodeError):
                     result = "工具参数必须是有效的 JSON 对象"
                 else:
-                    result = skill_runner.execute(
-                        {"skill": skill_runner.action_to_skill.get(action),
-                         "action": action, "args": args}, source=source,
-                        allowed_skills=allowed_skills,
-                    )
-                    executed = True
+                    if action == "end_without_reply" and len(calls) > 1:
+                        result = "静默结束须单独调用。本批其他操作照常处理。"
+                    else:
+                        result = skill_runner.execute(
+                            {"skill": skill_runner.action_to_skill.get(action),
+                             "action": action, "args": args}, source=source,
+                            allowed_skills=allowed_skills,
+                        )
+                        executed = True
                 history.append({"action": action, "result": result})
                 from tools.context import CURRENT_CONTEXT
                 journal = CURRENT_CONTEXT.get().journal

@@ -24,7 +24,7 @@ TECHNIQUES = {
     "natural_particles": "语气词按当下情绪少量使用，不把口头禅当作人格模板。",
     "leave_space": "意思说到就留白，不追加承诺式调整宣言或要求对方重复。",
     "short_reaction": "先用短反应接住，再按内容需要补一句；不把短反应当成默认长度。",
-    "softener": "用「才不是」「也没有啦」「…吧」这类软化语气，保留嘴硬和害羞。",
+    "softener": "话说得轻一点也能让人听出原来的态度。",
     "echo_play": "接住对方刚用的词，重复或改写一小段，再自然展开。",
     "playful_exaggeration": "用俏皮夸张放大情绪，不把夸张说成真实经历或事实。",
     "self_mock": "用轻巧的自嘲或认怂化解尴尬，不贬低自己也不讨好对方。",
@@ -110,6 +110,11 @@ def render_expression_notes(rows, limit=MAX_ACTIVE, include_samples=False):
         if (not isinstance(technique, str) or technique not in TECHNIQUES
                 or not isinstance(situation, str) or situation not in SITUATIONS):
             continue
+        sample = row.get("sample") if include_samples else None
+        if isinstance(sample, str) and sample.strip():
+            from reply_style import style_issue
+            if style_issue(sample):
+                continue
         # Vector hits are already diversified by MMR; allow two different
         # samples that happen to share a technique instead of collapsing them.
         key = (("sample", row.get("id") or row.get("sample") or technique)
@@ -118,18 +123,17 @@ def render_expression_notes(rows, limit=MAX_ACTIVE, include_samples=False):
             continue
         seen.add(key)
         line = "- " + _description(technique, situation)
-        if include_samples:
-            sample = row.get("sample")
-            if isinstance(sample, str) and sample.strip():
-                context = row.get("context")
-                has_context = isinstance(context, str) and bool(context.strip())
-                line += "（语感参考：" + _sample_text(sample, 60 if has_context else _SAMPLE_CHARS)
-                if has_context:
-                    # 保留说话人和接话次序，才能看出这句表达如何回应原场景。
-                    context_text = re.sub(r"https?://\S+", "", context)
-                    context_text = re.sub(r"[\x00-\x1f\x7f]", " ", context_text)
-                    line += "；当时：" + " ".join(context_text.split())[:160]
-                line += "）"
+        if isinstance(sample, str) and sample.strip():
+            # Corpus tags help retrieve candidates. The exchange itself shows
+            # how the speaker replied, even if its technique tag is inaccurate.
+            context = row.get("context")
+            has_context = isinstance(context, str) and bool(context.strip())
+            line = "- （语感参考：" + _sample_text(sample, 60 if has_context else _SAMPLE_CHARS)
+            if has_context:
+                context_text = re.sub(r"https?://\S+", "", context)
+                context_text = re.sub(r"[\x00-\x1f\x7f]", " ", context_text)
+                line += "；当时：" + " ".join(context_text.split())[:160]
+            line += "）"
         lines.append(line)
         if len(lines) >= limit:
             break

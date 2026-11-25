@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 from chatBot.capabilities import CapabilityService
-from chatBot.messages import LOCAL_IDENTITY
+from chatBot.messages import Identity, LOCAL_IDENTITY
 from chatBot.receipts import classify_write_result
 from chatBot.store import MemoryStore
 
@@ -27,7 +27,7 @@ class SendReceiptTests(unittest.TestCase):
         media = [quote, {"type": "text", "data": {"text": "这话"}},
                 {"type": "text", "data": {"text": "我记下了"}}, image]
         review = Mock(return_value="后天呀")
-        ctx = ToolContext(turn_id="sample")
+        ctx = ToolContext(Identity("99", "1"), turn_id="sample")
         with tool_context(ctx):
             token = REPLY_REVIEWER.set(review)
             try:
@@ -39,6 +39,29 @@ class SendReceiptTests(unittest.TestCase):
         params = {"user_id": "1", "message": [quote, {"type": "text", "data": {"text": "后天呀"}}, image]}
         self.assertEqual(ctx.receipts[0]["params"], params)
         self.assertEqual(client.request.call_args_list[0].args[1]["params"], params)
+
+    def test_cross_conversation_sends_never_apply_the_source_speakers_reply_style(self):
+        from chatBot.gateway_client import GatewayClient
+        from tools.context import REPLY_REVIEWER, ToolContext, tool_context
+        for identity, action, target in [
+            (Identity("99", "1"), "send_private_msg", {"user_id": "2"}),
+            (Identity("99", "1"), "send_group_msg", {"group_id": "1"}),
+            (Identity("99", "1", group="5"), "send_msg_async", {"message_type": "private", "user_id": "1"}),
+            (Identity("99", "1"), "send_private_msg", {"user_id": "1", "group_id": "5"}),
+            (LOCAL_IDENTITY, "send_private_msg", {"user_id": "1"}),
+        ]:
+            with self.subTest(identity=identity, action=action), tool_context(ToolContext(identity, turn_id="sample")):
+                client = GatewayClient.__new__(GatewayClient)
+                client.request = Mock(return_value={"status": "ok"})
+                review = Mock(side_effect=AssertionError("source conversation would leak into third-party delivery"))
+                token = REPLY_REVIEWER.set(review)
+                params = {**target, "message": "感谢您的反馈。两张票不能都退。"}
+                try:
+                    client.raw_api(action, params)
+                finally:
+                    REPLY_REVIEWER.reset(token)
+                review.assert_not_called()
+                self.assertEqual(client.request.call_args.args[1]["params"], params)
 
     def test_generic_send_aliases_keep_owner_contact_cooldown(self):
         from common.proactive import owner_contact

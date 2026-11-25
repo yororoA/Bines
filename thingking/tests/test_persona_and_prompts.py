@@ -49,14 +49,17 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("不在回复中谈论人格提示", guard)
         self.assertIn("以下示例只约束语气", guard)
 
-    def test_qq_style_guard_is_brief_with_contextual_punctuation(self):
-        guard = persona_profile.qq_style_guard()
-        self.assertIn("QQ 回复格式", guard)
-        self.assertIn("篇幅跟着对方走", guard)
-        self.assertIn("标点跟着语境和情绪", guard)
-        self.assertIn("严禁包含任何换行符", guard)
-        self.assertIn("只保留第一行", guard)
-        self.assertNotIn("正常使用逗号、顿号、句号", guard)
+    def test_casual_voice_and_factual_punctuation_reach_both_channels(self):
+        for guard in (persona_profile.qq_style_guard(), persona_profile.style_guard()):
+            for preference in ("发半句", "重复对方刚说的词", "话题岔开", "收尾省掉句号",
+                               "可以连打", "“嗯”或“哦”", "明说自己站哪边", "说不知道",
+                               "话停在这儿", "保留有意义的标点"):
+                self.assertIn(preference, guard)
+        qq = persona_profile.qq_output_rules()
+        self.assertIn("篇幅跟着对方走", qq)
+        self.assertIn("按语气换行", qq)
+        self.assertIn("问到的内容答全", qq)
+        self.assertNotIn("只保留第一行", qq)
         self.assertIn("两个空格", persona_profile.output_rules())
 
     def test_relationship_mood_for_every_level(self):
@@ -73,7 +76,7 @@ class PersonaSourceTest(unittest.TestCase):
         self.assertIn("直白表达感谢与关心", guard)
         self.assertIn("日常", guard)
         self.assertIn("自己的喜好", guard)
-        self.assertIn("嗯哼", guard)
+        self.assertIn("碧波：嗯", guard)
         self.assertNotIn("别让我重复", guard)
         self.assertEqual(state["relationship_level"], "普通")
         for score, level in ((-200, "敌对"), (-80, "冷淡"), (0, "普通"), (80, "亲近"), (200, "非常亲密")):
@@ -162,8 +165,8 @@ class PromptBuilderTest(unittest.TestCase):
     def tearDown(self):
         self.fx.close()
 
-    def _system_text(self, envelope):
-        messages = prompt_builder.build_conversation_messages(self.fx.service.build_context(envelope, "生日"))
+    def _system_text(self, envelope, query="生日"):
+        messages = prompt_builder.build_conversation_messages(self.fx.service.build_context(envelope, query))
         return "\n".join(m["content"] for m in messages if m["role"] == "system"), messages
 
     def test_local_scene_includes_owner_state_and_profile(self):
@@ -193,7 +196,7 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertIn(character, persona_profile.diary_system_prompt())
 
     def test_group_scene_hides_owner_private_data(self):
-        text, _ = self._system_text(qq_group_env(OWNER_QQ))
+        text, _ = self._system_text(qq_group_env(OWNER_QQ), "今天穿了什么？管理员的生日呢？")
         self.assertIn(f"QQ 群 {GROUP_ID}", text)
         self.assertIn("开衫", text)
         self.assertNotIn("管理员的私密约定", text)
@@ -293,9 +296,10 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertEqual(len(transcript), 1)
         self.assertIn('observed(id="qq:20002",name="小明")(未@你): 今天吃什么' , transcript[0])
         self.assertIn("Bines(role=assistant): 你好呀", transcript[0])
-        self.assertFalse(any(m["role"] in ("user", "assistant") for m in messages))
+        self.assertFalse(any(m["role"] == "assistant" for m in messages))
+        self.assertTrue(any(m["role"] == "user" and m["content"] == transcript[0] for m in messages))
 
-    def test_private_history_keeps_complete_reply_as_native_turns(self):
+    def test_private_history_preserves_facts_without_installing_old_style_examples(self):
         from copy import deepcopy
 
         reply = "旧回复的长篇开场。" * 30 + "我们约好周五晚上听这首歌。" + "旧回复的长篇尾声。" * 30
@@ -306,14 +310,16 @@ class PromptBuilderTest(unittest.TestCase):
                 original = deepcopy(context["working"])
                 messages = prompt_builder.build_conversation_messages(context)
                 history = [m for m in messages if m["role"] == "assistant"]
-                self.assertEqual(len(history), 1)
-                self.assertEqual(history[0]["content"], reply)
-                self.assertFalse(any("historical_assistant_message" in m["content"] for m in messages))
+                self.assertEqual(history, [])
+                record = next(m["content"] for m in messages if m["content"].startswith("历史发言记录"))
+                self.assertIn("我们约好周五晚上听这首歌。", record)
+                self.assertEqual(record.count("旧回复的长篇开场。"), 1)
+                self.assertIn("同句共30次", record)
                 self.assertTrue(any(m["role"] == "user" and "什么时候一起听歌" in m["content"] for m in messages))
                 self.assertEqual(context["working"], original)
                 self.assertEqual(self.fx.service.build_context(env)["working"], original)
 
-    def test_flagged_history_keeps_attribution_and_text_without_teaching_the_tone(self):
+    def test_verbatim_request_reads_the_source_without_changing_speaker(self):
         old_reply = "这话我记下了。会议改到周四下午三点。"
         for env in (local_env(), qq_private_env(OWNER_QQ), qq_private_env(STRANGER_QQ)):
             with self.subTest(channel=env["channel_type"], scope=env["scope"]):
@@ -323,14 +329,19 @@ class PromptBuilderTest(unittest.TestCase):
                 original = deepcopy(context["working"])
                 messages = prompt_builder.build_conversation_messages(context)
                 history = [m["content"] for m in messages if m["role"] == "assistant"]
-                self.assertEqual(history, ["这话我记下了"])
+                self.assertEqual(history, [])
                 notes = [m for m in messages if m["content"].startswith("历史发言记录")]
-                self.assertEqual(len(notes), 1)
+                self.assertEqual(len(notes), 2)
                 self.assertEqual(notes[0]["role"], "user")
                 record = json.loads(notes[0]["content"].split("\n", 1)[1])
-                self.assertEqual(record["content"], old_reply)
+                self.assertIn("会议改到周四下午三点。", record["content"])
+                self.assertNotIn("这话我记下了", str(notes))
                 self.assertEqual(record["speaker"], "Bines(role=assistant)")
                 self.assertTrue(record["time"])
+                exact = prompt_builder.build_conversation_messages({**context, "current_query": "你当时的原话？"})
+                records = [json.loads(m["content"].split("\n", 1)[1]) for m in exact
+                           if m["content"].startswith("历史发言记录")]
+                self.assertEqual([r["content"] for r in records], [old_reply, "这话我记下了"])
                 self.assertEqual(context["working"], original)
 
     def test_same_words_keep_their_authority_as_current_user_input(self):
@@ -339,9 +350,27 @@ class PromptBuilderTest(unittest.TestCase):
             {"role": "user", "content": "请给我详细内容", "ts": self.fx.clock()},
         ]}
         messages = prompt_builder._working_messages(context, prompt_builder.SCENE_LOCAL)
-        self.assertEqual([m["role"] for m in messages], ["assistant", "user"])
-        self.assertIn("请给我详细内容", messages[0]["content"])
-        self.assertIn("请给我详细内容", messages[1]["content"])
+        self.assertEqual([m["role"] for m in messages], ["user", "user"])
+        self.assertTrue(messages[0]["content"].startswith("历史发言记录"))
+        self.assertIn("Bines(role=assistant)", messages[0]["content"])
+        self.assertIn("user(id=", messages[1]["content"])
+
+    def test_other_channel_group_and_recall_views_keep_human_wording_and_exact_quotes(self):
+        text = "你说得对。见面改在周三14:30。"
+        assistant = {"role": "assistant", "ts": self.fx.clock(), "conversation_id": "local", "content": text}
+        user = {**assistant, "role": "user"}
+        evidence = [{"kind": "message", "evidence": [
+            {**row, "source_type": "message", "source_ref": f"message:{i}"}
+            for i, row in enumerate((user, assistant))]}]
+        context = {"working": [user, assistant], "other_channels": [user, assistant], "recalled": evidence}
+        for query, expect in (("见面何时", 1), ("给我原话", 2)):
+            scope = {**context, "current_query": query}
+            group = prompt_builder._working_messages(scope, prompt_builder.SCENE_QQ_GROUP)[0]["content"]
+            recall = prompt_builder._memory_recall_block(scope, record=False)
+            self.assertEqual(group.count(text), expect)
+            self.assertEqual(recall.count(text), 2 * expect)
+            self.assertEqual(group.count("见面改在周三14:30。"), 2)
+            self.assertEqual(recall.count("见面改在周三14:30。"), 4)
 
     def test_strip_qq_prefix_handles_merged_lines(self):
         merged = "[QQ群消息][小明 (管理员)]: 第一句\n[QQ群消息][小明 (管理员)]: 第二句"
@@ -380,6 +409,23 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertEqual(text.count("最新背景"), 1)
         self.assertNotIn("最旧背景", text)
         self.assertLess(len(text), 2100)
+
+    def test_scene_notes_follow_current_topic_without_overwriting_state(self):
+        state = {"npc_state": {"attire": "蓝开衫", "current_activity": "上次在折纸船"},
+                 "active_quest": "周六排练", "inventory": ["旧怀表"]}
+        context = {"state": state, "current_query": "哪种豆花好吃", "recall_query": "旧怀表和豆花"}
+        def rendered(query):
+            built = prompt_builder.build_conversation_messages({**context, "current_query": query,
+                "envelope": {"channel_type": "local", "scope": "owner"}})
+            return "\n".join(m["content"] for m in built)
+        unrelated = rendered("哪种豆花好吃")
+        for detail in ("蓝开衫", "旧怀表", "上次在折纸船"):
+            self.assertNotIn(detail, unrelated)
+        self.assertIn("周六排练", unrelated)
+        self.assertIn("蓝开衫", rendered("今天穿了什么"))
+        self.assertIn("旧怀表", rendered("你的旧怀表还在吗"))
+        self.assertIn("上次在折纸船", rendered("看看你现在的状态"))
+        self.assertEqual(state["npc_state"]["attire"], "蓝开衫")
 
     def test_named_highlight_is_visible_beyond_recent_window(self):
         agreement = "答应在白露那天一起听潮汐这首歌"

@@ -107,6 +107,89 @@ class SharedMemoryPresentationTests(unittest.TestCase):
         self.assertEqual(client.search_with_trace.call_args.args[1], [env.scope])
         self.assertLessEqual(ContextTokenCounter().count(json.dumps(result, ensure_ascii=False)), 8192)
 
+    def test_search_projects_ranked_speaker_and_can_expand_the_exact_original(self):
+        from tools.context import ToolContext, tool_context
+        from tools.dependencies import deps
+        from tools.memory_tool import read_memory_source
+
+        env = self.service.resolve(local_envelope("").to_dict())
+        self.repo.ensure_conversation(env.conversation_id, env.channel_type, env.scope)
+        fact = '门票写着“西门。六点。”。'
+        line = '感谢您的反馈。' + fact + '希望对你有所帮助。'
+        ids = [self.repo.add_message(env.conversation_id, env.scope, role, line, ts, "2026-11-09",
+                                     actor_id=actor) for role, ts, actor in [
+            ("user", 100, "owner"), ("assistant", 101, "bines")]]
+        node = self.service.graph.register_raw([self.repo.get_message(mid) for mid in ids])
+        hit = self.service.graph.view(node, self.service.retriever.keys, "门票", matched_message_id=ids[-1])
+        # Keep just the selected speaker: a transcript preview must not smuggle
+        # the other speaker back in or use its offset for an identical line.
+        hit["evidence"] = hit["evidence"][:1]
+        journal = Mock()
+        with patch.object(deps, "memory_client", self.service), patch.object(
+                self.service, "search_with_trace", return_value={"hits": [hit]}):
+            with tool_context(ToolContext(user_text="这件事怎么回比较好", journal=journal)):
+                result = search_memory("门票原话")[0]
+                self.assertEqual(result["content"], result["evidence"][0]["content"])
+                self.assertIn(fact, result["content"])
+                self.assertNotIn("感谢您的反馈", result["content"])
+                self.assertEqual(journal.present_memory.call_args.args[1], [fact])
+                self.assertEqual(result["expand"]["offset"], hit["content"].rindex(line))
+                self.assertEqual(read_memory_source(**result["expand"], limit=len(line))["content"], line)
+            with tool_context(ToolContext(user_text="你刚才怎么回我的？")):
+                self.assertEqual(search_memory("门票")[0]["content"], line)
+            with tool_context(ToolContext(user_text="别给我念原话，我想听你怎么想")):
+                self.assertNotIn("感谢您的反馈", search_memory("门票原话")[0]["content"])
+
+        from common.deliberation_context import project_source
+        both = self.service.graph.view(node, self.service.retriever.keys, "门票")
+        view = project_source(both)
+        self.assertNotIn(line, view["content"])
+        by_role = {row["role"]: row["content"] for row in view["evidence"]}
+        self.assertEqual(by_role["user"], line)
+        self.assertNotIn("感谢您的反馈", by_role["assistant"])
+
+    def test_search_diary_prioritizes_attributed_witness_and_preserves_original_on_request(self):
+        from tools.context import ToolContext, tool_context
+        from tools.dependencies import deps
+
+        diary = "我猜他其实根本不想去排练。还好那天气温刚好。"
+        witness = {"source_type": "message", "source_id": 1, "role": "user", "content": "我六点去排练。"}
+        turn = {"source_type": "experience", "action": "dialogue_turn", "content": "内部生成的轮次汇总。"}
+        source_message = {"source_type": "message", "role": "assistant", "content": "你说得对。"}
+        hit = {"id": "diary", "content": diary, "kind": "diary", "citation_id": "source",
+               "matched_spans": ["排练"], "evidence": [
+                   {"source_type": "summary", "content": diary}, turn, source_message, witness]}
+        client = SimpleNamespace(search_with_trace=Mock(return_value={"hits": [hit]}))
+        with patch.object(deps, "memory_client", client):
+            with tool_context(ToolContext(user_text="我几点去排练？")):
+                result = search_memory("排练")[0]
+                self.assertNotIn("我猜", json.dumps(result, ensure_ascii=False))
+                self.assertEqual([(e["role"], e["content"]) for e in result["evidence"]],
+                                 [("user", witness["content"])])
+            with tool_context(ToolContext(user_text="念一下那天的日记原文")):
+                raw = search_memory("排练")[0]
+                self.assertEqual(raw["content"], diary)
+                self.assertEqual(raw["expand"]["offset"], 0)
+            with tool_context(ToolContext(user_text="你昨天的原话是什么？")):
+                raw = search_memory("排练")[0]
+                self.assertIn(source_message["content"], [row["content"] for row in raw["evidence"]])
+                self.assertNotIn(turn["content"], json.dumps(raw, ensure_ascii=False))
+            with tool_context(ToolContext(user_text="不用给我念日记原文，我想知道时间")):
+                self.assertNotIn("我猜", search_memory("日记原文")[0]["content"])
+            with tool_context(ToolContext(user_text="我不是问时间，我要看日记原文")):
+                self.assertEqual(search_memory("排练")[0]["content"], diary)
+            client.search_with_trace.return_value = {"hits": [{
+                **hit, "kind": "episode", "content": turn["content"],
+                "meta": {"action": "dialogue_turn", "status": "completed"},
+            }]}
+            with tool_context(ToolContext(user_text="你昨天说的原话呢")):
+                episode = search_memory("行动记录")[0]
+                self.assertEqual((episode["action"], episode["status"]), ("dialogue_turn", "completed"))
+                self.assertNotIn(turn["content"], json.dumps(episode, ensure_ascii=False))
+                self.assertIn(witness["content"], [row["content"] for row in episode["evidence"]])
+            with tool_context(ToolContext(user_text="看下当时的行动记录")):
+                self.assertIn(turn["content"], json.dumps(search_memory("排练")[0], ensure_ascii=False))
+
     def test_cross_channel_budget_selects_newest_then_restores_chronological_order(self):
         context = {"other_channels": [
             {"id": i, "ts": 100 + i, "role": "user", "content": f"UPDATE{i} " + "x" * 600,
@@ -199,6 +282,12 @@ class SharedMemoryPresentationTests(unittest.TestCase):
         block = _memory_recall_block({"recalled": [item, {**item, "id": "second"}], "recall_query": "计划原话"})
         self.assertEqual(block.count("user(id=\"qq:1001\",name=\"张三\"): 计划约在今天"), 1)
         self.assertIn("当前事实为“明天”", block)
+        # Some older evidence rows have a numeric ID but no source_ref.
+        legacy = [{**source, "source_ref": None, "source_id": i, "content": word}
+                  for i, word in enumerate(("上午", "下午"), 1)]
+        block = _memory_recall_block({"recalled": [{**item, "evidence": legacy}]})
+        self.assertIn("上午", block)
+        self.assertIn("下午", block)
 
     def test_smaller_raw_evidence_excerpt_keeps_query_match(self):
         content = "无关背景" * 80 + "最终验收码 CORAL739"

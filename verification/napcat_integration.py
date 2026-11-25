@@ -415,8 +415,11 @@ class Integration(unittest.TestCase):
                 self.assertIn(f'"mentioned_qq": ["{user}"]', text)
                 self.assertNotIn(f"[@QQ:{user}]以前回复", text)
                 if not group:
-                    assistant = next(m for m in history if m["role"] == "assistant")
-                    self.assertEqual(assistant["content"], "以前回复的正文，示例 [@QQ:99]")
+                    self.assertFalse(any(m["role"] == "assistant" for m in history))
+                    note = next(m["content"] for m in history if m["content"].startswith("历史发言记录"))
+                    record = json.loads(note.split("\n", 1)[1])
+                    self.assertEqual(record["speaker"], "Bines(role=assistant)")
+                    self.assertEqual(record["content"], "以前回复的正文，示例 [@QQ:99]")
                 self.assertEqual(self.store.context(identity), raw_before)
                 context = self.memory_hub._call("build_context", envelope=identity_envelope(identity))
                 self.assertTrue(all(m["source_ref"].startswith(self.memory_hub.source + ":")

@@ -214,7 +214,10 @@ class RetrievalPromptQualityTests(unittest.TestCase):
         node = self.service.graph.register_memory(mid)
         hit = self.service.graph.view(node, self.service.retriever.keys, "原话")
         block = _memory_recall_block({"recalled": [hit], "recall_query": "原话"})
-        self.assertIn("摘要记录:", block)
+        self.assertIn("[回忆摘要", block)
+        self.assertEqual(block.count("没有原话的摘要"), 1)
+        self.assertNotIn("Bines(role=assistant)", block)
+        self.assertNotIn("user(", block)
         self.assertNotIn("对方:", block)
 
     def test_bounded_sync_preserves_queued_dependency_work(self):

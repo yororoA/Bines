@@ -43,16 +43,40 @@ def agent_with_stream(stream):
     return agent
 
 
-def run_stream(agent, *, runner=None, interrupt=lambda: False, send=None, review=None):
+def run_stream(agent, *, runner=None, interrupt=lambda: False, send=None, review=None, rounds=1):
     return run_main_agent_rounds(
         messages=[{"role": "user", "content": "测试"}], main_agent=agent,
         skill_runner=runner or Mock(), zmq_send=send or Mock(),
         is_only_action_or_empty=lambda text: not text.strip(), enable_audio=False,
-        source="MANUAL", interrupt_requested=interrupt, review_reply=review, max_skill_rounds=1,
+        source="MANUAL", interrupt_requested=interrupt, review_reply=review, max_skill_rounds=rounds,
     )
 
 
 class StreamReliabilityTests(unittest.TestCase):
+    def test_clean_empty_stop_can_end_without_a_second_request(self):
+        agent, send = agent_with_stream(iter([chunk(finish_reason="stop")])), Mock()
+        result = run_stream(agent, send=send, rounds=3)
+        agent._post_chat_completion.assert_called_once()
+        send.assert_not_called()
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["full_raw_response"], "")
+
+    def test_clean_empty_stop_after_skill_preserves_success_without_replay(self):
+        agent, send, runner = Mock(), Mock(), Mock()
+        command = {"skill": "demo", "action": "read", "args": {}}
+        runner.parse_command.return_value = command
+        runner.execute.return_value = "模拟读取成功"
+        agent.run_one_turn_streaming.side_effect = [
+            (iter(["[[SKILL_CALL]]" + json.dumps(command) + "[[/SKILL_CALL]]"]), {"finish_reason": "stop"}),
+            (iter([]), {"finish_reason": "stop"}),
+        ]
+        result = run_stream(agent, runner=runner, send=send, rounds=3)
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["full_raw_response"], "")
+        self.assertEqual(agent.run_one_turn_streaming.call_count, 2)
+        runner.execute.assert_called_once_with(command, source="MANUAL")
+        send.assert_not_called()
+
     def test_holder_interruption_is_not_reported_as_completed_or_spoken(self):
         holder, send = {}, Mock()
 

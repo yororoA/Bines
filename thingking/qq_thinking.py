@@ -18,7 +18,7 @@ from chatBot.recipients import send_action
 from chatBot.quotes import message_id as quote_id, sent_time, validate_quote_peer
 from chatBot.media import MAX_QUOTED_MESSAGES
 from chatBot.store import MemoryStore
-from chatBot.turn_wait import FollowupRunner, FollowupArrived, TurnDeferred
+from chatBot.turn_wait import EndWithoutReply, FollowupRunner, FollowupArrived, TurnDeferred
 from chatBot.gateway_client import GatewayClient
 from tools.context import ToolContext, tool_context
 from tools import TOOLS_REGISTRY
@@ -546,7 +546,7 @@ class QQThinking:
                             conversation, waiting, source="QQ", temperature=REPLY_TEMPERATURE,
                             max_iterations=(guarded.config.quantum_actions + 1 if guarded and guarded.uses_activity_budget else 24),
                         )
-                except ActivityYield:
+                except (ActivityYield, EndWithoutReply):
                     text = ""
                 except RuntimeError as exc:
                     if not guarded or not guarded.uses_activity_budget or "轮次上限" not in str(exc) or not guarded.outcomes:

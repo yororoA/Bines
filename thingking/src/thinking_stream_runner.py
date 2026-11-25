@@ -180,6 +180,11 @@ def run_main_agent_rounds(
                 break
 
         approved = raw_response.strip()
+        if not approved and holder.get("finish_reason") == "stop":
+            # A clean final stop can intentionally have no speech. Retrying
+            # would force a line and could repeat a skill which already ran.
+            last_skill_result = ""
+            break
         if approved and review_reply:
             try:
                 approved = review_reply(approved)
