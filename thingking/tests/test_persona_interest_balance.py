@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "thingking" / "src")]
@@ -223,6 +223,19 @@ class PersonaInterestBalanceTests(unittest.TestCase):
         self.assertEqual(candidate, snapshot)
         self.assertIn("不靠换关键词、换子题或改写目标", text)
         self.assertIn("不是工具执行成功率", text)
+
+    def test_journal_keeps_pause_and_the_reviewed_note_together(self):
+        from common.activity_deliberation import choose_activity
+        from tools.context import ToolContext, tool_context
+        choice = {"mode": "pause", "topic": "找底片", "next_intent": "五点再来拿",
+                  "reason": "还有几件旧事，底片要五点才能拿", "interest_level": .8, "delay_seconds": 600}
+        journal = Mock()
+        with tool_context(ToolContext(journal=journal)), patch(
+                "common.intention_note.review_intention_note", return_value="底片要五点才能拿") as review:
+            decision = choose_activity(CaptureModel(choice), self.context(), self.candidate())
+        self.assertEqual(decision, {**choice, "reason": "底片要五点才能拿"})
+        self.assertEqual(review.call_args.kwargs["choice"], "pause")
+        self.assertEqual(journal.capture.call_args.args[2], decision)
 
 
 if __name__ == "__main__":

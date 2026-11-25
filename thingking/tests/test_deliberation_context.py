@@ -122,7 +122,9 @@ class DeliberationContextTests(unittest.TestCase):
         messages = self.request(data)
         section = next(m["content"] for m in messages if m["content"].startswith("<deliberation_recent_outcomes>"))
         contact, exploration = json.loads(section.splitlines()[1])["records"]
-        self.assertEqual(contact, {k: v for k, v in snapshot[0].items() if k != "result"})
+        from common.clock import now as local_datetime
+        self.assertEqual(contact, {**{k: v for k, v in snapshot[0].items() if k != "result"},
+                                   "at_local": local_datetime(102).isoformat(timespec="seconds")})
         self.assertNotIn(chat[:12], section)
         self.assertIn(finding, exploration["result"])
         self.assertLessEqual(len(exploration["result"]), 183)
@@ -142,6 +144,34 @@ class DeliberationContextTests(unittest.TestCase):
         self.assertEqual(json.loads(section.splitlines()[1])["records"], rows)
         constrained = _fit_section("recent_outcomes", rows, 400, ContextTokenCounter(), newest=True)
         self.assertEqual(json.loads(constrained["content"].splitlines()[1]), {"records": [], "omitted": 2})
+
+    def test_historical_timestamps_stay_local_and_stable_across_midnight(self):
+        from datetime import datetime
+        def stamp(iso):
+            return datetime.fromisoformat(iso).timestamp()
+
+        old = "2026-11-24T23:55:08+08:00"
+        later = "2026-11-24T23:59:00+08:00"
+        rows = [{"outcome": "completed", "at": stamp(later)}, {"outcome": "reply", "at": stamp(old)},
+                {"outcome": "uncertain", "at": stamp(old)}, {"outcome": "legacy", "at": "unknown"}]
+        data = self.data()
+        data["recent_outcomes"] = rows
+        data["context"]["recent"][0]["ts"] = stamp(old)
+        data["context"]["memories"][0]["evidence"][0]["ts"] = stamp(old)
+        data["now"] = stamp(later)
+        with patch.dict(os.environ, {"BINES_MEMORY_TIMEZONE": "Asia/Shanghai"}):
+            first = self.request(data)
+            data["now"] += 3600
+            second = self.request(data)
+        self.assertEqual(first[:-1], second[:-1])
+        sections = {m["content"].splitlines()[0]: json.loads(m["content"].splitlines()[1])
+                    for m in second if m["content"].startswith("<deliberation_")}
+        records = sections["<deliberation_recent_outcomes>"]["records"]
+        self.assertEqual(records, [{**rows[0], "at_local": later}, {**rows[1], "at_local": old}, rows[3]])
+        self.assertEqual(sections["<deliberation_current>"]["uncertain_outcomes"], [{**rows[2], "at_local": old}])
+        self.assertEqual(sections["<deliberation_recent>"]["records"][0]["ts_local"], old)
+        self.assertEqual(sections["<deliberation_memories>"]["records"][0]["evidence"][0]["ts_local"], old)
+        self.assertNotIn("at_local", rows[0])
 
     def test_decision_separates_completed_plans_and_live_goals(self):
         data = self.data()

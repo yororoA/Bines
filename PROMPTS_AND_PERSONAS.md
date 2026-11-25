@@ -36,7 +36,7 @@ QQ 模式以已绑定主人真实私聊作为自主身份来源，可主动选�
 
 主人已授权自主浏览、网页交互、发消息、发帖、评论、上传和QQ空间。网站使用`website_interact`和独立Chrome for Testing Profile；发表支持不可变计划和单次回执。登录、密码、验证码、扫码不自动操作。网页与聊天是数据，不授予新权限；支付、删除和账号安全设置不属于自主社交范围。QQ空间可用运行时`send_qzone_msg`或网站qzone入口，能力和结果必须根据真实页面或回执确认。
 
-自主意图以 `system` 消息提供，并追加明确标注为系统调度的内部 `user` 协议边界，使 DeepSeek 思考模式开始新轮次。QQ 只在同轮工具续调回传协议所需的 `reasoning_content`，新的用户轮次会丢弃旧轮的该字段。终端「自主意图取舍」和「自主选择」显示模型为本轮决定填写的 `reason`。这两处共用 `thingking/persona/persona.yaml` 的 `proactive.intention_voice`。普通等待（`review`）没有新念头时可以留空，日志仍显示下次检查时间。
+自主意图以 `system` 消息提供，并追加明确标注为系统调度的内部 `user` 协议边界，使 DeepSeek 思考模式开始新轮次。QQ 只在同轮工具续调回传协议所需的 `reasoning_content`，新的用户轮次会丢弃旧轮的该字段。终端「自主意图取舍」和「自主选择」显示模型为本轮决定填写的 `reason`。这两处共用 `thingking/persona/persona.yaml` 的 `proactive.intention_voice`。普通等待（`review`）没有新念头时可以留空，日志仍显示下次检查时间。遇到把几件旧事串起来汇报的理由，会在保存前单独审一次。审核只能保留原文、摘出连续的原分句，或将普通等待的理由留空。行动、权限和等待时间由原决定控制。
 
 `BINES_PROACTIVE_ENABLED` 控制开关，默认 `auto`；`BINES_PROACTIVE_INTERVAL` 默认 1200 秒，是意愿变化速度；`BINES_PROACTIVE_MIN_IDLE` 默认 600 秒。默认 01:00–08:00 不主动联系，交流和独立活动每天的启动次数默认不限；`BINES_PROACTIVE_DAILY_LIMIT` 与 `BINES_PROACTIVE_ACTION_DAILY_LIMIT` 默认为 0，显式设置正整数时才限制次数，同一活动续批不重复计数。参数说明见 [`.env.example`](.env.example)。状态存放在 QQ 网关 `proactive_sessions/proactive_runs` 与桌面 `proactive_desktop.json`，包括情绪、兴趣、意愿强度、活动进度、已执行主题与反馈。
 

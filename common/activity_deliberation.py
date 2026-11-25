@@ -38,6 +38,7 @@ def choose_activity(model, memory_context, candidate):
     import persona_profile
     import prompt_builder
     from common.activity import activity_prompt_view
+    from common.intention_note import review_intention_note
     from common.proactive import EXPLORATION_REVIEW
     from tools.context import CURRENT_CONTEXT
     context = CURRENT_CONTEXT.get()
@@ -82,6 +83,10 @@ def choose_activity(model, memory_context, candidate):
     text = model.complete_text(with_website_observations(messages), response_format={"type": "json_object"},
                                temperature=0.85, max_tokens=4096)
     decision = parse_activity_decision(text)
+    decision["reason"] = review_intention_note(
+        decision["reason"], model=model, choice=decision["mode"],
+        topic=decision["topic"] or candidate.get("topic", ""), intent=decision["next_intent"] or candidate["intent"],
+    )
     if context.journal:
         context.journal.capture("activity_decision", {"activity_id": old.get("id")},
                                 decision, category="decision")

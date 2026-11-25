@@ -406,6 +406,23 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(inspect_decision(json.dumps({**intention(), "should_act": True, "reason": ""}))["status"],
                          "invalid")
 
+    def test_note_review_cannot_change_an_intention_or_reschedule_a_wait(self):
+        model = Mock()
+        selected = intention("curiosity")
+        model.complete_text.return_value = json.dumps({**selected, "should_act": True})
+        with patch("common.intention_note.review_intention_note", return_value="想看看它那两条腿") as review:
+            result = draft_decision({}, self.policy.state, self.now, model=model)
+        self.assertEqual(result, {**selected, "reason": "想看看它那两条腿"})
+        self.assertEqual(self.policy.state.last_decision["reason"], result["reason"])
+        self.assertFalse(review.call_args.kwargs["optional"])
+        model.complete_text.return_value = json.dumps(
+            {"should_act": False, "reason": "旧事又数了一遍", "wait_scope": "review", "delay_seconds": 95})
+        with patch("common.intention_note.review_intention_note", return_value="") as review:
+            self.assertIsNone(draft_decision({}, self.policy.state, self.now, model=model))
+        self.assertTrue(review.call_args.kwargs["optional"])
+        self.assertEqual(self.policy.state.last_decision,
+                         {"at": self.now, "status": "quiet", "reason": "", "delay_seconds": 95, "wait_scope": "review"})
+
     def test_model_changed_focus_updates_feedback_interest_and_appraisal(self):
         self.policy.appraise({"emotion": {"valence": 0, "arousal": .5, "social": .5, "curiosity": .5},
                              "interests": ["螃蟹"]}, "1", self.now)

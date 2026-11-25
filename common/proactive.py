@@ -823,6 +823,7 @@ def appraise_history(context, state, now, *, model=None):
 
 def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowed_kinds=DRIVES):
     import persona_profile
+    from common.intention_note import review_intention_note
     result = inspect_decision(_complete(
         f"{persona_profile.brief()}\n{persona_profile.intention_voice()}\n"
         "这会儿没人问我问题。我可以按自己的心情和精力，挑一件真想做的事，也可以什么都不挑。"
@@ -852,8 +853,17 @@ def draft_decision(context, state, now, *, model=None, capabilities="QQ", allowe
          "recent_intents": state.recent_intents,
          "allowed_kinds": list(allowed_kinds), "now": now}, model,
     ), recent_intents=state.recent_intents, now=now)
+    decision = result.get("decision")
+    if decision or result["status"] == "quiet":
+        choice = decision["kind"] if decision else result["wait_scope"]
+        result["reason"] = review_intention_note(
+            result["reason"], model=model, choice=choice, optional=choice == "review",
+            topic=decision["topic"] if decision else "", intent=decision["intent"] if decision else "",
+        )
+        if decision:
+            decision["reason"] = result["reason"]
     state.last_decision = {**result, "at": now}
-    return result.get("decision")
+    return decision
 
 
 def intention_prompt(candidate):
