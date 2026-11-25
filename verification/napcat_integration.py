@@ -721,7 +721,7 @@ class Integration(unittest.TestCase):
         rows = self.store.claim("worker", 0, 0)
         first_chain = [
             {"type": "reply", "data": {"id": "401"}},
-            {"type": "text", "data": {"text": "这段很长也保持为模型选择的一条消息\n保留模型自己的换行"}},
+            {"type": "text", "data": {"text": "诶？？！！\n你说的是 3.5 公里（单程）……那得早点走。"}},
             {"type": "image", "data": {"file": "https://example.test/media.png", "sub_type": 1}},
             {"type": "face", "data": {"id": "1"}},
         ]
@@ -1004,6 +1004,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.store.context(self.store.identity(current))[-1]["content"], "好呀")
 
     def test_final_text_fallback_compacts_without_splitting_in_private_and_group(self):
+        expected = "啊？？！！\n等我一下……\n好，14:30 到（东门）。带 3.5 元。"
         for group in (None, "10"):
             with self.subTest(group=group):
                 current = event("1", group=group, msg_id=410, message=[
@@ -1014,12 +1015,18 @@ class Integration(unittest.TestCase):
 
                 class Model:
                     def run_skill_protocol(inner, *args, **kwargs):
-                        return "\n那当然啦\n \n这点小事\n正常换行\n\n", [], []
+                        return "\n" + expected.replace("！！\n", "！！\n \n") + "\n\n", [], []
 
+                before = len(self.api.calls)
                 QQThinking(self.store, self.client).process(rows, Model())
-            pass #                 self.assertEqual(self.api.calls[-1][1]["message"], [
-            #                     {"type": "text", "data": {"text": "那当然啦\n这点小事\n正常换行"}}])
-            #                 self.store.finish([row["id"] for row in rows], "compact-fallback")
+                action = "send_group_msg" if group else "send_private_msg"
+                sends = [params["message"] for name, params in self.api.calls[before:] if name == action]
+                self.assertEqual(sends, [[{"type": "text", "data": {"text": expected}}]])
+                identity = self.store.identity(current)
+                history = self.store.context(identity)
+                historical = f"[QQ:{identity.account} Bines] {expected}" if group else expected
+                self.assertEqual([m["content"] for m in history if m["role"] == "assistant"], [historical])
+                self.store.finish([row["id"] for row in rows], "compact-fallback")
 
     def test_cq_and_streaming_transport_nonblocking(self):
         self.assertEqual(segments("[CQ:at,qq=99]a&amp;b")[1]["data"]["text"], "a&b")

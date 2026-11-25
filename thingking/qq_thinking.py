@@ -243,21 +243,13 @@ class QQThinking:
                     context.journal.turn_message_refs.append(ref)
 
     def reply_actions(self, identity, texts):
-        """Legacy final-text fallback preserves model text without automatic @. Splits multiline output."""
-        actions = []
-        for text in texts:
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                chain = [{"type": "text", "data": {"text": line}}]
-                if identity.group:
-                    actions.append({"action": "send_group_msg",
-                                    "params": {"group_id": identity.group, "message": chain}})
-                else:
-                    actions.append({"action": "send_private_msg",
-                                    "params": {"user_id": identity.user, "message": chain}})
-        return actions
+        """Each final text is one QQ message, including any line breaks in it."""
+        action = "send_group_msg" if identity.group else "send_private_msg"
+        target = {"group_id": identity.group} if identity.group else {"user_id": identity.user}
+        return [
+            {"action": action, "params": {**target, "message": [{"type": "text", "data": {"text": text}}]}}
+            for text in texts if text.strip()
+        ]
 
     def send_actions(self, identity, turn_id, actions, start=0, *, activity=None, handoff=None):
         """Send segments once each; persisted progress lets a crash resume without duplicates."""
