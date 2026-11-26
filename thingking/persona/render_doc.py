@@ -5,13 +5,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 
-from persona_profile import render_markdown  # noqa: E402
+from persona_profile import PERSONA_PATH, render_markdown  # noqa: E402
 
 DOC_PATH = HERE / "PERSONA.md"
 
 
 def main() -> int:
-    rendered = render_markdown()
+    rendered = render_markdown(path=PERSONA_PATH)
     if "--check" in sys.argv:
         current = DOC_PATH.read_text(encoding="utf-8") if DOC_PATH.exists() else ""
         if current != rendered:

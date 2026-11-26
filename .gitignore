@@ -33,6 +33,7 @@ venv/
 .tools/qq-quote-*/
 .tools/qq-turn-wait-*/
 .tools/agent-browser/
+.tools/chatbot-clone/
 singing/singing_venv/
 voiceprints
 /model

@@ -1,0 +1,101 @@
+# Applied only by the launcher with --project-name bines-clone.
+name: bines-clone
+
+x-clone-memory: &clone-memory ${_BINES_CLONE_DIR:?请通过 bines.py 启动分身}/memory_data:/app/thingking/memory_data
+x-clone-env: &clone-env
+  BINES_MODE: clone
+  BINES_ENV_FILE: /dev/null
+  BINES_AUTONOMY_BACKEND: redis
+  BINES_RAG_RPC_PORT: "5560"
+  BINES_MEMORY_RPC_TOKEN: ""
+  BINES_QQ_GATEWAY_TOKEN: ""
+  BINES_ADMIN_TOKEN: ""
+  BINES_MODEL_USAGE_PATH: ""
+  BINES_HEALTH_DIR: ""
+  BINES_WEBSITE_AUTO_OBSERVE: "false"
+  BINES_WEBSITE_BRIDGE_SPOOL: /app/thingking/memory_data/website_bridge
+  BINES_WEBSITE_BRIDGE_TOKEN: ""
+  ARK_MCP_URL: ""
+  ARK_MCP_TOKEN: ""
+  MOMENTS_API_BASE_URL: ""
+  MOMENTS_TOKEN: ""
+  TOGGLE_STATUS_TOKEN: ""
+
+services:
+  gateway-init:
+    volumes:
+      - type: volume
+        source: bines-gateway
+        target: /app/gateway_data
+        volume:
+          nocopy: true
+
+  napcat:
+    env_file: !override
+      - path: ${_BINES_CLONE_DIR}/napcat/.env
+        required: false
+    ports: !override
+      - "127.0.0.1:${NAPCAT_WEBUI_PORT:-16099}:6099"
+      - "127.0.0.1:${NAPCAT_WS_PORT:-16101}:3001"
+    volumes:
+      - ${_BINES_CLONE_DIR}/napcat/data/qq:/app/.config/QQ
+      - ${_BINES_CLONE_DIR}/napcat/data/config:/app/napcat/config
+      - ${_BINES_CLONE_DIR}/napcat/data/plugins:/app/napcat/plugins
+      - ${_BINES_CLONE_DIR}/napcat/data/media:/bines-media
+
+  redis:
+    ports: !reset []
+    volumes:
+      - ${_BINES_CLONE_DIR}/memory_data/autonomy_redis.conf:/usr/local/etc/redis/redis.conf:ro
+
+  qdrant:
+    ports: !reset []
+
+  memory-server:
+    environment: *clone-env
+    ports: !override
+      - "127.0.0.1:15560:5560"
+    volumes:
+      - *clone-memory
+
+  chatbot:
+    environment:
+      <<: *clone-env
+      BINES_MEMORY_BACKEND: remote
+      BINES_BOT_QQ_ID: "${NAPCAT_ACCOUNT:-}"
+      BINES_NAPCAT_ACCESS_TOKEN: "${NAPCAT_WS_TOKEN:-}"
+      BINES_NAPCAT_WEBUI_TOKEN: "${NAPCAT_WEBUI_TOKEN:-}"
+    ports: !override
+      - "127.0.0.1:16102:6102"
+    volumes:
+      - *clone-memory
+      - ${_BINES_CLONE_DIR}/napcat/data:/app/deploy/napcat/data
+
+  qq-thinking:
+    environment: *clone-env
+    volumes:
+      - *clone-memory
+
+  memory-worker:
+    environment: *clone-env
+    volumes:
+      - *clone-memory
+
+  rag-web:
+    environment:
+      <<: *clone-env
+      BINES_CONFIG_ROOT: /app
+      BINES_RAG_WEB_PORT: "5001"
+    ports: !override
+      - "127.0.0.1:15001:5001"
+    volumes: !override
+      - *clone-memory
+      - bines-gateway:/app/gateway_data:ro
+
+volumes:
+  bines-gateway:
+    name: ${COMPOSE_PROJECT_NAME}-gateway
+  bines-qdrant:
+    name: ${COMPOSE_PROJECT_NAME}-qdrant
+  bines-autonomy:
+    name: ${COMPOSE_PROJECT_NAME}-autonomy

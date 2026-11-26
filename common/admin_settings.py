@@ -30,10 +30,9 @@ _LOCK = threading.RLock()
 _ASSIGN = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$")
 _EXAMPLE = re.compile(r"^\s*(?:#\s*)?([A-Z][A-Z0-9_]+)\s*=\s*(.*)$")
 _PREFIXES = ("BINES_", "DEEPSEEK_", "HEARING_", "SINGING_", "SOVITS_", "GPT_SOVITS_", "ARK_", "MOMENTS_", "VOCU_", "HF_", "RAG_", "VISUAL_", "NAPCAT_", "TOGGLE_STATUS_", "AGENT_BROWSER_")
-_READONLY = {"BINES_CONFIG_ROOT", "BINES_ENV_FILE", "BINES_DOCKER_MODE", "BINES_ADMIN_LOCAL_PROXY"}
+_READONLY = {"BINES_CONFIG_ROOT", "BINES_ENV_FILE", "BINES_DOCKER_MODE", "BINES_ADMIN_LOCAL_PROXY", "BINES_MODE"}
 _SECRET = re.compile(r"(?:API_KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL)(?:_|$)")
 _DOCS = {
-    "persona": "thingking/persona/persona.yaml",
     "mcp": "mcp.servers.json",
     "screen": "server/realtime_screen_config.json",
     "skills": "server/skill_actions.json",
@@ -185,6 +184,7 @@ def settings_schema():
             "BINES_ENV_FILE": "启动服务前指定的环境文件，由加载器在读取文件前选择。",
             "BINES_DOCKER_MODE": "启动器在混合运行模式下自动注入。",
             "BINES_ADMIN_LOCAL_PROXY": "由容器部署注入，用于识别本地管理连接。",
+            "BINES_MODE": "由容器部署注入，用于选择主实例或分身人格。",
         }[key] + " 此项在控制中心只读。"
     for key, field in entries.items():
         value = field.get("default", field.get("example"))
@@ -388,6 +388,9 @@ class SettingsStore:
             self.mcp_file = self.mcp_file.relative_to(PROJECT_ROOT)
 
     def _document_path(self, document_id):
+        if document_id == "persona":
+            from thingking.src.persona_profile import active_persona_path
+            return active_persona_path().relative_to(PROJECT_ROOT)
         if document_id not in _DOCS:
             raise ConfigurationError("未知配置文档")
         if document_id == "mcp":
@@ -512,6 +515,7 @@ class SettingsStore:
 
     def document(self, document_id):
         content, revision, exists = self._document(document_id)
+        path = self._document_path(document_id)
         secret_paths = []
         if document_id == "mcp":
             content = _mask_mcp(content, secret_paths)
@@ -523,9 +527,11 @@ class SettingsStore:
         }
         if self.docker and document_id == "mcp":
             notes["mcp"] += " Docker 的 QQ Thinking 使用宿主配置文件。保存后重新运行 python bines.py，使容器挂载新版本。"
-        if self.docker and document_id in {"persona", "skills"}:
+        if document_id == "persona" and path.name != "persona.yaml":
+            notes["persona"] = f"分身人格以 {path.as_posix()} 为准；在工作区修改后重新启动分身。"
+        elif self.docker and document_id in {"persona", "skills"}:
             notes[document_id] += " 已保存到宿主配置目录。使用镜像内配置的容器须重新构建镜像并重新创建。"
-        return {"id": document_id, "path": str(self._document_path(document_id)), "revision": revision, "exists": exists,
+        return {"id": document_id, "path": str(path), "revision": revision, "exists": exists,
                 "format": "json", "content": content, "secret_paths": secret_paths,
                 "restart_required": self.docker and document_id != "screen",
                 "note": notes[document_id]}
@@ -703,10 +709,15 @@ def _validate_persona(content):
         raise ConfigurationError("人格结构不完整；请保留模型提示所需的 identity、appearance、personality、reactions、capability_boundaries、voice_guard、proactive 与 diary 字段") from None
 
 
-def create_settings_blueprint(config_root=None):
+def create_settings_blueprint(config_root=None, *, read_only=False):
     """Register behind the host application's existing admin guard."""
     blueprint = Blueprint("control_settings", __name__)
     store = SettingsStore(config_root)
+
+    @blueprint.before_request
+    def protect_read_only_config():
+        if read_only and request.method == "PUT":
+            return jsonify(success=False, error="分身配置在管理页只读；请修改工作区的对应文件后重启分身"), 403
 
     def respond(action):
         try:

@@ -19,7 +19,9 @@ from common.admin_auth import install_admin_guard  # noqa: E402
 
 app = Flask(__name__, static_folder="rag_web_static", static_url_path="")
 app.config["JSON_AS_ASCII"] = False
-install_admin_guard(app, "memory", entrypoints=("/", "/constellation", "/status", "/control"))
+clone = os.getenv("BINES_MODE") == "clone"
+install_admin_guard(app, "memory_clone" if clone else "memory",
+                    entrypoints=("/", "/constellation", "/status", "/control"))
 client = MemoryClient(ZMQ_HOST, ZMQ_PORTS["RAG_SERVER_REQREP"])
 
 from server.status_dashboard import create_status_blueprint  # noqa: E402
@@ -29,7 +31,7 @@ from server.state_controls import create_state_controls_blueprint  # noqa: E402
 
 app.register_blueprint(create_status_blueprint(None, HTTP_PORTS))
 app.register_blueprint(create_portability_blueprint())
-app.register_blueprint(create_settings_blueprint())
+app.register_blueprint(create_settings_blueprint(read_only=clone))
 app.register_blueprint(create_state_controls_blueprint())
 
 

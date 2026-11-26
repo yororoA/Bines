@@ -1,4 +1,4 @@
-"""Friendly alias: python bines.py [--profile chatbot|full]."""
+"""Launch Bines, including the isolated --profile chatbot --mode clone."""
 from runtime_environments import enter_launcher
 
 if __name__ == "__main__":

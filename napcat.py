@@ -155,25 +155,24 @@ def write_secret(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def initialize(settings_path=None):
-    load_env()
-    data = DEPLOY / "data"
+def initialize_deploy(deploy, defaults):
+    """Create login storage and OneBot configuration for one NapCat instance."""
+    deploy = Path(deploy)
+    data = deploy / "data"
     for folder in ("qq", "config", "plugins", "media", "media/public"):
         (data / folder).mkdir(parents=True, exist_ok=True)
-    values = {}
-    env_path = DEPLOY / ".env"
-    if env_path.exists():
-        values = read_env(env_path)
-    settings_path = Path(settings_path) if settings_path else ROOT / ".env"
-    root_values = read_env(settings_path)
-    values.setdefault("NAPCAT_ACCOUNT", root_values.get("BINES_BOT_QQ_ID", os.environ.get("BINES_BOT_QQ_ID", "")))
-    values.setdefault("NAPCAT_WS_TOKEN", root_values.get("BINES_NAPCAT_ACCESS_TOKEN") or secrets.token_urlsafe(32))
-    values.setdefault("NAPCAT_WEBUI_TOKEN", root_values.get("BINES_NAPCAT_WEBUI_TOKEN") or secrets.token_urlsafe(32))
-    values.setdefault("NAPCAT_WS_PORT", str(urlsplit(root_values.get("BINES_NAPCAT_WS_URL", "")).port or 6101))
-    values.setdefault("NAPCAT_WEBUI_PORT", str(urlsplit(root_values.get("BINES_NAPCAT_WEBUI_URL", "")).port or 6099))
+    env_path = deploy / ".env"
+    values = read_env(env_path)
+    before = values.copy()
+    values.setdefault("NAPCAT_ACCOUNT", defaults.get("NAPCAT_ACCOUNT", ""))
+    values.setdefault("NAPCAT_WS_TOKEN", defaults.get("NAPCAT_WS_TOKEN") or secrets.token_urlsafe(32))
+    values.setdefault("NAPCAT_WEBUI_TOKEN", defaults.get("NAPCAT_WEBUI_TOKEN") or secrets.token_urlsafe(32))
+    values.setdefault("NAPCAT_WS_PORT", defaults["NAPCAT_WS_PORT"])
+    values.setdefault("NAPCAT_WEBUI_PORT", defaults["NAPCAT_WEBUI_PORT"])
     values.setdefault("NAPCAT_UID", str(os.getuid() if hasattr(os, "getuid") else 1000))
     values.setdefault("NAPCAT_GID", str(os.getgid() if hasattr(os, "getgid") else 1000))
-    write_secret(env_path, "\n".join(f"{key}={value}" for key, value in values.items())+"\n")
+    if values != before:
+        write_secret(env_path, "\n".join(f"{key}={value}" for key, value in values.items()) + "\n")
     onebot = {
         "network": {"httpServers": [], "httpSseServers": [], "httpClients": [],
                     "websocketClients": [], "websocketServers": [{
@@ -195,7 +194,20 @@ def initialize(settings_path=None):
     webui = data / "config" / "webui.json"
     if not webui.exists():
         write_secret(webui, json.dumps({"host": "0.0.0.0", "port": 6099, "token": values["NAPCAT_WEBUI_TOKEN"]}, indent=2))
-    env = settings_path
+    return values
+
+
+def initialize(settings_path=None):
+    load_env()
+    env = Path(settings_path) if settings_path else ROOT / ".env"
+    root_values = read_env(env)
+    values = initialize_deploy(DEPLOY, {
+        "NAPCAT_ACCOUNT": root_values.get("BINES_BOT_QQ_ID", os.environ.get("BINES_BOT_QQ_ID", "")),
+        "NAPCAT_WS_TOKEN": root_values.get("BINES_NAPCAT_ACCESS_TOKEN"),
+        "NAPCAT_WEBUI_TOKEN": root_values.get("BINES_NAPCAT_WEBUI_TOKEN"),
+        "NAPCAT_WS_PORT": str(urlsplit(root_values.get("BINES_NAPCAT_WS_URL", "")).port or 6101),
+        "NAPCAT_WEBUI_PORT": str(urlsplit(root_values.get("BINES_NAPCAT_WEBUI_URL", "")).port or 6099),
+    })
     text = env.read_text() if env.exists() else ""
     additions = {
         "BINES_NAPCAT_WS_URL": f"ws://127.0.0.1:{values['NAPCAT_WS_PORT']}",
@@ -215,22 +227,47 @@ def initialize(settings_path=None):
     print("NapCat 配置已就绪；登录数据、配置、插件和媒体均独立持久化。")
 
 
+def open_webui(env_path):
+    import webbrowser
+
+    values = read_env(env_path)
+    port = values["NAPCAT_WEBUI_PORT"]
+    token = quote(values["NAPCAT_WEBUI_TOKEN"], safe="")
+    webbrowser.open(f"http://127.0.0.1:{port}/webui?token={token}")
+    print(f"已使用 {env_path.relative_to(ROOT).as_posix()} 中的 token 打开 NapCat WebUI。")
+
+
 def main():
     load_env()
     parser = argparse.ArgumentParser(description="NapCat Docker 部署管理")
     parser.add_argument("action", choices=["init", "up", "down", "logs", "status", "update", "config", "webui"])
+    parser.add_argument("--mode", choices=["normal", "clone"], default="normal")
     args = parser.parse_args()
+    if args.mode == "clone":
+        import docker_launcher
+
+        if args.action not in {"logs", "status", "webui"}:
+            parser.error("分身 NapCat 由 bines.py --profile chatbot --mode clone 启停")
+        if args.action == "webui":
+            env_path = docker_launcher.clone_directory() / "napcat" / ".env"
+            if not env_path.is_file():
+                parser.error("请先启动 ChatBot 分身")
+            open_webui(env_path)
+        elif args.action == "logs":
+            docker_launcher.follow("clone", "napcat")
+        else:
+            result = docker_launcher.run("clone", "ps", "napcat", timeout=30)
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            if result.returncode:
+                raise SystemExit(result.returncode)
+        return
     if args.action in {"init", "up", "webui"}:
         initialize()
     if args.action == "init":
         return
     if args.action == "webui":
-        import webbrowser
-        values = read_env(DEPLOY / ".env")
-        port = values.get("NAPCAT_WEBUI_PORT", "6099")
-        token = quote(values.get("NAPCAT_WEBUI_TOKEN", ""), safe="")
-        webbrowser.open(f"http://127.0.0.1:{port}/webui?token={token}")
-        print("已使用 deploy/napcat/.env 中的 token 打开 NapCat WebUI。")
+        open_webui(DEPLOY / ".env")
         return
     docker = docker_executable()
     if not docker:

@@ -19,17 +19,16 @@ from typing import Dict, List, Set
 
 ROOT = Path(__file__).resolve().parent
 COMPOSE_FILE = ROOT / "deploy" / "docker" / "compose.yaml"
+CLONE_COMPOSE_FILE = COMPOSE_FILE.with_name("compose.clone.yaml")
+CLONE_PROJECT = "bines-clone"
 NAPCAT_ENV = ROOT / "deploy" / "napcat" / ".env"
 BUILDER_NAME = "bines"
 BUILDX_CONFIG = ROOT / ".tools" / "docker" / "buildx"
 IMAGE_HASH_LABEL = "io.bines.source-hash"
 BUILD_SERVICES = {"chatbot": "bines-launcher:local", "memory-server": "bines-thinking:local"}
 
-REQUIRED_SERVICES = {
-    "chatbot": ("napcat", "redis", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
-    "full": ("napcat", "redis", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web"),
-}
-HEALTH_REQUIRED = {"redis", "chatbot", "memory-server", "rag-web", "napcat", "qq-thinking", "memory-worker"}
+_CHATBOT_SERVICES = ("napcat", "redis", "qdrant", "memory-server", "chatbot", "qq-thinking", "memory-worker", "rag-web")
+REQUIRED_SERVICES = dict.fromkeys(("chatbot", "full", "clone"), _CHATBOT_SERVICES)
 
 
 class DockerError(RuntimeError):
@@ -186,10 +185,18 @@ def available() -> bool:
     return bool(docker_executable() and COMPOSE_FILE.is_file())
 
 
+def clone_directory() -> Path:
+    return ROOT / ".tools" / "chatbot-clone"
+
+
 def compose_command(profile: str, *args: str) -> List[str]:
     command = [docker_executable() or "docker", "compose", "-f", str(COMPOSE_FILE)]
-    if NAPCAT_ENV.is_file():
-        command[2:2] = ["--env-file", str(NAPCAT_ENV)]
+    napcat_env = NAPCAT_ENV
+    if profile == "clone":
+        command += ["--project-name", CLONE_PROJECT, "-f", str(CLONE_COMPOSE_FILE)]
+        napcat_env = clone_directory() / "napcat" / ".env"
+    if napcat_env.is_file():
+        command[2:2] = ["--env-file", str(napcat_env)]
     if profile == "full":
         command += ["--profile", "full"]
     command += list(args)
@@ -198,31 +205,42 @@ def compose_command(profile: str, *args: str) -> List[str]:
 
 def _environment(profile: str) -> Dict[str, str]:
     from common.clock import timezone
-    from common.website_spool import read_bridge_token
     env = dict(os.environ)
     # Bind only the active MCP file. A new inode after an atomic GUI save
     # makes Compose recreate its consumer and attach the new file.
     mcp_path = ROOT / (env.get("BINES_MCP_CONFIG") or "mcp.servers.json")
-    if not mcp_path.is_file():
+    if profile == "clone" or not mcp_path.is_file():
         mcp_path = COMPOSE_FILE.parent / "empty-mcp.json"
     env["_BINES_DOCKER_MCP_FILE"] = str(mcp_path.resolve())
     meta = mcp_path.stat()
     env["_BINES_DOCKER_MCP_VERSION"] = f"{meta.st_ino}:{meta.st_mtime_ns}"
-    env["BINES_PROFILE"] = profile
+    env["BINES_PROFILE"] = "chatbot" if profile == "clone" else profile
     env["BINES_MEMORY_TIMEZONE"] = timezone().key
     env["BUILDX_CONFIG"] = str(BUILDX_CONFIG)
     env.setdefault("BINES_UID", str(os.getuid() if hasattr(os, "getuid") else 1000))
     env.setdefault("BINES_GID", str(os.getgid() if hasattr(os, "getgid") else 1000))
-    try:
-        token = read_bridge_token(
-            ROOT / "thingking" / "memory_data" / "website_bridge",
-            env.get("BINES_WEBSITE_BRIDGE_TOKEN", ""),
-        )
-        if token:
-            env["BINES_WEBSITE_BRIDGE_TOKEN"] = token
-    except (OSError, ValueError):
-        # A broken optional browser bridge must not block Docker maintenance.
-        pass
+    if profile == "clone":
+        # Compose interpolation must not pick up the original account or tokens
+        # from the shell or the root .env before the clone's first startup.
+        napcat_env = clone_directory() / "napcat" / ".env"
+        from common.env import read_env
+        values = read_env(napcat_env)
+        for name in ("NAPCAT_ACCOUNT", "NAPCAT_WS_TOKEN", "NAPCAT_WEBUI_TOKEN",
+                     "NAPCAT_UID", "NAPCAT_GID", "NAPCAT_WS_PORT", "NAPCAT_WEBUI_PORT"):
+            env[name] = values.get(name, "")
+        env["_BINES_CLONE_DIR"] = str(clone_directory())
+    else:
+        from common.website_spool import read_bridge_token
+        try:
+            token = read_bridge_token(
+                ROOT / "thingking" / "memory_data" / "website_bridge",
+                env.get("BINES_WEBSITE_BRIDGE_TOKEN", ""),
+            )
+            if token:
+                env["BINES_WEBSITE_BRIDGE_TOKEN"] = token
+        except (OSError, ValueError):
+            # A broken optional browser bridge must not block Docker maintenance.
+            pass
     for service, digest in source_hashes(env).items():
         env["BINES_" + service.upper().replace("-", "_") + "_HASH"] = digest
     return env
@@ -241,6 +259,7 @@ def run(profile: str, *args: str, timeout: float = 3600) -> subprocess.Completed
         command, cwd=ROOT, env=_environment(profile), text=True,
         capture_output=True, timeout=timeout, **_process_options(),
     )
+
 
 def run_build(profile: str, *services: str, timeout: float = 3600):
     from common.docker_progress import stream_build
@@ -433,25 +452,33 @@ def cleanup_build_cache(*, prune=True) -> None:
             _docker("buildx", "stop", BUILDER_NAME, timeout=60), "停止 Bines 构建器失败"), failure)
 
 
-def cleanup_containers() -> None:
-    for project in ("bines", "bines-napcat"):
+def cleanup_containers(*projects) -> None:
+    for project in projects or ("bines", "bines-napcat"):
         _check_result(
             _docker("container", "prune", "--force", "--filter", f"label=com.docker.compose.project={project}"),
             "清理 Bines 已停止容器失败",
         )
 
 
-def cleanup_images() -> None:
+def cleanup_images(project="bines") -> None:
     """只删除 Compose 标记为 Bines 的无标签旧镜像；当前镜像及卷保留。"""
     _check_result(
-        _docker("image", "prune", "--force", "--filter", "label=com.docker.compose.project=bines"),
+        _docker("image", "prune", "--force", "--filter", f"label=com.docker.compose.project={project}"),
         "清理 Bines 旧镜像失败",
     )
 
 
 def up(profile: str) -> None:
     from common.autonomy_store import prepare_redis
-    prepare_redis(ROOT / "thingking" / "memory_data")
+    if profile == "clone":
+        from napcat import initialize_deploy
+        directory = clone_directory()
+        initialize_deploy(directory / "napcat", {
+            "NAPCAT_WS_PORT": "16101", "NAPCAT_WEBUI_PORT": "16099",
+        })
+        prepare_redis(directory / "memory_data")
+    else:
+        prepare_redis(ROOT / "thingking" / "memory_data")
     stale = _stale_services()
     if stale:
         print("源码有更新，正在构建：" + ", ".join(stale), flush=True)
@@ -465,33 +492,40 @@ def up(profile: str) -> None:
         finally:
             _cleanup_preserving_failure(cleanup_build_cache, failure)
     _check_result(run(profile, "up", "-d", "--no-build"), "Docker 启动失败")
-    cleanup_images()
+    if profile == "clone":
+        cleanup_images(CLONE_PROJECT)
+    else:
+        cleanup_images()
 
 
-def down(previously_running=None) -> None:
+def down(previously_running=None, *, target="full") -> None:
     """删除本次启动的容器和日志，保留启动前运行的服务、镜像和挂载数据。"""
     if threading.current_thread() is not threading.main_thread():
-        _down(previously_running)
+        _down(previously_running, target)
         return
     handlers = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        _down(previously_running)
+        _down(previously_running, target)
     finally:
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
 
 
-def _down(previously_running) -> None:
+def _down(previously_running, target) -> None:
     if not previously_running:
-        _check_result(run("full", "down", "--remove-orphans", timeout=120), "Docker 停止失败")
+        _check_result(run(target, "down", "--remove-orphans", timeout=120), "Docker 停止失败")
     else:
-        services = sorted(set(REQUIRED_SERVICES["full"]) - set(previously_running))
+        services = sorted(set(REQUIRED_SERVICES[target]) - set(previously_running))
         if services:
-            _check_result(run("full", "stop", "--timeout", "20", *services), "Docker 停止失败")
-            _check_result(run("full", "rm", "--force", *services), "Docker 容器清理失败")
-    cleanup_containers()
-    cleanup_images()
-    cleanup_build_cache(prune=False)
+            _check_result(run(target, "stop", "--timeout", "20", *services), "Docker 停止失败")
+            _check_result(run(target, "rm", "--force", *services), "Docker 容器清理失败")
+    if target == "clone":
+        cleanup_containers(CLONE_PROJECT)
+        cleanup_images(CLONE_PROJECT)
+    else:
+        cleanup_containers()
+        cleanup_images()
+        cleanup_build_cache(prune=False)
 
 
 def _images_ready(profile: str) -> bool:
@@ -535,7 +569,7 @@ def wait_ready(profile: str, timeout: float = 420) -> None:
             row = last.get(service) or {}
             running = (row.get("State") or "").lower() == "running"
             health = (row.get("Health") or "").lower()
-            if not running or (service in HEALTH_REQUIRED and health != "healthy"):
+            if not running or health != "healthy":
                 ready = False
                 break
         if ready:
@@ -548,9 +582,9 @@ def wait_ready(profile: str, timeout: float = 420) -> None:
     raise DockerError(f"Docker 服务未在 {int(timeout)} 秒内就绪：{states or '没有容器'}")
 
 
-def follow(profile: str) -> None:
+def follow(profile: str, *services: str) -> None:
     """Stream logs until Ctrl+C; containers stay managed by the caller."""
-    command = compose_command(profile, "logs", "-f", "--tail", "80")
+    command = compose_command(profile, "logs", "-f", "--tail", "80", *services)
     process = subprocess.Popen(command, cwd=ROOT, env=_environment(profile), **_process_options())
     try:
         process.wait()

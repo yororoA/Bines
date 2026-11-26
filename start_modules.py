@@ -81,6 +81,8 @@ def _run_docker(options):
     """Start the QQ/memory chain through compose, then host desktop services in full mode."""
     import docker_launcher
 
+    clone = getattr(options, "mode", "normal") == "clone"
+    target = "clone" if clone else options.profile
     os.environ["BINES_DOCKER_MODE"] = "1"
     # The compose network owns NapCat; host services must not start another container.
     os.environ["BINES_NAPCAT_DEPLOY"] = "external"
@@ -89,13 +91,16 @@ def _run_docker(options):
     try:
         print("正在检查 Docker 引擎…", flush=True)
         docker_launcher.ensure_engine()
-        already_running = docker_launcher.running_services("full")
-        print("QQ 登录/扫码状态：另开终端运行 python napcat.py logs。", flush=True)
-        print("python napcat.py webui 打开 NapCat 管理页；管理页不显示 QQ 登录二维码。", flush=True)
+        already_running = docker_launcher.running_services("clone" if clone else "full")
+        mode_arg = " --mode clone" if clone else ""
+        print(f"QQ 登录/扫码状态：另开终端运行 python napcat.py logs{mode_arg}。", flush=True)
+        print(f"python napcat.py webui{mode_arg} 打开 NapCat 管理页；管理页不显示 QQ 登录二维码。", flush=True)
         print("正在启动 Docker 链路…", flush=True)
-        docker_launcher.up(options.profile)
-        docker_launcher.wait_ready(options.profile)
-        print("Docker 服务已就绪：" + ", ".join(docker_launcher.REQUIRED_SERVICES[options.profile]), flush=True)
+        docker_launcher.up(target)
+        docker_launcher.wait_ready(target)
+        print("Docker 服务已就绪：" + ", ".join(docker_launcher.REQUIRED_SERVICES[target]), flush=True)
+        if clone:
+            print("分身记忆管理：http://127.0.0.1:15001", flush=True)
         print("QQ 连接/扫码情况请查看 NapCat 日志，服务就绪不代表 QQ 已登录。", flush=True)
         if options.profile == "chatbot":
             print("接下来跟随服务日志；NapCat 输出的登录二维码会显示在这里。", flush=True)
@@ -103,7 +108,7 @@ def _run_docker(options):
             if already_running:
                 print("启动前已运行的服务将保留：" + ", ".join(sorted(already_running)), flush=True)
             try:
-                docker_launcher.follow(options.profile)
+                docker_launcher.follow(target)
             except KeyboardInterrupt:
                 pass
             return 0
@@ -112,14 +117,17 @@ def _run_docker(options):
         print("启动已取消。", flush=True)
         return 130
     except Exception as exc:
-        print(docker_launcher.startup_failure_report(options.profile, exc,
+        print(docker_launcher.startup_failure_report(target, exc,
                   inspect_services=already_running is not None), file=sys.stderr, flush=True)
         return 1
     finally:
         if already_running is not None:
             print("正在停止并清理本次 Docker 链路…", flush=True)
             try:
-                docker_launcher.down(previously_running=already_running)
+                if clone:
+                    docker_launcher.down(previously_running=already_running, target=target)
+                else:
+                    docker_launcher.down(previously_running=already_running)
             except Exception as exc:
                 print(docker_launcher.format_failure(exc, "Docker 清理失败"), file=sys.stderr, flush=True)
                 return 1
@@ -131,8 +139,13 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop_on_signal)
     parser = argparse.ArgumentParser(description="启动 Bines，自动处理依赖、就绪与退出")
-    parser.add_argument("--profile", choices=["full", "chatbot"],
-                        default=os.environ.get("BINES_PROFILE", "full"))
+    profiles = parser.add_mutually_exclusive_group()
+    profiles.add_argument("--profile", choices=["full", "chatbot"],
+                          default=os.environ.get("BINES_PROFILE", "full"))
+    profiles.add_argument("--chatbot", dest="profile", action="store_const", const="chatbot",
+                          help="等同于 --profile chatbot")
+    parser.add_argument("--mode", choices=["normal", "clone"], default="normal",
+                        help="clone 启动独立的 ChatBot 分身（需要 Docker）")
     parser.add_argument("--web", action="store_true", help="启动服务并打开 Web 管理器")
     parser.add_argument("--console", action="store_true", help="终端模式，退出时停止本次启动的服务")
     parser.add_argument("--manager-only", action="store_true", help="只打开管理器，按需启动服务")
@@ -141,17 +154,33 @@ def main():
     parser.add_argument("--docker-down", action="store_true",
                         help="停止并删除 Bines 容器，清理旧镜像并停止构建器，保留记忆、当前镜像和构建缓存")
     options = parser.parse_args()
+    if options.mode == "clone":
+        if options.profile != "chatbot":
+            parser.error("--mode clone 仅支持 --profile chatbot（或 --chatbot）")
+        if options.host or options.external_napcat or options.web or options.manager_only:
+            parser.error("--mode clone 使用单独的 Docker 链路和 NapCat，不能与 --host、--external-napcat、--web 或 --manager-only 一起使用")
     os.environ["BINES_PROFILE"] = options.profile
     os.environ["_BINES_LAUNCH_PROFILE"] = options.profile
     if options.external_napcat:
         os.environ["BINES_NAPCAT_DEPLOY"] = "external"
         os.environ["_BINES_NAPCAT_DEPLOY"] = "external"
     import docker_launcher
+    if options.mode == "clone":
+        if not docker_launcher.available():
+            print("ChatBot 分身需要 Docker Compose，请安装 Docker 后重试。", file=sys.stderr, flush=True)
+            return 1
+        if not options.docker_down:
+            print("Bines · Docker · ChatBot 分身", flush=True)
+            return _run_docker(options)
     if options.docker_down:
         try:
             docker_launcher.ensure_engine()
-            docker_launcher.down()
-            print("Bines 容器与容器日志已清理，构建器已停止；记忆、当前镜像和构建缓存已保留。", flush=True)
+            if options.mode == "clone":
+                docker_launcher.down(target="clone")
+                print("ChatBot 分身容器已清理，分身记忆与登录数据已保留。", flush=True)
+            else:
+                docker_launcher.down()
+                print("Bines 容器与容器日志已清理，构建器已停止；记忆、当前镜像和构建缓存已保留。", flush=True)
             return 0
         except Exception as exc:
             print(f"Docker 清理失败：{exc}", file=sys.stderr, flush=True)

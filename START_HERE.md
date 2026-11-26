@@ -83,6 +83,21 @@ NapCat MCP：`python -m chatBot.mcp_server`，通过 stdio 连接；先启动网
 
 协议模拟回归（不连接真实 QQ）：`python -m unittest verification.napcat_integration verification.napcat_api_exposure -v`。暴露检查遍历全部 178 个 API，验证模型索引、Skill 调度、网关参数传递、MCP schema 和真实 stdio 客户端。该检查不证明 QQ 业务执行成功，真实部署与 QQ API 尚需实机核验。
 
+### ChatBot 分身
+
+```bash
+python bines.py --profile chatbot --mode clone
+```
+
+普通 ChatBot 也可用 `python bines.py --chatbot` 启动，使用 `thingking/persona/persona.yaml` 的碧波人格。分身使用 `thingking/persona/persona_clone.yaml` 的茉莉人格，独立积累对话、记忆和状态。它使用 `bines-clone` Docker 项目，持久化文件放在 `.tools/chatbot-clone/`，网关、Redis 和 Qdrant 也各有独立的 Docker 卷。分身可以和主实例同时运行，需要用另一个 QQ 账号扫码登录。
+
+- 查看分身扫码日志：`python napcat.py logs --mode clone`
+- 打开分身 NapCat 管理页：`python napcat.py webui --mode clone`
+- 查看分身记忆和状态：[http://127.0.0.1:15001](http://127.0.0.1:15001)
+- 停止分身：按 `Ctrl+C`，或运行 `python bines.py --profile chatbot --mode clone --docker-down`。重启时保留分身数据。
+
+分身需要 Docker Compose 2.24.4 或更高版本，不能与 `--host` 或 `--external-napcat` 一起使用。主实例的浏览器会话和外部 MCP 配置不会挂载到分身。修改分身人格文件后，重新启动分身即可生效。
+
 ## 日常启动
 
 从管理页或记忆库点击 **设置与控制**，也可直接打开 [宿主机控制中心](http://127.0.0.1:5000/control) 或 [记忆服务控制中心](http://127.0.0.1:5001/control)。端口可在配置中调整。

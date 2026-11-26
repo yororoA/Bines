@@ -1,5 +1,6 @@
 import re
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -27,7 +28,7 @@ class PersonaSourceTest(unittest.TestCase):
                 for marker in PERSONA_MARKERS:
                     if marker in text:
                         offenders.append(f"{path.relative_to(ROOT_DIR)}: {marker}")
-        self.assertEqual(offenders, [], "persona text must live only in thingking/persona/persona.yaml")
+        self.assertEqual(offenders, [], "persona text belongs in thingking/persona/*.yaml")
 
     def test_generated_doc_is_current(self):
         result = subprocess.run(
@@ -197,6 +198,22 @@ class PromptBuilderTest(unittest.TestCase):
                 self.assertIn(expected, messages[-1]["content"])
                 self.assertNotIn(absent, messages[-1]["content"])
         self.assertIn(character, persona_profile.diary_system_prompt())
+
+    def test_clone_uses_jasmine_for_chat_proactive_diary_and_admin(self):
+        from common.admin_settings import SettingsStore
+
+        with patch.dict(os.environ, {"BINES_MODE": "clone"}):
+            text, messages = self._system_text(qq_private_env(OWNER_QQ), "逗你的，你刚才当真了？")
+            self.assertIn("我是茉莉", messages[0]["content"])
+            self.assertIn("茉莉：", messages[-1]["content"])
+            self.assertIn("茉莉：那我现在晾你一会儿", persona_profile.relationship_guard({"relationship_level": "亲近"}))
+            self.assertNotIn("碧波", text)
+            self.assertIn("我是茉莉", persona_profile.brief())
+            self.assertIn("我是茉莉", persona_profile.diary_system_prompt())
+            document = SettingsStore(ROOT_DIR).document("persona")
+            self.assertEqual(document["content"]["identity"]["name"], "茉莉")
+            self.assertTrue(document["path"].endswith("persona_clone.yaml"))
+        self.assertIn("我是碧波", persona_profile.character_prompt())
 
     def test_group_scene_hides_owner_private_data(self):
         text, _ = self._system_text(qq_group_env(OWNER_QQ), "今天穿了什么？管理员的生日呢？")

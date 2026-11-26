@@ -1,8 +1,9 @@
-"""Load ``thingking/persona/persona.yaml`` (the only persona source) and render it for prompts and docs."""
+"""Load the active persona and render its prompts and documentation."""
 from __future__ import annotations
 
 import hashlib
 import math
+import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, List
@@ -10,13 +11,19 @@ from typing import Any, Dict, List
 import yaml
 
 PERSONA_PATH = Path(__file__).resolve().parents[1] / "persona" / "persona.yaml"
+CLONE_PERSONA_PATH = PERSONA_PATH.with_name("persona_clone.yaml")
 
 _lock = threading.Lock()
 _cache: Dict[str, Any] = {"mtime": None, "data": None}
 
 
-def load_persona(path: Path = PERSONA_PATH) -> Dict[str, Any]:
+def active_persona_path() -> Path:
+    return CLONE_PERSONA_PATH if os.getenv("BINES_MODE") == "clone" else PERSONA_PATH
+
+
+def load_persona(path: Path | None = None) -> Dict[str, Any]:
     """Return the parsed persona, reloading when the file changes on disk."""
+    path = path if path is not None else active_persona_path()
     mtime = path.stat().st_mtime
     with _lock:
         if _cache["data"] is None or _cache["mtime"] != mtime or _cache.get("path") != path:
@@ -120,16 +127,18 @@ def relationship_guard(state: Dict[str, Any], persona: Dict[str, Any] | None = N
         _bullets(voice.get("directives") or []),
         policy["tone"],
     ]
+    name = p["identity"]["name"]
     for row in policy.get("examples") or []:
-        parts.append(f"- 用户：{row['user']}\n  碧波：{row['assistant']}")
+        parts.append(f"- 用户：{row['user']}\n  {name}：{row['assistant']}")
     return "\n".join(parts)
 
 
 def _guard(persona: Dict[str, Any] | None, rules: str, relationship: str = "") -> str:
     p = persona or load_persona()
     guard = p["voice_guard"]
+    name = p["identity"]["name"]
     examples = "\n".join(
-        f"- 用户：{row['user']}\n  碧波：{row['assistant']}"
+        f"- 用户：{row['user']}\n  {name}：{row['assistant']}"
         for row in guard["examples"]
     )
     return "\n".join(part for part in [
@@ -163,7 +172,7 @@ def brief(persona: Dict[str, Any] | None = None) -> str:
 
 
 def intention_voice(persona: Dict[str, Any] | None = None) -> str:
-    """How Bines words a private note about a choice."""
+    """How the character words a private note about a choice."""
     p = persona or load_persona()
     return p.get("proactive", {}).get("intention_voice") or _bullets(p.get("speech_style") or [])
 
@@ -194,15 +203,18 @@ def diary_persona_version(persona: Dict[str, Any] | None = None) -> str:
     return hashlib.sha256(diary_system_prompt(persona).encode("utf-8")).hexdigest()
 
 
-def render_markdown(persona: Dict[str, Any] | None = None) -> str:
-    """Human-readable persona document generated from persona.yaml."""
-    p = persona or load_persona()
+def render_markdown(persona: Dict[str, Any] | None = None, *, path: Path | None = None) -> str:
+    """Human-readable persona document generated from the selected YAML file."""
+    path = path if path is not None else active_persona_path()
+    p = persona or load_persona(path)
+    ident = p["identity"]
+    title = f"{ident['name']}（{ident['aliases'][0]}）" if ident["aliases"] else ident["name"]
     moods = p["proactive"]["relationship_moods"]
     return "\n".join([
-        "# 碧波（Bines）人格档案",
+        f"# {title}人格档案",
         "",
-        "> 本文件由 `thingking/persona/render_doc.py` 根据 `thingking/persona/persona.yaml` 生成，请勿手动编辑。",
-        "> 人格只在 `persona.yaml` 中维护；关于管理员的信息属于记忆，存放在记忆库中。",
+        f"> 本文件由 `thingking/persona/render_doc.py` 根据 `thingking/persona/{path.name}` 生成，请勿手动编辑。",
+        f"> 人格只在 `{path.name}` 中维护；关于管理员的信息属于记忆，存放在记忆库中。",
         "",
         "## 角色设定（注入对话的文本）",
         "",
