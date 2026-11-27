@@ -5,6 +5,7 @@ services after the containers are healthy.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 COMPOSE_FILE = ROOT / "deploy" / "docker" / "compose.yaml"
 CLONE_COMPOSE_FILE = COMPOSE_FILE.with_name("compose.clone.yaml")
 CLONE_PROJECT = "bines-clone"
+MAIN_PROJECT = "bines"
 NAPCAT_ENV = ROOT / "deploy" / "napcat" / ".env"
 BUILDER_NAME = "bines"
 BUILDX_CONFIG = ROOT / ".tools" / "docker" / "buildx"
@@ -187,6 +189,44 @@ def available() -> bool:
 
 def clone_directory() -> Path:
     return ROOT / ".tools" / "chatbot-clone"
+
+
+def memory_directory(profile: str) -> Path:
+    base = clone_directory() if profile == "clone" else ROOT / "thingking"
+    return base / "memory_data"
+
+
+def instance_project(profile: str) -> str:
+    return CLONE_PROJECT if profile == "clone" else MAIN_PROJECT
+
+
+@contextmanager
+def instance_lock(profile: str):
+    path = ROOT / ".tools" / "docker" / "instance-locks" / (instance_project(profile) + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                if not handle.tell():
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise DockerError(f"{instance_project(profile)} 正在运行或重置，请先退出该启动会话") from exc
+        yield
+
+
+def check_reset_complete(profile: str) -> None:
+    from common.memory_reset import pending_path
+
+    pending = pending_path(memory_directory(profile))
+    if pending.exists() or pending.is_symlink():
+        raise DockerError("上次重置未完成，请再次运行该实例的 --reset-memory 命令")
 
 
 def compose_command(profile: str, *args: str) -> List[str]:
@@ -366,6 +406,54 @@ def _check_result(result, label):
         raise DockerError(label + "：\n" + summary, details=detail)
 
 
+def reset_memory(profile: str) -> None:
+    """清理已停止的本机 Docker 实例，仅处理其专属数据目录和卷。"""
+    from common.memory_reset import reset_directory
+
+    if profile not in {"chatbot", "clone"}:
+        raise ValueError("重置目标必须是 ChatBot 主实例或分身")
+
+    def docker_output(*args):
+        result = _docker(*args, timeout=30)
+        _check_result(result, "读取 Docker 实例或数据卷信息失败")
+        return result.stdout.strip()
+
+    host = os.environ.get("DOCKER_HOST", "") if not os.environ.get("DOCKER_CONTEXT") else ""
+    if not host:
+        host = docker_output("context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
+    if not host.startswith(("unix://", "npipe://")):
+        raise DockerError("记忆重置仅支持本机 Docker，避免清理与当前工作区不对应的数据卷")
+
+    project = instance_project(profile)
+    owner = f"label=com.docker.compose.project={project}"
+    if docker_output("ps", "--all", "--quiet", "--filter", owner):
+        mode = " --mode clone" if profile == "clone" else ""
+        raise DockerError(f"请先退出该实例的启动会话，再用 python bines.py --chatbot{mode} --docker-down 清理残留容器")
+    if profile == "chatbot":
+        from config import HTTP_PORTS, ZMQ_PORTS
+        from process_runtime import find_port_listeners
+
+        ports = [HTTP_PORTS["MODULE_MANAGER"], HTTP_PORTS["RAG_MEMORY"],
+                 ZMQ_PORTS["RAG_SERVER_REQREP"], ZMQ_PORTS["BUS_PUBLISH"], ZMQ_PORTS["BUS_SUBSCRIBE"],
+                 int(os.environ.get("BINES_QQ_GATEWAY_PORT", "6102"))]
+        if find_port_listeners(ports):
+            raise DockerError("主实例使用的端口仍在监听，请先退出宿主机服务后再重置")
+
+    expected = {f"{project}-{suffix}" for suffix in ("gateway", "autonomy", "qdrant")}
+    volume_args = ("volume", "ls", "--format", "{{.Name}}")
+    present = expected.intersection(docker_output(*volume_args).splitlines())
+    owned = set(docker_output(*volume_args, "--filter", owner).splitlines())
+    if present - owned:
+        raise DockerError("检测到不属于目标实例的同名数据卷，未执行重置")
+    for name in sorted(present):
+        if docker_output("ps", "--all", "--quiet", "--filter", f"volume={name}"):
+            raise DockerError(f"数据卷 {name} 仍被容器使用，未执行重置")
+
+    with reset_directory(memory_directory(profile)):
+        if present:
+            _check_result(_docker("volume", "rm", *sorted(present), timeout=60), "删除实例数据卷失败")
+
+
 def _stale_services() -> List[str]:
     expected = source_hashes()
     stale = []
@@ -476,9 +564,7 @@ def up(profile: str) -> None:
         initialize_deploy(directory / "napcat", {
             "NAPCAT_WS_PORT": "16101", "NAPCAT_WEBUI_PORT": "16099",
         })
-        prepare_redis(directory / "memory_data")
-    else:
-        prepare_redis(ROOT / "thingking" / "memory_data")
+    prepare_redis(memory_directory(profile))
     stale = _stale_services()
     if stale:
         print("源码有更新，正在构建：" + ", ".join(stale), flush=True)

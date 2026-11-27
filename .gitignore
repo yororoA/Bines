@@ -106,6 +106,7 @@ test/
 .workbuddy/
 
 memory_data/
+memory_data.reset-pending/
 tests/
 !thingking/tests/
 # Local config backup may contain credentials

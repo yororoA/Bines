@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict
 
 from .service import MemoryService
 from common.local_auth import token_matches
+from common.memory_reset import PERSONA_ONLY_MARKER
 
 logger = logging.getLogger("bines.memory.server")
 
@@ -106,7 +107,7 @@ def build_service() -> MemoryService:
             timeout=QDRANT_TIMEOUT, min_score=QDRANT_MIN_SCORE, top_k=QDRANT_TOP_K)
     except Exception as exc:
         logger.warning("expression vector disabled, using lexical fallback: %s", exc)
-    if expression_vector is not None:
+    if expression_vector is not None and not (settings.data_dir / PERSONA_ONLY_MARKER).exists():
         try:
             if expression_vector.count("owner") == 0:
                 from pathlib import Path

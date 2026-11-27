@@ -5,6 +5,7 @@
 **/__pycache__/
 *.pyc
 thingking/memory_data/
+thingking/memory_data.reset-pending/
 thingking/models/
 deploy/napcat/data/
 deploy/napcat/qrcode.png

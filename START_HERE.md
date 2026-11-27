@@ -98,6 +98,19 @@ python bines.py --profile chatbot --mode clone
 
 分身需要 Docker Compose 2.24.4 或更高版本，不能与 `--host` 或 `--external-napcat` 一起使用。主实例的浏览器会话和外部 MCP 配置不会挂载到分身。修改分身人格文件后，重新启动分身即可生效。
 
+### 重置 ChatBot 记忆与状态
+
+先按 `Ctrl+C` 退出目标实例。如果还有残留容器，用同一实例的 `--docker-down` 清理，然后运行：
+
+```bash
+python bines.py --profile chatbot --mode clone --reset-memory  # 茉莉，确认时输入 bines-clone
+python bines.py --profile chatbot --reset-memory               # 碧波，确认时输入 bines
+```
+
+该命令用于本机 Docker 部署，会永久清空目标实例的对话、记忆、日记、关系、自主活动状态、待处理任务和索引，以及实例记忆目录里的历史备份。重启后从当前人格和默认状态开始，也不会自动导入内置语感语料。人格 YAML、QQ 登录、部署配置和另一个实例的数据不受影响。碧波的桌面模式共用主实例记忆，重置碧波前也要退出桌面服务。
+
+如果重置中断，重新运行同一条重置命令；完成前启动器会阻止该实例启动。
+
 ## 日常启动
 
 从管理页或记忆库点击 **设置与控制**，也可直接打开 [宿主机控制中心](http://127.0.0.1:5000/control) 或 [记忆服务控制中心](http://127.0.0.1:5001/control)。端口可在配置中调整。
