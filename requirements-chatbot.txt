@@ -1,0 +1,12 @@
+# Lightweight ChatBot + Thinking, Python >= 3.11; no CUDA / camera / ASR models.
+websocket-client>=1.8,<2
+openai>=1.50,<3
+requests>=2.32,<3
+PyYAML>=6,<7
+tzdata>=2025.1
+redis>=5,<7
+Pillow>=12.1,<13
+# PyAV bundles FFmpeg decoders for received and local video storyboards.
+av>=14,<17
+# Optional generic MCP + NapCat stdio; matches existing Ark adapter.
+mcp==2.3.0

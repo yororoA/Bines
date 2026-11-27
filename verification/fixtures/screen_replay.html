@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Bines 屏幕感知受控样本</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eef2f7;color:#14253d;font:18px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}header{height:82px;background:#14253d;color:white;padding:24px 48px;display:flex;justify-content:space-between}main{padding:36px 48px}h1{font-size:36px;margin:0 0 22px}.card{background:#fff;border:1px solid #cad3df;border-radius:12px;padding:22px;margin:14px 0}.row{display:flex;gap:24px}.row .card{flex:1}.number{font-size:44px;color:#176e9f}.muted{color:#62728c}button{font:inherit;padding:12px 25px;background:#176e9f;color:white;border:0;border-radius:7px;cursor:pointer}.toast{position:fixed;top:100px;right:48px;padding:22px 36px;background:#075c36;color:white;border-radius:10px;box-shadow:0 4px 24px #0004;font-size:25px;z-index:10}.list{height:350px;overflow:auto;scroll-behavior:auto}.item{padding:14px 18px;border-bottom:1px solid #d8e1e9}.tiny{font:12px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;line-height:2}.mono{font-family:monospace}#start{position:fixed;bottom:24px;right:48px}footer{position:fixed;bottom:12px;left:48px;color:#6c7c90;font-size:12px}
+</style>
+<header><b>工作台 · 本地受控测试</b><span id="nav">项目概览</span></header>
+<main id="main"></main><button id="start">开始演示</button><footer>此页面仅包含预置测试数据，不连接用户账号或业务服务。</footer>
+<script>
+const main=document.querySelector('#main'),nav=document.querySelector('#nav');
+window.captureEvidence={startedAt:null,events:[],phase:'static',elapsed:0};
+function log(kind,extra={}){window.captureEvidence.events.push({kind,elapsed:(performance.now()-window.captureEvidence.startedAt)/1000,...extra})}
+function phase(name){window.captureEvidence.phase=name;log('phase',{name})}
+function overview(){main.innerHTML='<h1>晨星计划 · 项目概览</h1><div class="card"><b>任务编号 TASK-417</b><p>目标：整理发布材料并核对演示页面。</p><p class="muted">负责人：林舟　截止日期：2026-11-20</p></div><div class="row"><div class="card">已完成<div class="number">18</div></div><div class="card">待处理<div class="number">7</div></div><div class="card">完成率<div class="number">72%</div></div></div>'}
+overview();
+document.querySelector('#start').onclick=()=>{
+ document.querySelector('#start').remove();window.captureEvidence.startedAt=performance.now();phase('static');
+ setTimeout(()=>{let t=document.createElement('div');t.className='toast';t.id='toast';t.textContent='保存成功 · Q7M';document.body.append(t);log('toast-start',{text:t.textContent});setTimeout(()=>{t.remove();log('toast-end')},800)},4300);
+ setTimeout(()=>{phase('cut');nav.textContent='系统监控';main.innerHTML='<h1>系统监控 · OPS-624</h1><div class="row"><div class="card">在线节点<div class="number">24</div></div><div class="card">服务状态<div class="number">健康</div></div><div class="card">待处理告警<div class="number">3</div></div></div><div class="card"><b>最新告警 AL-305</b><p>缓存节点响应时间上升，处理中。</p></div>'},8000);
+ setTimeout(()=>{phase('scroll');nav.textContent='工作清单';main.innerHTML='<h1>工作清单 · 滚动查看</h1><div class="list card" id="list">'+Array.from({length:24},(_,i)=>'<div class="item">第 '+String(i+1).padStart(2,'0')+' 项　'+(i===11?'漆蓝：核对备份校验码 ZK-581':i===17?'琥珀：完成日志归档':'常规检查事项')+'</div>').join('')+'</div>';let start=performance.now();function move(){let p=Math.min(1,(performance.now()-start)/4000);document.querySelector('#list').scrollTop=p*740;if(p<1)requestAnimationFrame(move);else log('scroll-end',{scrollTop:document.querySelector('#list').scrollTop})}requestAnimationFrame(move)},14000);
+ setTimeout(()=>{phase('small');nav.textContent='配置详情';main.innerHTML='<h1>配置详情 · 小字核对</h1><div class="card"><p>以下字段保持原始小字号，用于核对拼图后的文字清晰度。</p><div class="tiny">版本号：R7.3.19<br>校验码：K8N-642<br>重试间隔：17 秒<br>备注：紫杉计划已启用</div></div><div class="card"><b>常规字号对照</b><p>发布批次 BATCH-908</p></div>'},22000);
+ setTimeout(()=>{phase('final');nav.textContent='完成';main.innerHTML='<h1>演示结束 · READY-852</h1><div class="card"><b>本地准备已完成</b><p>队列状态：等待人工确认。</p><p>本演示未执行实际上传或发布。</p></div>'},30000);
+};
+</script>
+</html>

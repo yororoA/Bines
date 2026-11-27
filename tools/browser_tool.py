@@ -1,6 +1,6 @@
 """
-浏览器工具：Selenium 打开搜索页后，使用屏幕分析或 DOM 获取结果页内容。
-使用独立 Chrome 配置目录，与您日常使用的 Chrome 分离，避免「开了其他浏览器/Chrome」导致只打开窗口、后续操作失败。
+网页工具：使用 DeepSeek 官方 Search / Fetch API，桌面与纯 ChatBot 共用。
+保留旧 Selenium 实现供查阅；它不再注册为工具，也不作为失败时的自动回退。
 """
 import time
 import os
@@ -73,7 +73,7 @@ def _get_search_result_content_via_selenium(driver):
     return "\n".join(lines) if lines else ""
 
 
-def browser_search(query: str) -> str:
+def _legacy_browser_search(query: str) -> str:
     """
     使用 Selenium (undetected-chromedriver) 打开搜索页，然后通过屏幕分析快速获取结果页内容。
     当用户要求「用浏览器搜索」「在网上搜一下」等时，应使用此工具。
@@ -145,3 +145,17 @@ def browser_search(query: str) -> str:
                 driver.quit()
             except Exception:
                 pass
+
+
+def browser_search(query: str, count: int | None = None) -> str:
+    """用 DeepSeek 联网搜索；query 最多128字符，返回标题、URL、日期和摘要，无需打开浏览器。"""
+    import json
+    from common.deepseek_web import search
+    return json.dumps(search(query, count), ensure_ascii=False)
+
+
+def web_fetch(url: str) -> str:
+    """用 DeepSeek 读取指定 HTTP(S) 网页正文，返回原始 URL、标题和 Markdown 内容。"""
+    import json
+    from common.deepseek_web import fetch
+    return json.dumps(fetch(url), ensure_ascii=False)

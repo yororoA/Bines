@@ -1,9 +1,14 @@
 """Local SKILL.md catalog and constrained text-protocol dispatcher."""
 from __future__ import annotations
 
+import html
 import inspect
 import json
+import ast
+import importlib.util
 from pathlib import Path
+import re
+import sys
 from typing import Any, Dict, Iterable, List, Mapping
 
 
@@ -11,13 +16,29 @@ CALL_START = "[[SKILL_CALL]]"
 CALL_END = "[[/SKILL_CALL]]"
 
 QQ_ALLOWED_ACTIONS = {
-    "get_time",
-    "send_qq_group_msg", "send_qq_private_msg",
-    "get_qq_group_list", "get_qq_friend_list",
-    "broadcast_to_all_friends", "broadcast_to_all_groups",
-    "at_each_group_member", "browser_search",
-    "get_moments", "add_moment", "comment_moment", "get_comments",
-    "like_moment", "like_comment", "analyze_moment_images", "sing", "list_songs",
+    "get_time", "send_qq_group_msg", "send_qq_private_msg",
+    "napcat_call", "napcat_discover", "napcat_catalog", "napcat_send", "napcat_forward",
+    "napcat_events", "update_status", "search_memory", "read_memory_source", "cite_memory", "browser_search", "web_fetch",
+    "napcat_collect_sticker", "napcat_search_stickers", "napcat_send_sticker",
+    "learn_expression", "search_meme",
+}
+QQ_GROUP_OWNER_ACTIONS = {"napcat_custom_faces", "napcat_send_custom_face"}
+NAPCAT_ACTIONS = {
+    "napcat_call", "napcat_discover", "napcat_catalog", "napcat_operation", "napcat_events",
+    "napcat_send", "napcat_forward", "napcat_custom_faces", "napcat_send_custom_face",
+    "napcat_collect_sticker", "napcat_search_stickers", "napcat_send_sticker",
+}
+QQ_OWNER_ACTIONS = QQ_ALLOWED_ACTIONS | QQ_GROUP_OWNER_ACTIONS | {
+    "napcat_operation", "mcp_discover", "mcp_call",
+    "regulate_life",
+    "get_qq_group_list", "get_qq_friend_list", "broadcast_to_all_friends",
+    "broadcast_to_all_groups", "at_each_group_member",
+    "get_ark_profile", "get_ark_conversations", "get_ark_chat_history", "send_ark_chat", "get_ark_operation",
+    "get_moments", "add_moment", "comment_moment", "get_comments", "like_moment", "like_comment",
+    "website_status", "website_open", "website_snapshot", "website_scroll",
+    "website_create_draft", "website_plan", "website_approve", "website_execute",
+    "website_interact", "activity_continue", "activity_pause", "activity_finish", "autonomy_control",
+    "website_media_status", "website_watch", "website_tabs",
 }
 
 
@@ -130,6 +151,16 @@ class SkillRunner:
 
     def _action_description(self, action: str) -> str:
         function = self.registry[action]
+        # Read the source signature without importing desktop drivers.
+        if hasattr(function, "module"):
+            import ast
+            path = self.skills_dir.parent / "tools" / f"{function.module}.py"
+            if path.exists():
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                node = next((item for item in tree.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == function.name), None)
+                if node:
+                    description = ast.get_docstring(node) or action
+                    return f"{description}\nArguments: ({ast.unparse(node.args)})"
         doc = inspect.getdoc(function) or ""
         description = doc.splitlines()[0].strip() if doc else ""
         description = self.action_descriptions.get(action, description)
@@ -151,8 +182,18 @@ class SkillRunner:
 
     def actions_for_source(self, source: str | None = None, allowed_skills: Iterable[str] | None = None) -> set[str]:
         enabled = self._enabled_actions()
+        enabled -= self.unavailable_actions().keys()
         if source in ("QQ", "qq"):
-            enabled &= self.qq_allowed_actions
+            from tools.context import CURRENT_CONTEXT
+            context = CURRENT_CONTEXT.get()
+            if not context.event_id:
+                return set()  # Legacy QQ callers lack a trusted event context.
+            if context.identity.privileged:
+                enabled &= QQ_OWNER_ACTIONS
+            elif context.identity.owner:
+                enabled &= self.qq_allowed_actions | NAPCAT_ACTIONS
+            else:
+                enabled &= self.qq_allowed_actions
         if allowed_skills is not None:
             allowed_actions = {
                 action
@@ -162,10 +203,89 @@ class SkillRunner:
             enabled &= allowed_actions
         return enabled
 
+    def unavailable_actions(self) -> Dict[str, str]:
+        """Check platform prerequisites without importing UI drivers or touching devices."""
+        music = {name for name, function in self.registry.items()
+                 if getattr(function, "module", "") == "music_tool"
+                 or getattr(function, "__module__", "") == "tools.music_tool"}
+        if not music:
+            return {}
+        if sys.platform != "win32":
+            reason = "网易云桌面控制需要 Windows UI Automation"
+        else:
+            try:
+                available = importlib.util.find_spec("uiautomation") is not None
+            except (ImportError, ValueError):
+                available = False
+            reason = "" if available else "未安装网易云桌面控制依赖 uiautomation"
+        return {name: reason for name in music} if reason else {}
+
+    @staticmethod
+    def _parameter_schema(annotation) -> Dict[str, Any]:
+        """Render simple Python annotations without importing desktop modules."""
+        if isinstance(annotation, ast.AST):
+            annotation = ast.unparse(annotation)
+        elif annotation is inspect.Parameter.empty:
+            return {}
+        else:
+            annotation = getattr(annotation, "__name__", str(annotation))
+        variants = str(annotation).replace("typing.", "").split("|")
+        schemas = []
+        types = {"str": "string", "int": "integer", "float": "number",
+                 "bool": "boolean", "dict": "object", "list": "array",
+                 "None": "null", "NoneType": "null"}
+        for variant in variants:
+            kind = types.get(variant.strip())
+            if kind:
+                schema = {"type": kind}
+                if kind == "array":
+                    schema["items"] = {}
+                schemas.append(schema)
+        if not schemas:
+            return {}
+        return schemas[0] if len(schemas) == 1 else {"anyOf": schemas}
+
+    def function_tools(self, source: str | None = None, allowed_skills=None) -> List[Dict[str, Any]]:
+        """Native function calling with source signatures and dynamic NapCat dispatch."""
+        tools = []
+        for action in sorted(self.actions_for_source(source, allowed_skills)):
+            function = self.registry[action]
+            properties, required = {}, []
+            if hasattr(function, "module"):
+                path = self.skills_dir.parent / "tools" / f"{function.module}.py"
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                node = next(item for item in tree.body
+                            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == function.name)
+                arguments = [*node.args.posonlyargs, *node.args.args]
+                optional_from = len(arguments) - len(node.args.defaults)
+                for index, arg in enumerate(arguments):
+                    properties[arg.arg] = self._parameter_schema(arg.annotation) if arg.annotation else {}
+                    if index < optional_from:
+                        required.append(arg.arg)
+                for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+                    properties[arg.arg] = self._parameter_schema(arg.annotation) if arg.annotation else {}
+                    if default is None:
+                        required.append(arg.arg)
+            else:
+                for name, parameter in inspect.signature(function).parameters.items():
+                    if parameter.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
+                        continue
+                    properties[name] = self._parameter_schema(parameter.annotation)
+                    if parameter.default is inspect.Parameter.empty:
+                        required.append(name)
+            tools.append({"type": "function", "function": {
+                # The parameter schema already supplies the Python signature.
+                "name": action, "description": self._action_description(action).splitlines()[0],
+                "parameters": {"type": "object", "properties": properties, "required": required},
+            }})
+        return tools
+
     def instructions_for_source(
         self,
         source: str | None = None,
         allowed_skills: Iterable[str] | None = None,
+        *,
+        native: bool = False,
     ) -> str:
         enabled = self.actions_for_source(source, allowed_skills)
         sections = []
@@ -177,8 +297,28 @@ class SkillRunner:
             if not actions:
                 continue
             sections.append(f"### {name}: {skill['description']}\n{skill['instructions']}")
-            for action in actions:
-                sections.append(f"Action `{action}` — {self._action_description(action)}")
+            if not native:
+                for action in actions:
+                    description = self._action_description(action)
+                    first, _, signature = description.partition("\nArguments:")
+                    sections.append(f"Action `{action}` — {first.splitlines()[0]}"
+                                    + (f"\nArguments:{signature}" if signature else ""))
+        if native:
+            # The final scoped voice guard already carries the channel output
+            # rules. Repeating them here would outweigh the ongoing conversation.
+            return (
+                "通过原生工具调用执行操作，可在一轮中调用多个工具，按返回结果继续组合接口。"
+                "NapCat 原生接口统一使用 napcat_call，参数和消息段由你决定；"
+                "需要参数说明时调用 napcat_discover，无需套用固定 action 模板。"
+                "消息数量、分段、图文组合、引用、@及目标会话由你自主选择。"
+                "已通过接口发送的回复不在最终文本重复；当前话已说完就结束，"
+                "不因收到工具回执而追加收尾、解释或提问。复杂任务仍按实际目标继续。\n\n"
+                "工具回执只报告本次操作结果，不代表对方发来了新消息，也不代表等待时间已经过去。"
+                "普通对话只回应已经收到的消息；可信 [System Event: Will] 允许依据本轮自主意图执行。"
+                "想等待对方回复时直接结束，"
+                "不要自行续演对方沉默、离开、正在忙或下一轮聊天。\n\n"
+                + "\n\n".join(sections)
+            )
         return (
             "本地技能通过纯文本协议调用。需要执行操作时，整条回复只能包含一个如下块，不能附加解释：\n"
             f"{CALL_START}\n"
@@ -212,6 +352,56 @@ class SkillRunner:
             raise SkillProtocolError("args 必须是 JSON 对象")
         return command
 
+    def parse_model_command(self, text: str) -> Dict[str, Any] | None:
+        """Accept the project protocol and DeepSeek's equivalent DSML text fallback."""
+        command = self.parse_command(text)
+        if command is not None:
+            return command
+        normalized = (text or "").strip().replace("｜", "|")
+        wrapper = re.fullmatch(
+            r"<\|\|DSML\|\|\s+calls>\s*(.*?)\s*</\|\|DSML\|\|\s+calls>",
+            normalized,
+            re.DOTALL,
+        )
+        if not wrapper:
+            return None
+        invoke = re.fullmatch(
+            r"<\|\|DSML\|\|\s+invoke\s+name=\"([^\"]+)\">\s*(.*?)\s*"
+            r"</\|\|DSML\|\|\s+invoke>",
+            wrapper.group(1),
+            re.DOTALL,
+        )
+        if not invoke:
+            raise SkillProtocolError("DSML 必须且只能包含一个完整 invoke")
+        action = html.unescape(invoke.group(1))
+        skill = self.action_to_skill.get(action)
+        if not skill:
+            raise SkillProtocolError(f"DSML 使用了未知动作 {action!r}")
+        args: Dict[str, Any] = {}
+        body = invoke.group(2)
+        parameter_pattern = re.compile(
+            r"<\|\|DSML\|\|\s+parameter\s+([^>]*)>(.*?)"
+            r"</\|\|DSML\|\|\s+parameter>",
+            re.DOTALL,
+        )
+        matches = list(parameter_pattern.finditer(body))
+        if re.sub(parameter_pattern, "", body).strip():
+            raise SkillProtocolError("DSML invoke 中包含无法识别的内容")
+        for match in matches:
+            attributes = dict(re.findall(r"([A-Za-z_][\w-]*)=\"([^\"]*)\"", match.group(1)))
+            name = attributes.get("name")
+            if not name or name in args:
+                raise SkillProtocolError("DSML parameter 缺少唯一 name")
+            value = html.unescape(match.group(2).strip())
+            if attributes.get("string", "").lower() == "true":
+                args[name] = value
+            else:
+                try:
+                    args[name] = json.loads(value)
+                except json.JSONDecodeError:
+                    args[name] = value
+        return {"skill": skill, "action": action, "args": args}
+
     def execute(
         self,
         command: Dict[str, Any],
@@ -219,25 +409,61 @@ class SkillRunner:
         source: str | None = None,
         allowed_skills: Iterable[str] | None = None,
     ) -> str:
+        from tools.context import CURRENT_CONTEXT
+        journal = CURRENT_CONTEXT.get().journal
+        execute = lambda: self._execute(command, source=source, allowed_skills=allowed_skills)
+        return journal.execute(command, execute) if journal else execute()
+
+    def _execute(self, command, *, source=None, allowed_skills=None):
+        from common.memory_journal import tool_failure
+        from tools.context import CURRENT_CONTEXT
+
+        def check_turn():
+            check = CURRENT_CONTEXT.get().check
+            reason = check() if check else ""
+            if reason:
+                raise RuntimeError(f"工具执行已取消：{reason}")
+
+        def failed(message, code="execution_error"):
+            return json.dumps(tool_failure("技能执行失败：" + message, code=code), ensure_ascii=False)
+
         skill_name = command.get("skill")
         action = command.get("action")
         args = command.get("args")
         if skill_name not in self.skills:
-            return f"技能执行失败：未知技能 {skill_name!r}。"
+            return failed(f"未知技能 {skill_name!r}。", "unknown_skill")
         if self.action_to_skill.get(action) != skill_name:
-            return f"技能执行失败：动作 {action!r} 不属于技能 {skill_name!r}。"
+            return failed(f"动作 {action!r} 不属于技能 {skill_name!r}。", "invalid_action")
+        unavailable = self.unavailable_actions().get(action)
+        if unavailable:
+            return failed(unavailable, "capability_unavailable")
         if action not in self.actions_for_source(source, allowed_skills):
-            return f"技能执行失败：动作 {action!r} 未启用或当前消息来源无权调用。"
+            return failed(f"动作 {action!r} 未启用或当前消息来源无权调用。", "action_not_allowed")
         if not isinstance(args, dict):
-            return "技能执行失败：args 必须是对象。"
+            return failed("args 必须是对象。", "invalid_arguments")
         function = self.registry.get(action)
         if function is None:
-            return f"技能执行失败：Python 动作 {action!r} 不存在。"
+            return failed(f"Python 动作 {action!r} 不存在。", "unknown_action")
+        # execute() has already persisted the journal entry. A lease check here
+        # must propagate, rather than becoming a tool error the model can ignore.
+        check_turn()
         try:
-            inspect.signature(function).bind(**args)
-            result = function(**args)
-            return str(result)
+            target = function.resolve() if hasattr(function, "resolve") else function
+            inspect.signature(target).bind(**args)
         except TypeError as exc:
-            return f"技能执行失败：参数不匹配：{exc}"
+            check_turn()
+            return failed(f"参数不匹配：{exc}", "invalid_arguments")
         except Exception as exc:
-            return f"技能执行失败：{type(exc).__name__}: {exc}"
+            check_turn()
+            return failed(f"{type(exc).__name__}: {exc}")
+        # Lazy imports can be slow; revalidate immediately before the real action.
+        check_turn()
+        try:
+            result = target(**args)
+            return json.dumps(result, ensure_ascii=False, default=str) if isinstance(result, (dict, list)) else str(result)
+        except TypeError as exc:
+            check_turn()
+            return failed(f"参数不匹配：{exc}", "invalid_arguments")
+        except Exception as exc:
+            check_turn()
+            return failed(f"{type(exc).__name__}: {exc}")

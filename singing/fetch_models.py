@@ -10,6 +10,11 @@ import sys
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.env import load_env
+
+load_env()
+
 from separate import DEREVERB_MODELS, KARAOKE_MODEL, VOCAL_MODEL
 
 HF_REPO = "Politrees/UVR_resources"

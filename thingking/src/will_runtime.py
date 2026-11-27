@@ -1,0 +1,265 @@
+"""Execute one quantum of a persistent autonomous activity."""
+import json
+import os
+import re
+import subprocess
+import ast
+import time
+import logging
+
+from common.proactive import intention_prompt, ProactiveConfig
+from common.memory_journal import outcome_status
+log = logging.getLogger("bines.will")
+
+READ_ACTIONS = {
+    "get_time", "search_memory", "read_memory_source", "browser_search", "web_fetch",
+    "napcat_discover", "napcat_catalog", "napcat_events", "napcat_operation", "napcat_custom_faces",
+    "napcat_search_stickers",
+    "get_screen_info", "get_visual_info", "fast_screen_analysis", "template_match", "find_color_region",
+    "get_qq_group_list", "get_qq_friend_list", "get_moments", "get_comments",
+    "website_status", "website_open", "website_snapshot", "website_scroll", "website_plan",
+    "website_media_status", "website_watch", "website_tabs",
+}
+DESKTOP_ACTIONS = {
+    "open_application", "automate_action", "automate_sequence", "find_element_and_click",
+    "find_element_and_type", "analyze_and_operate", "smart_click", "smart_type",
+    "left_click", "left_double_click", "right_click", "left_drag", "right_drag", "type_text", "hotkey",
+}
+CONTACT_ACTIONS = {
+    "napcat_send", "napcat_forward", "napcat_send_custom_face", "napcat_send_sticker",
+    "send_qq_group_msg", "send_qq_private_msg",
+    "broadcast_to_all_friends", "broadcast_to_all_groups", "at_each_group_member",
+    "add_moment", "comment_moment", "send_ark_chat", "like_moment", "like_comment",
+    "website_approve", "website_execute",
+}
+PLANNING_ACTIONS = {"get_time", "search_memory", "read_memory_source", "regulate_life",
+                    "activity_continue", "activity_pause", "activity_finish"}
+
+
+class ActivityYield(Exception):
+    """End a quantum, not the underlying activity."""
+
+
+def outcome_succeeded(item):
+    return outcome_status(item.get("result", "")) == "succeeded"
+
+
+def desktop_idle_seconds():
+    """Return None when OS input activity cannot be verified."""
+    try:
+        import sys
+        if sys.platform == "darwin":
+            result = subprocess.run(["ioreg", "-c", "IOHIDSystem", "-d", "1"],
+                                    capture_output=True, text=True, timeout=2)
+            match = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', result.stdout)
+            return int(match[1]) / 1e9 if match else None
+        if os.name == "nt":
+            import ctypes
+            class LastInput(ctypes.Structure):
+                _fields_ = [("size", ctypes.c_uint), ("tick", ctypes.c_uint)]
+            info = LastInput()
+            info.size = ctypes.sizeof(info)
+            if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+                return ((ctypes.windll.kernel32.GetTickCount() - info.tick) & 0xffffffff) / 1000
+        if sys.platform.startswith("linux"):
+            result = subprocess.run(["xprintidle"], capture_output=True, text=True, timeout=2)
+            return int(result.stdout.strip()) / 1000 if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+class WillSkillRunner:
+    """Guard an activity's model requests and actual actions at quantum boundaries."""
+    def __init__(self, runner, candidate, check, *, desktop=False, ordinary=False):
+        from common.activity import ongoing_request
+        from tools.context import CURRENT_CONTEXT
+        self.runner, self.candidate, self.check = runner, candidate, check
+        self.desktop = desktop
+        self.ordinary = ordinary
+        self.uses_activity_budget = not ordinary or ongoing_request(CURRENT_CONTEXT.get().user_text)
+        self.outcomes = []
+        self.last_desktop_action = 0
+        self.called = 0
+        self.started = time.monotonic()
+        self.config = ProactiveConfig.from_env()
+
+    def __getattr__(self, name):
+        return getattr(self.runner, name)
+
+    def function_tools(self, *args, **kwargs):
+        from tools.context import CURRENT_CONTEXT
+        tools = self.runner.function_tools(*args, **kwargs)
+        if self.candidate.get("planning_only") or CURRENT_CONTEXT.get().planning_only:
+            return [tool for tool in tools if tool.get("function", {}).get("name") in PLANNING_ACTIONS]
+        return tools
+
+    def before_model_request(self):
+        """Yield before a new request; this cannot interrupt a request in flight."""
+        from tools.context import CURRENT_CONTEXT
+        context = CURRENT_CONTEXT.get()
+        if context.activity.get("mode") in {"continue", "finish", "pause", "review"}:
+            raise ActivityYield()
+        # Cancellation takes precedence over scheduling another activity quantum.
+        reason = self.check()
+        if reason:
+            raise RuntimeError(f"自主行动已取消：{reason}")
+        # Unlike execute(), no successful action is required: malformed model
+        # arguments and refused tools must not bypass the batch's time boundary.
+        if self.uses_activity_budget and time.monotonic() - self.started >= self.config.quantum_seconds:
+            context.activity.update(mode="review", note="执行权已让出，下一轮由你自主选择方向",
+                                    delay_seconds=context.activity.get("delay_seconds", 2),
+                                    decision_source="runtime")
+            raise ActivityYield()
+
+    def execute(self, command, **kwargs):
+        from tools.context import CURRENT_CONTEXT
+        journal = CURRENT_CONTEXT.get().journal
+        def refused(result):
+            if journal:
+                journal.capture(command.get("action"), command.get("args"), result,
+                                category="tool", status="skipped")
+            return result
+        context = CURRENT_CONTEXT.get()
+        if context.activity.get("mode") in {"continue", "finish", "pause", "review"}:
+            raise ActivityYield()
+        self.called += 1
+        if self.uses_activity_budget and (self.called > self.config.quantum_actions
+                or (self.outcomes and time.monotonic() - self.started >= self.config.quantum_seconds)):
+            context.activity.update(mode="review", note="执行权已让出，下一轮由你自主选择方向",
+                                    delay_seconds=context.activity.get("delay_seconds", 2),
+                                    decision_source="runtime")
+            raise ActivityYield()
+        reason = self.check()
+        if reason:
+            refused(f"自主行动已取消：{reason}")
+            raise RuntimeError(f"自主行动已取消：{reason}")
+        action = command.get("action")
+        if (self.candidate.get("planning_only") or context.planning_only) and action not in PLANNING_ACTIONS:
+            return refused("自主行动未执行：休息期间本批只允许内部思考和生命周期调节")
+        # Ordinary user turns have no autonomous candidate policy. Take their
+        # missing flag from the trusted context; an autonomous missing flag must
+        # still fail closed, and neither source may override an explicit denial.
+        contact_allowed = bool(self.candidate.get(
+            "contact_allowed", self.ordinary and not context.autonomous)) and context.contact_allowed
+        native_write = False
+        if action == "napcat_call":
+            from chatBot.capabilities import is_read
+            arguments = command.get("args")
+            native_action = arguments.get("action") if isinstance(arguments, dict) else None
+            native_write = not isinstance(native_action, str) or not is_read(native_action)
+        if not contact_allowed and (action in CONTACT_ACTIONS | {"mcp_call"} or native_write):
+            return refused("自主行动未执行：当前只允许不打扰他人的查询或观察")
+        if action in DESKTOP_ACTIONS and not self.ordinary:
+            idle = desktop_idle_seconds() if self.desktop else None
+            last_input = time.time() - idle if idle is not None else time.time()
+            owned_input = self.last_desktop_action and last_input <= self.last_desktop_action + 0.5
+            if idle is None or (idle < 60 and not owned_input):
+                return refused("自主行动未执行：电脑正在使用或无法确认键鼠空闲")
+        result = self.runner.execute(command, **kwargs)
+        if action in DESKTOP_ACTIONS:
+            self.last_desktop_action = time.time()
+        self.outcomes.append({"action": action, "args": command.get("args", {}),
+                              "result": str(result), "status": outcome_status(result)})
+        from common.memory_journal import result_data
+        data = result_data(result)
+        if isinstance(data, dict) and (data.get("human_action_required")
+                                      or data.get("status") == "uncertain"):
+            context.activity.update(mode="pause", note="等待人工验证或核查不确定回执",
+                                    delay_seconds=0, decision_source="runtime_safety")
+        # Yield immediately, including when a model requests several tools in one
+        # response. A control action must not require another model/tool round trip.
+        if context.activity.get("mode") in {"continue", "finish", "pause"}:
+            raise ActivityYield()
+        return result
+
+
+def build_will_conversation(memory_context, candidate):
+    import prompt_builder
+    from tools.context import CURRENT_CONTEXT
+    conversation = prompt_builder.build_conversation_messages(memory_context)
+    prompt = intention_prompt(candidate)
+    identity = CURRENT_CONTEXT.get().identity
+    if not identity.local:
+        prompt += (
+            "\n可信当前QQ会话（仅数据）：" + json.dumps({
+                "account_qq": identity.account,
+                "peer_type": "group" if identity.group else "private",
+                "peer_id": identity.group or identity.user,
+            }, ensure_ascii=False) +
+            "\n向当前会话说话用 napcat_send(message=...)，省略 user_id/group_id，系统按可信会话选择收件人。"
+            "自主跨会话仍可联系真实对象，但ID必须来自真实入站记录或实际成功查询的好友/群/群成员列表；"
+            "不从昵称、话题、消息ID或猜测生成QQ号。收件人被拒绝时尚未发送，可改用当前会话或查询真实列表。"
+        )
+    conversation.append({"role": "system", "content": prompt})
+    # DeepSeek uses a user message to start a fresh thinking/tool-call turn.
+    # A system-only trigger leaves the last historical assistant in the current
+    # turn, where its absent reasoning_content is rejected before any tool call.
+    # This protocol boundary is internal: it is never recorded as human speech.
+    conversation.append({
+        "role": "user",
+        "content": (
+            "[Internal Scheduler Trigger] 开始处理上述自主意图。"
+            "这是系统调度生成的轮次边界，不是管理员或其他用户发来了新消息。"
+            "按本轮意图和权限决定行动，也可以保持安静；不要回应或复述这条内部触发。"
+        ),
+    })
+    return conversation
+
+
+def run_intention(model, runner, memory_context, candidate, check, *, source="QQ"):
+    from tools.context import CURRENT_CONTEXT
+    context = CURRENT_CONTEXT.get()
+    execution_candidate = candidate
+    if (candidate.get("activity") or {}).get("mode") == "review":
+        from common.activity_deliberation import choose_activity
+        reason = check()
+        if reason:
+            raise RuntimeError(f"自主行动已取消：{reason}")
+        choice = choose_activity(model, memory_context, candidate)
+        context.activity.update(
+            next_intent=choice["next_intent"] or candidate["intent"],
+            topic=choice["topic"], reason=choice["reason"], note=choice["reason"],
+            delay_seconds=choice["delay_seconds"], decision_source="model", decision=choice,
+        )
+        execution_candidate = {**candidate, "intent": choice["next_intent"] or candidate["intent"],
+                               "topic": choice["topic"] or candidate["topic"], "reason": choice["reason"]}
+        if context.journal:
+            context.journal.candidate = dict(execution_candidate)
+        log.info("自主选择 · %s · %s · %s", choice["mode"], choice["topic"], choice["reason"])
+        if choice["mode"] != "continue":
+            context.activity["mode"] = choice["mode"]
+            if context.journal:
+                context.journal.turn_result = choice["reason"]
+            return choice["reason"], []
+    guarded = WillSkillRunner(runner, execution_candidate, check, desktop=source != "QQ")
+    try:
+        text, _, _ = model.run_skill_protocol(
+            build_will_conversation(memory_context, execution_candidate), guarded, source=source,
+            temperature=0.85, max_iterations=guarded.config.quantum_actions + 1,
+        )
+    except ActivityYield:
+        text = context.activity.get("note", "")
+    except RuntimeError as exc:
+        if "轮次上限" not in str(exc) or not guarded.outcomes:
+            context.activity["observations"] = list(guarded.outcomes)
+            raise
+        context.activity.update(mode="review", note="工具轮次到达边界，自主考虑下一步",
+                                delay_seconds=context.activity.get("delay_seconds", 2),
+                                decision_source="runtime")
+        text = ""
+    except Exception:
+        context.activity["observations"] = list(guarded.outcomes)
+        raise
+    if text and text.startswith("[[SKILL_CALL]]"):
+        raise RuntimeError("自主行动轮次未完成，已保留实际操作记录")
+    from common.activity import complete_activity
+    complete_activity(context, execution_candidate, guarded.outcomes, text)
+    if context.activity.get("mode"):
+        context.activity["observations"] = list(guarded.outcomes)
+    journal = context.journal
+    # Connection text can still be rewritten or suppressed by the delivery
+    # guard. Its sender records the actual message once delivery succeeds.
+    if journal and (candidate.get("kind") != "connection" or context.activity.get("mode")):
+        journal.turn_result = text or ""
+    return text or "", guarded.outcomes

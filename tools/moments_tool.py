@@ -650,7 +650,7 @@ def analyze_moment_images(moment_id: str, max_images: int = 3, timeout: int = 25
     - 行为说明:
       - 从缓冲区 _MOMENTS_BY_ID 中读取 moment.filenames（value 为 URL）
       - 最多分析 max_images 张图片
-      - 使用与 QQ 图片分析相同的 DashScope 视觉模型进行识别
+      - 使用与 QQ 图片分析相同的 DeepSeek 视觉模型进行识别
     - 返回:
       { "message": "ok" | 其他错误信息, "data": 图片描述字符串（可能为空） }
     - 下载图片和调用视觉模型时内部也会进行最多 3 次重试，并将错误写入 moments_tools.log
@@ -665,24 +665,19 @@ def analyze_moment_images(moment_id: str, max_images: int = 3, timeout: int = 25
 
     image_urls = list(filenames.values())[:max_images]
 
-    # 使用与 QQ 图片相同的 DashScope VLM 进行识别
+    # 使用与 QQ 图片相同的 DeepSeek 视觉入口进行识别
     try:
         import requests as _requests
         import base64 as _b64
-        from vlm_client import call_dashscope_vlm
-        from config import (
-            DASHSCOPE_API_URL,
-            DASHSCOPE_API_KEY,
-            DASHSCOPE_VISION_MODEL,
-            DASHSCOPE_API_TIMEOUT,
-        )
+        from vlm_client import call_vision
+        from config import DEEPSEEK_API_KEY, DEEPSEEK_VISION_TIMEOUT
     except Exception as e:
         msg = f"import_error: {e}"
         _log_moments_call("analyze_moment_images", {"moment_id": moment_id}, msg)
         return {"message": msg, "data": ""}
 
-    if not DASHSCOPE_API_KEY:
-        msg = "no_dascope_api_key"
+    if not DEEPSEEK_API_KEY:
+        msg = "请在 .env 中配置 DEEPSEEK_API_KEY"
         _log_moments_call("analyze_moment_images", {"moment_id": moment_id}, msg)
         return {"message": msg, "data": ""}
 
@@ -725,13 +720,10 @@ def analyze_moment_images(moment_id: str, max_images: int = 3, timeout: int = 25
             _log_moments_call("analyze_moment_images_download", {"url": url}, f"Error: {dl_err}")
             image_content = url
 
-        desc = call_dashscope_vlm(
+        desc = call_vision(
             image_content,
             "请详细描述这张图片的内容。如果包含文字请提取出来。如果是表情包/梗图请描述其含义。简洁回复，不超过100字。",
-            api_url=DASHSCOPE_API_URL,
-            api_key=DASHSCOPE_API_KEY,
-            model=DASHSCOPE_VISION_MODEL,
-            timeout=timeout or DASHSCOPE_API_TIMEOUT,
+            timeout=timeout or DEEPSEEK_VISION_TIMEOUT,
             proxies={"http": None, "https": None},
             max_tokens=200,
             retries=3,

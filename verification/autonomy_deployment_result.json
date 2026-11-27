@@ -1,0 +1,44 @@
+{
+  "source_hashes": {
+    "chatbot": "2a9ad95957c0b4480707e2e335877d521600ff52ffc4299c53dca95334aeb1ef",
+    "memory-server": "d844120a0105626d131e804a49d0971f97ec8fb7eaaceb7874321269d4578310"
+  },
+  "file_hashes": {
+    "common/proactive.py": "e518717230dee13391863536d125e3f0d3ae810cad0cc6ee67491323a5d72a93",
+    "common/memory_journal.py": "343ad133f0a44646becb09ad58aabdf10d7c3448be58697fe5e1abd8aa6c85c4",
+    "chatBot/proactive.py": "78e11a74e1155a9ecf14bc3903dbcdc3d2308be1c8e28c2c8450832ab62f3103",
+    "tools/context.py": "6890007cd6415684a56776b2f73be75050f4e1e40493edb76a2b2dc870a55e5b",
+    "tools/activity_tool.py": "611030c2eee103af5510dcf6dd234fd1741872583bbc9cd2ce043a5611efd83c",
+    "thingking/src/memory/life.py": "f540c4a31ea468bc88b07d642bdb1c3bd62470a08bb04ed5fef5562ea2b62e51",
+    "thingking/qq_thinking.py": "b7fe8f70dc7a00ed487cd91b100ddc80a02ca6183c910af983407340ee6d993a",
+    "thingking/src/will_runtime.py": "5bc67f0cd402ff669ca2e2d6976ee5e6effa151d8134524f433b9efaee1a0533"
+  },
+  "rollback_images": {
+    "chatbot": "bines-launcher:before-autonomy-20261024-144611",
+    "memory-server": "bines-thinking:before-autonomy-20261024-144611"
+  },
+  "database_backups": "/Users/bytedance/Bines/thingking/memory_data/backups/autonomy-20261024-144611",
+  "services": {
+    "chatbot": {
+      "state": "running",
+      "health": "healthy"
+    },
+    "memory-server": {
+      "state": "running",
+      "health": "healthy"
+    },
+    "memory-worker": {
+      "state": "running",
+      "health": ""
+    },
+    "qq-thinking": {
+      "state": "running",
+      "health": ""
+    },
+    "rag-web": {
+      "state": "running",
+      "health": "healthy"
+    }
+  },
+  "dependency_reinstallation": false
+}

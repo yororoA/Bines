@@ -1,0 +1,135 @@
+"""Skills and MCP share the gateway, never another OneBot socket."""
+import json
+import uuid
+from http.client import IncompleteRead
+from urllib.request import Request, build_opener, ProxyHandler
+from urllib.error import HTTPError, URLError
+from chatBot.config import GATEWAY_URL, gateway_token
+
+
+class GatewayClient:
+    def __init__(self, url=GATEWAY_URL, token=None):
+        self.url, self.token = url.rstrip("/"), token or gateway_token()
+        self.opener = build_opener(ProxyHandler({}))
+
+    def request(self, path, data, timeout=30, *, event_id=None):
+        from tools.context import CURRENT_CONTEXT
+        context = CURRENT_CONTEXT.get()
+        payload = dict(data)
+        # A desktop turn ID is not a persisted QQ event. Only trusted remote
+        # context (or an explicit internal lookup) supplies the gateway identity;
+        # never promote a remote caller without an event to local authority.
+        current_event_id = event_id or (context.event_id if not context.identity.local else None)
+        if not context.identity.local and not current_event_id:
+            raise PermissionError("QQ 操作需要当前可信事件")
+        payload.pop("event_id", None)
+        if current_event_id:
+            payload["event_id"] = current_event_id
+        request = Request(self.url+path, data=json.dumps(payload).encode(), headers={
+            "Content-Type": "application/json", "Authorization": f"Bearer {self.token}",
+        })
+        try:
+            with self.opener.open(request, timeout=timeout+15) as response:
+                return json.load(response)["result"]
+        except HTTPError as exc:
+            with exc:
+                reply = json.load(exc)
+            error = reply.get("error", "gateway error")
+            if path == "/memory" and exc.code == 503 and reply.get("error_type") == "MemoryUnavailable":
+                from memory.client import MemoryUnavailable
+                raise MemoryUnavailable(error) from None
+            raise RuntimeError(error) from None
+        except (URLError, TimeoutError, ConnectionError, IncompleteRead):
+            # A timeout, reset/RemoteDisconnected, or truncated acknowledgement
+            # after dispatch can also be a successful QQ write. Never replay it.
+            return {"status": "uncertain", "msg": "网关断开或超时；写操作不能自动重发"}
+
+    def raw_api(self, action, params=None, timeout=30, operation_id=None):
+        from tools.context import CURRENT_CONTEXT, REPLY_REVIEWER
+        from chatBot.capabilities import is_read
+        from chatBot.messages import FORWARD_ACTIONS, compact_qq_send_params, review_qq_send_params
+        from chatBot.recipients import destinations, send_action
+        from common.proactive import owner_contact
+        # Receipts must contain the same compact text the gateway dispatches.
+        canonical_send = send_action(action)
+        params = compact_qq_send_params(canonical_send, params or {})
+        context = CURRENT_CONTEXT.get()
+
+        def check_turn():
+            reason = context.check() if context.check else ""
+            if reason:
+                raise RuntimeError(f"QQ 操作已取消：{reason}")
+
+        check_turn()
+        if context.autonomous:
+            if not context.contact_allowed and not is_read(action):
+                raise PermissionError("当前自主轮次只允许不打扰他人的读取")
+            if context.planning_only:
+                raise PermissionError("休息思考轮次不执行 NapCat 操作")
+            if not context.owner_contact_allowed and owner_contact(action, params, context.owner_ids):
+                raise PermissionError("主人私聊仍处于冷却或免打扰状态")
+        receipt = None
+        if not is_read(action):
+            if any((item.get("result") or {}).get("status") == "uncertain" for item in context.receipts):
+                raise RuntimeError("本轮已有不确定写操作；先核查原回执，禁止继续发送或重试")
+            review = REPLY_REVIEWER.get()
+            identity = context.identity
+            if review is not None and not identity.local and canonical_send and canonical_send not in FORWARD_ACTIONS:
+                # This reviewer knows the current speaker, their request, and this
+                # conversation's relationship. None of that belongs in another chat.
+                peer = ("group", identity.group) if identity.group else ("private", identity.user)
+                try:
+                    targets = destinations(canonical_send, params)
+                except (ValueError, TypeError):
+                    targets = []  # Leave validation of a malformed destination to the gateway.
+                if targets == [peer]:
+                    params = review_qq_send_params(canonical_send, params, review)
+            if operation_id is None:
+                index = len(context.receipts)
+                operation_id = f"{context.turn_id}:tool:{index}" if context.turn_id else str(uuid.uuid4())
+            elif context.turn_id and not operation_id.startswith(context.turn_id+":"):
+                operation_id = context.turn_id+":tool:"+operation_id
+            if context.turn_id:
+                receipt = {"action": action, "params": params or {}, "operation_id": operation_id}
+        # Ordinary replies also carry a queue lease. Check after parameter and
+        # receipt preparation, before any gateway request or write is dispatched.
+        check_turn()
+        if receipt is not None:
+            context.receipts.append(receipt)
+        result = self.request("/action", {
+            "action": action, "params": params or {}, "timeout": timeout, "operation_id": operation_id,
+        }, timeout)
+        if operation_id and isinstance(result, dict):
+            result.setdefault("operation_id", operation_id)
+        if receipt is not None:
+            receipt["result"] = result
+        return result
+
+    def discover(self, query="", action=None):
+        return self.request("/discover", {"query": query, "action": action})
+
+    def operation_state(self, operation_id):
+        """Read a write receipt; ``not_found`` means the gateway never started it."""
+        try:
+            return self.request("/operation_state", {"operation_id": operation_id}, timeout=10)
+        except RuntimeError:
+            return {}
+
+    def send_private_msg(self, user_id, message):
+        return self.raw_api("send_private_msg", {"user_id": user_id, "message": message})
+
+    def send_group_msg(self, group_id, message, at_user_id=None):
+        from chatBot.messages import segments
+        chain = segments(message)
+        if at_user_id:
+            chain.insert(0, {"type": "at", "data": {"qq": str(at_user_id)}})
+        return self.raw_api("send_group_msg", {"group_id": group_id, "message": chain})
+
+    def get_group_msg_history(self, group_id, message_seq=None, count=20):
+        params = {"group_id": str(group_id), "count": count, "reverse_order": False}
+        if message_seq is not None:
+            params["message_seq"] = str(message_seq)
+        return self.raw_api("get_group_msg_history", params)
+
+    def get_group_member_list(self, group_id):
+        return self.raw_api("get_group_member_list", {"group_id": group_id})

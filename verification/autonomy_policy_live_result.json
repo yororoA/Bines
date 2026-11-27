@@ -1,0 +1,64 @@
+{
+  "real_model": true,
+  "synthetic_material": true,
+  "external_tool_calls": 0,
+  "real_outbound_messages": 0,
+  "cases": [
+    {
+      "case": "waking_low_drive_no_user_history",
+      "appraisal": {
+        "emotion": {
+          "valence": 0.08,
+          "arousal": 0.45,
+          "social": 0.5,
+          "curiosity": 0.55
+        },
+        "interests": [
+          "找个凉快的地方继续赖着",
+          "看看今天有什么新鲜事"
+        ]
+      },
+      "judgment": {
+        "status": "quiet",
+        "reason": "刚醒（waking），精力只有0.6，三项自主意愿都低到0.03左右，没有具体想做的目标。最近也没有未完成的探索或对话线索，硬凑任务只是给计时器交代。先安静歇着，等脑子彻底开机再说。",
+        "delay_seconds": 900.0,
+        "at": 1792804500.0
+      }
+    },
+    {
+      "case": "resting_internal_judgment",
+      "judgment": {
+        "status": "quiet",
+        "reason": "现在处于休息阶段，主动意愿很低（连接0.035、好奇0.038、行动0.035），海鸟行为那边的探索刚完成，没想接着挖新东西；公开互动和联系主人这会儿也不合适，就先趴着歇会儿，觉得不急着做事",
+        "delay_seconds": 1500.0,
+        "at": 1792806300.0
+      }
+    },
+    {
+      "case": "model_owns_next_direction",
+      "choice": {
+        "mode": "pause",
+        "next_intent": "",
+        "topic": "安静地趴着降温休息",
+        "reason": "现在是休息阶段 精力也就一半 没啥非做不可的事 与其硬找点什么看 不如先趴着让脑子凉快一会儿 等真有什么想看的再动",
+        "delay_seconds": 600.0,
+        "interest_level": 0.2
+      }
+    },
+    {
+      "case": "new_question_after_finished_interest",
+      "judgment": {
+        "status": "selected",
+        "reason": "上一轮只整理了海鸟的基础种类，自己留下的线索写着“协作行为尚未探索”，现在好奇心是 0.85、精力也够；而且“一群鸟怎么互相配合”这件事比单纯报种类有意思多了，我想把它补完",
+        "decision": {
+          "kind": "curiosity",
+          "topic": "海鸟的协作行为",
+          "intent": "检索海鸟协作觅食与集群信息共享的具体案例（如鹈鹕、鸬鹚的集体围捕，海鸟群作为信息中心等），挑 2–3 个可核验的例子记下来，顺便想想要不要分享",
+          "reason": "上一轮只整理了海鸟的基础种类，自己留下的线索写着“协作行为尚未探索”，现在好奇心是 0.85、精力也够；而且“一群鸟怎么互相配合”这件事比单纯报种类有意思多了，我想把它补完"
+        },
+        "at": 1792806601.0
+      }
+    }
+  ],
+  "recorded_at": 1792824034.3074281
+}

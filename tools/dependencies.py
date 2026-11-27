@@ -8,7 +8,7 @@
 class ToolDependencies:
     """工具依赖容器"""
     def __init__(self):
-        self.memory_system = None
+        self.memory_client = None
         self.zmq_context = None
         self.thinking_model_helper = None
         self.skill_runner = None
@@ -27,9 +27,9 @@ class ToolDependencies:
             return
         raise RuntimeError(f"{label} 已注册，禁止重复覆盖")
     
-    def register_memory_system(self, memory_system):
-        """注册记忆系统"""
-        self.memory_system = memory_system
+    def register_memory_client(self, memory_client):
+        """注册 Memory Server 客户端"""
+        self._set_once("memory_client", memory_client, "memory_client")
     
     def register_zmq_context(self, context):
         """注册 ZMQ 上下文"""

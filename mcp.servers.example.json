@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "napcat": {
+      "command": "python",
+      "args": ["-m", "chatBot.mcp_server"],
+      "timeout": 60,
+      "disabled": true
+    },
+    "custom": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${CUSTOM_MCP_TOKEN}"
+      },
+      "timeout": 60,
+      "disabled": true
+    }
+  }
+}

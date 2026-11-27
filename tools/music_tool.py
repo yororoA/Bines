@@ -15,6 +15,9 @@ _parent_dir = os.path.dirname(_current_dir)
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
+from common.memory_journal import outcome_status, tool_failure
+from common.model_usage import measured_request
+
 try:
     import pyautogui
     PY_AUTOGUI_AVAILABLE = True
@@ -64,7 +67,7 @@ def require_uia(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         if not UI_AUTOMATION_AVAILABLE:
-            return "失败: 未安装 uiautomation 库"
+            return tool_failure("未安装 uiautomation 库", code="capability_unavailable")
             
         # 1. 优先使用 uiautomation 提供的线程初始化器
         if hasattr(uia, "UIAutomationInitializerInThread"):
@@ -73,7 +76,7 @@ def require_uia(func):
                 with uia.UIAutomationInitializerInThread(debug=False):
                     return func(*args, **kwargs)
             except Exception as e:
-                return f"执行出错(UIA Thread): {str(e)}"
+                return tool_failure(f"执行出错(UIA Thread): {str(e)}")
         
         # 2. 回退方案：手动初始化 COM
         need_uninit = False
@@ -88,7 +91,7 @@ def require_uia(func):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            return f"执行出错(Manual COM): {str(e)}"
+            return tool_failure(f"执行出错(Manual COM): {str(e)}")
         finally:
             if need_uninit and comtypes:
                 try:
@@ -1464,7 +1467,7 @@ def _find_most_similar_playlist_name(target_name, playlist_names):
 如果目标名称是"完全不相关的名称"，列表中没有任何相似的，则返回"None"。
 """
         
-        response = get_deepseek_client().chat.completions.create(
+        response = measured_request(get_deepseek_client().chat.completions.create,
             model=DEEPSEEK_MODEL,
             messages=[
                 {
@@ -2544,7 +2547,7 @@ def play_all_songs_in_playlist(playlist_name=None):
     # 如果提供了歌单名称，先切换到该歌单
     if playlist_name:
         switch_result = switch_to_playlist(playlist_name)
-        if switch_result.startswith("失败:") or switch_result.startswith("错误:"):
+        if outcome_status(switch_result) != "succeeded":
             return f"失败: 无法切换到歌单 '{playlist_name}' - {switch_result}"
         # 等待歌单切换完成：检测播放全部按钮是否出现
         play_all_button_check = None
@@ -2821,7 +2824,7 @@ def collect_playlist(playlist_name=None):
     # 如果提供了歌单名称，先切换到该歌单
     if playlist_name:
         switch_result = switch_to_playlist(playlist_name)
-        if switch_result.startswith("失败:") or switch_result.startswith("错误:"):
+        if outcome_status(switch_result) != "succeeded":
             return f"失败: 无法切换到歌单 '{playlist_name}' - {switch_result}"
         # 等待歌单切换完成：检测收藏按钮是否出现
         collect_button_check = None
@@ -2934,7 +2937,7 @@ def uncollect_playlist(playlist_name=None):
     # 如果提供了歌单名称，先切换到该歌单
     if playlist_name:
         switch_result = switch_to_playlist(playlist_name)
-        if switch_result.startswith("失败:") or switch_result.startswith("错误:"):
+        if outcome_status(switch_result) != "succeeded":
             return f"失败: 无法切换到歌单 '{playlist_name}' - {switch_result}"
         # 等待歌单切换完成：检测收藏按钮是否出现
         collect_button_check = None

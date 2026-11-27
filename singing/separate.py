@@ -70,6 +70,9 @@ def prepare_input(src: Path, dest: Path) -> None:
 
 
 def separate(src: Path, out_dir: Path, model_dir: Path, dereverb: str = "anvuew") -> dict:
+    import onnxruntime as ort
+    if "CUDAExecutionProvider" in ort.get_available_providers() and hasattr(ort, "preload_dlls"):
+        ort.preload_dlls()
     from audio_separator.separator import Separator
 
     out_dir.mkdir(parents=True, exist_ok=True)

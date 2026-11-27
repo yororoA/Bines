@@ -1,0 +1,18 @@
+# Desktop Thinking and Memory Server; embeddings are isolated from lightweight QQ.
+-r launcher.txt
+chromadb>=1.0,<2
+langchain-huggingface>=0.3,<2
+sentence-transformers>=3,<6
+transformers>=4.45,<4.58
+torch==2.7.1
+numpy==1.26.4
+Pillow>=10,<13
+opencv-python-headless==4.11.0.86
+PyAutoGUI==0.9.54
+mss>=9,<11
+ImageHash>=4.3,<5
+pytesseract>=0.3.10,<0.4
+pywinauto>=0.6.8,<0.7; sys_platform == "win32"
+uiautomation>=2.0,<3; sys_platform == "win32"
+comtypes>=1.4,<2; sys_platform == "win32"
+pywin32>=306; sys_platform == "win32"

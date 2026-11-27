@@ -228,7 +228,7 @@ def automate_action(action_type, content=None, target_window=None, delay=0.5, co
                 return "已在当前位置点击"
         
         elif action_type == "search":
-            # 委托给浏览器工具：仅使用 Selenium + 操作后 DOM 获取内容，不使用屏幕分析/坐标逻辑
+            # 委托给 DeepSeek Search API，不读取屏幕或操作浏览器。
             if not content:
                 return "Error: 'search' action requires 'content' parameter"
             try:

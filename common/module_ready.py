@@ -4,6 +4,7 @@
 Classification 收到所有模块就绪后再通知 Thinking 正式启动（上线通知、摘要/日记等）。
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,13 @@ def notify_module_ready(module_name: str) -> None:
     向 Classification 上报本模块已彻底启动。
     调用一次即可；Classification 收集齐所有模块后会通知 Thinking 正式启动。
     """
+    from common.service_ready import managed, mark_ready
+
+    mark_ready(module_name)
+    if managed():
+        return  # The supervisor owns readiness; no one-shot Classification handshake.
+    if os.environ.get("BINES_DOCKER_MODE") == "1":
+        return  # Containers are healthchecked by compose; Classification runs only on the host.
     port = ZMQ_PORTS.get("MODULE_READY_REP")
     if port is None:
         print(f"[{module_name}] MODULE_READY_REP 未配置，跳过就绪上报", flush=True)

@@ -33,6 +33,8 @@ def find_port_listeners(ports) -> Dict[int, int]:
         return {}
     if sys.platform == "win32":
         cmd = ["netstat", "-ano", "-p", "TCP"]
+    elif sys.platform == "darwin":
+        cmd = ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"]
     else:
         cmd = ["netstat", "-ltnp"]
     try:
@@ -43,6 +45,16 @@ def find_port_listeners(ports) -> Dict[int, int]:
     except (OSError, subprocess.SubprocessError):
         return {}
     listeners = {}
+    if sys.platform == "darwin":
+        pid = None
+        for line in output.splitlines():
+            if line.startswith("p"):
+                pid = int(line[1:])
+            elif line.startswith("n") and pid:
+                match = re.search(r":(\d+)$", line)
+                if match and int(match[1]) in wanted:
+                    listeners.setdefault(int(match[1]), pid)
+        return listeners
     for line in output.splitlines():
         if "LISTEN" not in line.upper():
             continue

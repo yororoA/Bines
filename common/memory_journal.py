@@ -1,0 +1,598 @@
+"""Durable memory outbox and per-turn journals, independent of model output."""
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import logging
+import re
+import sqlite3
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+import math
+from pathlib import Path
+
+log = logging.getLogger("bines.memory.journal")
+_SECRET = re.compile(r"^(password|passwd|secret|api_key|access_token|authorization|cookie|set-cookie)$", re.I)
+
+
+def safe_data(value):
+    """Keep textual evidence intact; omit credentials and inline binary payloads."""
+    if isinstance(value, dict):
+        return {str(key): "[凭据已省略]" if _SECRET.match(str(key)) else safe_data(item)
+                for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [safe_data(item) for item in value]
+    if isinstance(value, str):
+        if value.startswith(("data:image/", "data:audio/", "base64://")):
+            return "[内联媒体数据已省略]"
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return str(value)
+        return value
+    return str(value)
+
+
+def result_data(result):
+    if isinstance(result, str):
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                result = parse(result)
+                break
+            except (ValueError, SyntaxError, TypeError):
+                pass
+    return safe_data(result)
+
+
+def outcome_status(result):
+    """Prefer explicit tool receipts; retain legacy text adapters without false successes."""
+    data = result_data(result)
+    if isinstance(data, dict):
+        status = str(data.get("status", "")).lower()
+        if status in {"blocked_human", "paused", "skipped", "cancelled", "canceled"} or data.get("human_action_required"):
+            return "skipped"
+        if status == "interrupted":
+            return "interrupted"
+        if status in {"uncertain", "started"}:
+            return "uncertain"
+        if (status in {"error", "failed", "failure"}
+                or data.get("retcode", 0) not in (0, "0", None)
+                or data.get("success") is False or data.get("ok") is False):
+            return "failed"
+        if status in {"ok", "success", "succeeded", "completed", "done"}:
+            return "succeeded"
+        if data.get("error"):
+            return "failed"
+    if data is False:
+        return "failed"
+    text = str(result or "").strip()
+    if text.startswith(("自主行动未执行", "自主行动已取消")):
+        return "skipped"
+    if text.startswith(("技能执行失败", "技能协议错误", "Error:", "Error executing", "错误", "无法", "未找到",
+                        "失败:", "失败：", "执行出错", "执行失败", "操作失败",
+                        "状态更新失败", "Dynamic memory is not available", "[图片无法", "[消息含图片")):
+        return "failed"
+    return "succeeded" if text else "empty"
+
+
+def tool_failure(message, *, code="execution_error"):
+    """Small shared receipt contract for migrated tools; old string tools still work."""
+    return {"status": "failed", "code": code, "message": str(message)}
+
+
+class OutboxDependencyPending(RuntimeError):
+    def __init__(self, refs):
+        self.refs = list(dict.fromkeys(refs))
+        super().__init__("source messages are not committed yet")
+
+
+def delivery_error_kind(exc):
+    message = str(exc).lower()
+    if (isinstance(exc, PermissionError) or re.search(r"(?:^|failed: )permissionerror:", message)
+            or any(text in message for text in ("authentication required", "unauthorized", "invalid api key", "unknown method:"))):
+        return "auth_config"
+    if (isinstance(exc, (ValueError, TypeError)) or re.search(r"(?:^|failed: )(?:valueerror|typeerror):", message)
+            or re.search(r"(?:^|failed: )(?:invalid_request|invalid_json|invalid_multipart_request|request_too_large)(?:$|\b)", message)):
+        return "validation"
+    if (isinstance(exc, (TimeoutError, ConnectionError, OSError)) or type(exc).__name__ == "MemoryUnavailable"
+            or any(text in message for text in ("timed out", "connection refused", "connection reset", "database is locked"))):
+        return "transient"
+    return "unknown"
+
+
+class MemoryOutbox:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.local_sources = "experience:" + hashlib.sha256(str(self.path.resolve()).encode()).hexdigest() + ":%"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.stop = threading.Event()
+        self.thread = None
+        self.lock = threading.RLock()
+        with self.connection() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS memory_outbox (
+                source_ref TEXT PRIMARY KEY, method TEXT NOT NULL, params TEXT NOT NULL,
+                revision INTEGER NOT NULL, synced INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS memory_outbox_pending ON memory_outbox(synced,updated)")
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS memory_outbox_delivery (
+                    source_ref TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+                    quarantined INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+                    lease_owner TEXT, lease_until REAL NOT NULL DEFAULT 0, error_kind TEXT
+                );
+                CREATE TABLE IF NOT EXISTS memory_outbox_dependencies (
+                    source_ref TEXT NOT NULL, depends_on TEXT NOT NULL,
+                    PRIMARY KEY(source_ref,depends_on)
+                );
+                CREATE TABLE IF NOT EXISTS memory_outbox_omissions (source_ref TEXT PRIMARY KEY);
+            """)
+            db.execute("BEGIN IMMEDIATE")
+            if "error_kind" not in {row["name"] for row in db.execute("PRAGMA table_info(memory_outbox_delivery)")}:
+                db.execute("ALTER TABLE memory_outbox_delivery ADD COLUMN error_kind TEXT")
+
+    @contextmanager
+    def connection(self):
+        db = sqlite3.connect(str(self.path), timeout=15)
+        db.row_factory = sqlite3.Row
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def dependencies(db, source_ref, params, *, replace=False):
+        if replace:
+            db.execute("DELETE FROM memory_outbox_dependencies WHERE source_ref=?", (source_ref,))
+        record = params.get("record") or {}
+        refs = set()
+        if isinstance(record, dict):
+            for field in ("source_message_refs", "turn_message_refs", "correction_source_refs"):
+                values = record.get(field) or []
+                if isinstance(values, (list, tuple)):
+                    refs.update(ref for ref in values if isinstance(ref, str))
+        db.executemany("INSERT OR IGNORE INTO memory_outbox_dependencies VALUES(?,?)",
+                       [(source_ref, ref) for ref in refs if isinstance(ref, str) and ref != source_ref])
+
+    def put(self, source_ref, method, params, *, if_changed=False):
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT revision,method,params FROM memory_outbox WHERE source_ref=?", (source_ref,)).fetchone()
+            if previous and if_changed:
+                try:
+                    old = json.loads(previous["params"])
+                except (ValueError, TypeError):
+                    old = None
+                if isinstance(old, dict):
+                    old.pop("source_ref", None)
+                if previous["method"] == method and old == params:
+                    return previous["revision"]
+            revision = (previous["revision"] if previous else 0) + 1
+            params = {**params, "source_ref": source_ref}
+            if method == "record_experience":
+                params["revision"] = revision
+            db.execute("""INSERT INTO memory_outbox VALUES(?,?,?,?,0,?)
+                ON CONFLICT(source_ref) DO UPDATE SET method=excluded.method,params=excluded.params,
+                revision=excluded.revision,synced=0,updated=excluded.updated""",
+                (source_ref, method, json.dumps(params, ensure_ascii=False, allow_nan=False), revision, time.time()))
+            self.dependencies(db, source_ref, params, replace=True)
+            db.execute("DELETE FROM memory_outbox_omissions WHERE source_ref=?", (source_ref,))
+        return revision
+
+    def sync(self, call, limit=500, *, source_refs=None, time_budget=2.0):
+        """Independent deliveries progress despite a bad record; prerequisites stay ordered."""
+        limit = max(1, min(500, limit))
+        processed = 0
+        deadline = time.monotonic() + max(0.01, float(time_budget))
+        while processed < limit and time.monotonic() < deadline and not self.stop.is_set():
+            count = self._sync_batch(call, limit - processed, source_refs=source_refs, deadline=deadline)
+            processed += count
+            if not count:
+                break
+        return processed
+
+    def _sync_batch(self, call, limit, *, source_refs=None, deadline):
+        now, owner = time.time(), uuid.uuid4().hex
+        where, bindings = "", [now, now, self.local_sources]
+        if source_refs is not None:
+            if not source_refs:
+                return 0
+            where = " AND o.source_ref IN (" + ",".join("?" for _ in source_refs) + ")"
+            bindings.extend(source_refs)
+        with self.connection() as db:
+            rows = db.execute("""SELECT o.* FROM memory_outbox o LEFT JOIN memory_outbox_delivery d
+                ON d.source_ref=o.source_ref WHERE o.synced=0
+                AND (d.source_ref IS NULL OR d.lease_until<=?)
+                AND (d.source_ref IS NULL OR d.revision!=o.revision OR d.next_attempt<=?)
+                AND NOT EXISTS (SELECT 1 FROM memory_outbox_dependencies x
+                    LEFT JOIN memory_outbox p ON p.source_ref=x.depends_on
+                    WHERE x.source_ref=o.source_ref AND (p.synced=0 OR (p.source_ref IS NULL
+                        AND x.depends_on LIKE ? AND (substr(x.depends_on,-5)=':user' OR substr(x.depends_on,-10)=':assistant')
+                        AND NOT EXISTS (SELECT 1 FROM memory_outbox_omissions z WHERE z.source_ref=x.depends_on))))""" + where +
+                " ORDER BY o.updated,o.source_ref LIMIT ?", (*bindings, max(1, min(500, limit)))).fetchall()
+        processed = 0
+        for row in rows:
+            if time.monotonic() >= deadline or self.stop.is_set():
+                break
+            processed += 1
+            parse_error = None
+            try:
+                params = json.loads(row["params"])
+                if not isinstance(params, dict):
+                    raise ValueError("outbox params must be an object")
+            except Exception as exc:
+                params, parse_error = {}, exc
+            with self.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                current = db.execute("SELECT revision,synced FROM memory_outbox WHERE source_ref=?", (row["source_ref"],)).fetchone()
+                if not current or current["synced"] or current["revision"] != row["revision"]:
+                    continue
+                self.dependencies(db, row["source_ref"], params)  # Older queues gain dependencies lazily.
+                if db.execute("""SELECT 1 FROM memory_outbox_dependencies x LEFT JOIN memory_outbox p
+                    ON p.source_ref=x.depends_on WHERE x.source_ref=? AND (p.synced=0 OR (p.source_ref IS NULL
+                        AND x.depends_on LIKE ? AND (substr(x.depends_on,-5)=':user' OR substr(x.depends_on,-10)=':assistant')
+                        AND NOT EXISTS (SELECT 1 FROM memory_outbox_omissions z WHERE z.source_ref=x.depends_on))) LIMIT 1""",
+                    (row["source_ref"], self.local_sources)).fetchone():
+                    continue
+                state = db.execute("SELECT * FROM memory_outbox_delivery WHERE source_ref=?", (row["source_ref"],)).fetchone()
+                if state and state["lease_until"] > time.time():
+                    continue
+                if not state or state["revision"] != row["revision"]:
+                    db.execute("INSERT OR REPLACE INTO memory_outbox_delivery(source_ref,revision) VALUES(?,?)",
+                               (row["source_ref"], row["revision"]))
+                db.execute("UPDATE memory_outbox_delivery SET lease_owner=?,lease_until=? WHERE source_ref=?",
+                           (owner, time.time() + 120, row["source_ref"]))
+            try:
+                if parse_error:
+                    raise parse_error
+                call(row["method"], **params)
+            except OutboxDependencyPending as exc:
+                with self.connection() as db:
+                    db.executemany("INSERT OR IGNORE INTO memory_outbox_dependencies VALUES(?,?)",
+                                   [(row["source_ref"], ref) for ref in exc.refs if ref != row["source_ref"]])
+                    db.execute("UPDATE memory_outbox_delivery SET lease_owner=NULL,lease_until=0 "
+                               "WHERE source_ref=? AND lease_owner=?", (row["source_ref"], owner))
+            except Exception as exc:
+                kind = delivery_error_kind(exc)
+                isolate = kind in {"validation", "auth_config"}
+                with self.connection() as db:
+                    db.execute("UPDATE memory_outbox_delivery SET attempts=attempts+1,"
+                               "next_attempt=?+CASE WHEN ? OR attempts>=4 THEN 300 ELSE (1 << attempts) END,"
+                               "quarantined=(? OR attempts>=4),last_error=?,error_kind=?,lease_owner=NULL,lease_until=0 "
+                               "WHERE source_ref=? AND lease_owner=?",
+                               (time.time(), isolate, isolate, f"{type(exc).__name__}: {exc}"[:2000], kind, row["source_ref"], owner))
+                log.warning("记忆记录同步失败，保留并隔离重试：%s", row["source_ref"])
+            else:
+                with self.connection() as db:
+                    db.execute("UPDATE memory_outbox SET synced=1 WHERE source_ref=? AND revision=?",
+                               (row["source_ref"], row["revision"]))
+                    db.execute("DELETE FROM memory_outbox_delivery WHERE source_ref=? AND lease_owner=?",
+                               (row["source_ref"], owner))
+        return processed
+
+    def retry(self, source_ref):
+        """Explicit retry after repairing a quarantined record; never drop its payload."""
+        with self.connection() as db:
+            db.execute("UPDATE memory_outbox_delivery SET next_attempt=0,attempts=0,quarantined=0 "
+                       "WHERE source_ref=?", (source_ref,))
+
+    def stats(self):
+        with self.connection() as db:
+            pending = db.execute("SELECT COUNT(*) FROM memory_outbox WHERE synced=0").fetchone()[0]
+            failed = db.execute("""SELECT COUNT(*),COALESCE(SUM(d.quarantined),0) FROM memory_outbox_delivery d
+                JOIN memory_outbox o ON o.source_ref=d.source_ref AND o.revision=d.revision
+                WHERE o.synced=0 AND d.attempts>0""").fetchone()
+        return {"pending": pending, "retrying": failed[0], "quarantined": failed[1]}
+
+    def start(self, client):
+        if self.thread and self.thread.is_alive():
+            return
+        def consume():
+            while not self.stop.is_set():
+                try:
+                    count = self.sync(client.call)
+                    self.stop.wait(0.1 if count == 500 else 1)
+                except Exception as exc:
+                    log.warning("记忆待补同步：%s", exc)
+                    self.stop.wait(5)
+        self.thread = threading.Thread(target=consume, name="MemoryOutbox", daemon=True)
+        self.thread.start()
+
+    def record_message(self, envelope, role, content, source_ref, **fields):
+        from memory.models import is_system_event
+        if not content.strip() or (role == "user" and is_system_event(content)):
+            with self.connection() as db:
+                db.execute("INSERT OR IGNORE INTO memory_outbox_omissions VALUES(?)", (source_ref,))
+            return
+        self.put(source_ref, "record_message", {
+            "envelope": envelope, "role": role, "content": content, **fields,
+        })
+
+
+class MemoryJournal:
+    @staticmethod
+    def turn_prefix(outbox, turn_id):
+        return "experience:" + hashlib.sha256(str(outbox.path.resolve()).encode()).hexdigest() + ":" + turn_id
+
+    def __init__(self, outbox, envelope, turn_id, *, autonomous=False, candidate=None, event_ids=()):
+        self.outbox, self.envelope, self.turn_id = outbox, envelope, turn_id
+        self.autonomous, self.candidate = autonomous, safe_data(candidate or {})
+        self.event_ids = list(event_ids)
+        self.source_message_refs = []
+        self.turn_message_refs = []
+        self.memory_presentations = {}
+        self.confirmed_memory_presentations = {}
+        self.memory_citations = []
+        self.memory_corrections = []
+        self.memory_diagnostics = {}
+        self.tool_result_refs = {}
+        self.last_tool_receipt = ""
+        self.expression_records = {}
+        self.confirmed_expression_sources = {}
+        self.confirmed_expression_memories = {}
+        self.prompt_frames = []
+        self.prefix = self.turn_prefix(outbox, turn_id)
+
+    def _record(self, key, record):
+        record = {**record, "turn_id": self.turn_id, "autonomous": self.autonomous,
+                  "candidate": self.candidate, "event_ids": self.event_ids,
+                  "source_message_refs": self.source_message_refs}
+        if record.get("category") == "turn":
+            record["turn_message_refs"] = self.turn_message_refs
+            record["memory_usage"] = {"presented": list(self.confirmed_memory_presentations.values()),
+                                      "citations": self.memory_citations}
+            record["memory_corrections"] = self.memory_corrections
+            record["memory_diagnostics"] = self.memory_diagnostics
+        record = safe_data(record)
+        revision = self.outbox.put(key, "record_experience", {"envelope": self.envelope, "record": record})
+        self.expression_records.pop(key, None)
+        from common.expression_sources import experience_text_fields
+        if experience_text_fields(record) or (record.get("status") == "succeeded"
+                and record.get("action") in {"search_memory", "read_memory_source"}):
+            self.expression_records[key] = {"record": record, "revision": revision, "rendered": ""}
+            while len(self.expression_records) > 128:
+                self.expression_records.pop(next(iter(self.expression_records)))
+
+    def record_memory_diagnostic(self, stage, data):
+        # Diagnostics contain counts/IDs/statuses, never another copy of raw
+        # prompts. Snapshot now so later retrievals cannot overwrite this turn.
+        snapshot = json.loads(json.dumps(safe_data(data), ensure_ascii=False))
+        if stage in {"retrieval", "presentation"}:
+            self.memory_diagnostics[stage] = snapshot
+        else:
+            rows = self.memory_diagnostics.setdefault(stage, [])
+            if len(rows) < 128:
+                rows.append(snapshot)
+            else:
+                self.memory_diagnostics[stage + "_omitted"] = self.memory_diagnostics.get(stage + "_omitted", 0) + 1
+
+    def register_prompt_frame(self, context, messages):
+        # In-memory only. Rebuild after actual tool-schema overhead is known;
+        # do not persist another copy of private prompt text in diagnostics.
+        first, last = messages[0]["content"], messages[-1]["content"]
+        for frame in self.prompt_frames:
+            if frame["first"] == first and frame["last"] == last:
+                frame["context"] = context
+                return
+        self.prompt_frames.append({"context": context, "first": first, "last": last})
+        self.prompt_frames[:] = self.prompt_frames[-64:]
+
+    def present_memory(self, item, spans):
+        nid = item.get("node_id")
+        if not nid or not item.get("node_digest") or not spans:
+            return
+        previous = self.memory_presentations.get(nid, {})
+        self.memory_presentations[nid] = {
+            "node_id": nid, "node_digest": item["node_digest"],
+            "context_id": item.get("context_id") or previous.get("context_id"),
+            # A later source page must remain eligible for confirmation; keeping
+            # only the oldest eight excerpts made page nine impossible to cite.
+            "spans": list(dict.fromkeys([*spans, *(previous.get("spans") or [])]))[:8],
+            "chain_ids": list(dict.fromkeys([*(previous.get("chain_ids") or []),
+                                             *(item.get("chain_ids") or [])]))[:20],
+        }
+
+    def confirm_memory_presentations(self, messages):
+        """Confirm only spans in a request for which the model returned data."""
+        texts = [m.get("content", "") for m in messages if isinstance(m, dict)]
+        text = "\n".join(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                         for value in texts)
+        for nid, item in self.memory_presentations.items():
+            if nid not in text:
+                continue
+            spans = [span for span in item["spans"]
+                     if any(encoded in text for encoded in (
+                         span, repr(span)[1:-1], json.dumps(span, ensure_ascii=False)[1:-1]))]
+            if spans:
+                previous = self.confirmed_memory_presentations.get(nid, {})
+                if previous.get("node_digest") != item["node_digest"]:
+                    previous = {}
+                old_spans = previous.get("spans") or []
+                cited = [c["source_quote"] for c in self.memory_citations
+                         if c["source_id"] == nid and c.get("source_quote")
+                         and any(c["source_quote"] in span for span in old_spans)]
+                self.confirmed_memory_presentations[nid] = {
+                    **item, "spans": list(dict.fromkeys([*cited, *spans, *old_spans]))[:32],
+                    "chain_ids": list(dict.fromkeys([*(previous.get("chain_ids") or []),
+                                                     *(cid for cid in item["chain_ids"] if cid in text)]))[:20],
+                }
+
+    def cite_memory(self, source_id, answer_span, source_quote="", chain_id=""):
+        if source_id not in self.confirmed_memory_presentations:
+            raise ValueError("引用来源必须已在本轮呈现")
+        if not isinstance(answer_span, str) or not answer_span.strip():
+            raise ValueError("引用需要最终回答中的连续片段")
+        allowed = self.confirmed_memory_presentations[source_id].get("chain_ids") or []
+        if chain_id and chain_id not in allowed:
+            raise ValueError("关联理由必须来自本轮实际呈现的资料")
+        self.memory_citations.append({"source_id": source_id, "answer_span": answer_span,
+                                      "source_quote": source_quote, "chain_id": chain_id})
+
+    def confirm_expression_presentations(self, messages):
+        """Confirm source text only from the actual successful model request.
+
+        Assistant/user text cannot grant an external source. The service still
+        validates live scope, revisions and the human/external evidence roots.
+        """
+        from common.expression_sources import visible_experience_fields, visible_observation_fields
+        from common.website_perception import _observation_block
+
+        def confirm(ref, entry, fields):
+            for field in fields:
+                source = {"kind": "experience", "id": ref, "revision": entry["revision"], "path": field["path"]}
+                key = json.dumps(source, sort_keys=True)
+                previous = self.confirmed_expression_sources.get(key, {})
+                spans = list(dict.fromkeys([field["text"], *(previous.get("spans") or [])]))[:8]
+                self.confirmed_expression_sources[key] = {"source": source, "spans": spans}
+
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") not in {"tool", "system"}:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            memory_result = False
+            if message.get("role") == "tool" or content.startswith("<skill_result>"):
+                raw = (content.partition(">")[2].rsplit("</skill_result>", 1)[0].strip()
+                       if content.startswith("<skill_result>") else content)
+                ref = (self.tool_result_refs.get(message.get("tool_call_id")) or
+                       self.tool_result_refs.get("result:" + hashlib.sha256(raw.strip().encode()).hexdigest()))
+                # Legacy text-protocol results have no tool_call_id after a
+                # budget cut. Bind them by the actual receipt serialization;
+                # never trust a source ID written inside the page/receipt.
+                candidates = ([ref] if ref else list(self.expression_records)
+                              if message.get("role") == "system" else [])
+                for candidate in candidates:
+                    entry = self.expression_records.get(candidate)
+                    if not entry:
+                        continue
+                    confirm(candidate, entry, visible_experience_fields(entry["record"], entry["rendered"], raw))
+                    if (ref == candidate and entry["record"].get("action") in {"search_memory", "read_memory_source"}):
+                        memory_result = True
+            block = _observation_block(message)
+            if block:
+                for shown in block[1]:
+                    ref = shown.get("id")
+                    entry = self.expression_records.get(ref)
+                    if entry:
+                        confirm(ref, entry, visible_observation_fields(entry["record"], shown))
+            if memory_result or (message.get("role") == "system" and content.startswith("<memory_recall>\n")):
+                for nid, item in self.confirmed_memory_presentations.items():
+                    if nid not in content:
+                        continue
+                    spans = [span for span in item["spans"] if any(value in content for value in
+                             (span, repr(span)[1:-1], json.dumps(span, ensure_ascii=False)[1:-1]))]
+                    if spans:
+                        previous = self.confirmed_expression_memories.get(nid, {})
+                        old = previous.get("spans", []) if previous.get("node_digest") == item["node_digest"] else []
+                        self.confirmed_expression_memories[nid] = {
+                            "node_digest": item["node_digest"], "spans": list(dict.fromkeys([*spans, *old]))[:32]}
+
+    def resolve_expression_source(self, source_quote, source_id=""):
+        """Return runtime proof, not a model-authored source object or URL."""
+        if not isinstance(source_quote, str) or not source_quote.strip() or not isinstance(source_id, str):
+            raise ValueError("表达学习需要本轮实际呈现的连续原文")
+        for item in reversed(list(self.confirmed_expression_sources.values())):
+            source = item["source"]
+            current = self.expression_records.get(source["id"])
+            if (current and current["revision"] == source["revision"]
+                    and (not source_id or source_id == source["id"])
+                    and any(source_quote in span for span in item["spans"])):
+                return {**source, "path": list(source["path"])}
+        for nid, item in reversed(list(self.confirmed_expression_memories.items())):
+            current = self.memory_presentations.get(nid, {})
+            if ((not source_id or source_id == nid) and current.get("node_digest") == item["node_digest"]
+                    and any(source_quote in span for span in item["spans"])):
+                return {"kind": "memory", "id": nid, "digest": item["node_digest"]}
+        raise ValueError("表达来源必须是本轮模型确实看过的网页原文、可见字幕或有来源的记忆原话")
+
+    def correct_memory(self, source_id, quote, replacement, explanation, correction_quote):
+        from tools.context import CURRENT_CONTEXT
+        context = CURRENT_CONTEXT.get()
+        if not context.identity.privileged or context.autonomous or self.autonomous:
+            raise PermissionError("事实纠正仅用于本机或主人私聊中的真实用户纠正")
+        shown = self.confirmed_memory_presentations.get(source_id)
+        if not shown or not quote or not any(quote in span for span in shown["spans"]):
+            raise ValueError("纠正来源必须在本轮实际呈现，旧事实片段必须可见")
+        if (not correction_quote or correction_quote not in context.user_text
+                or not replacement or replacement not in correction_quote):
+            raise ValueError("新事实必须逐字来自当前用户的纠正原话")
+        self.memory_corrections.append({
+            "operation_id": "correction:" + uuid.uuid4().hex,
+            "node_id": source_id, "expected_digest": shown["node_digest"], "kind": "fact",
+            "quote": quote, "replacement": replacement, "explanation": explanation,
+            "correction_quote": correction_quote,
+        })
+
+    def begin(self, command, *, category="tool", key=None):
+        key = key or self.prefix + ":" + uuid.uuid4().hex
+        record = {"category": category, "action": command.get("action", ""),
+                  "skill": command.get("skill", ""), "args": safe_data(command.get("args", {})),
+                  "started_at": time.time(), "status": "started", "result": ""}
+        self._record(key, record)
+        return key, record
+
+    def finish(self, entry, result="", *, status=None, activity=None):
+        key, record = entry
+        finished_at = time.time()
+        record = {**record, "result": result_data(result), "finished_at": finished_at,
+                  "duration_seconds": max(0, finished_at - record["started_at"]),
+                  "status": status or outcome_status(result)}
+        if record.get("category") == "turn" and activity:
+            if activity.get("id") and "sequence" in activity:
+                record["activity"] = safe_data(activity)
+            else:
+                from common.activity import activity_checkpoint
+                candidate = {
+                    "id": self.turn_id, "intent": self.candidate.get("intent") or "",
+                    **self.candidate,
+                }
+                record["activity"] = activity_checkpoint(candidate, activity, [])
+        self._record(key, record)
+        if key in self.expression_records:
+            self.expression_records[key]["rendered"] = (result if isinstance(result, str)
+                                                        else json.dumps(result_data(result), ensure_ascii=False))
+
+    def capture(self, action, args, result, *, status=None, category="observation", key=None, activity=None):
+        if category == "turn" and key:
+            with self.outbox.connection() as db:
+                previous = db.execute("SELECT params FROM memory_outbox WHERE source_ref=?", (key,)).fetchone()
+            if previous:
+                # Terminal receipts revise the same real turn. Preserve its
+                # measured duration instead of replacing it with a zero-length audit.
+                record = json.loads(previous["params"])["record"]
+                if record.get("status") != "started":
+                    record = {**record, "result": result_data(result),
+                              "status": status or outcome_status(result)}
+                    if activity:
+                        record["activity"] = safe_data(activity)
+                    self._record(key, record)
+                    return key
+        entry = self.begin({"action": action, "args": args}, category=category, key=key)
+        self.finish(entry, result, status=status, activity=activity)
+        return entry[0]
+
+    def execute(self, command, execute):
+        entry = self.begin(command)
+        self.last_tool_receipt = entry[0]
+        try:
+            result = execute()
+        except BaseException as exc:
+            self.finish(entry, f"{type(exc).__name__}: {exc}", status="failed")
+            raise
+        self.finish(entry, result)
+        self.tool_result_refs["result:" + hashlib.sha256(str(result).strip().encode()).hexdigest()] = entry[0]
+        return result
+
+    def begin_turn(self):
+        key = self.prefix + ":turn"
+        with self.outbox.connection() as db:
+            previous = db.execute("SELECT params FROM memory_outbox WHERE source_ref=?", (key,)).fetchone()
+        if previous and json.loads(previous["params"])["record"]["status"] in {"completed", "sent"}:
+            return None
+        return self.begin({"action": "autonomous_turn" if self.autonomous else "dialogue_turn",
+                           "args": {}}, category="turn", key=key)

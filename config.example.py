@@ -1,33 +1,17 @@
-"""Safe starter configuration. Copy to config.py and set credentials in the environment."""
+"""Application defaults. Configure this installation in the root .env file."""
 import os
 from pathlib import Path
+from common.env import load_env
+from runtime_environments import environment_python
 
 ROOT_DIR = Path(__file__).resolve().parent
-
-
-def _load_dotenv(path: Path) -> None:
-    # Existing process/system environment variables take precedence over .env.
-    if not path.is_file():
-        return
-    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip().removeprefix("export ").strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        if key:
-            os.environ.setdefault(key, value)
-
-
-_load_dotenv(ROOT_DIR / ".env")
+load_env()
 PRESENCE_STATE_PATH = ROOT_DIR / "presence_state.json"
 BROWSER_AUTOMATION_USER_DATA_DIR = str(ROOT_DIR / "static" / "Bines Data Automation")
 
 # One local PUB/SUB bus plus the small set of actual request/reply services.
 ZMQ_HOST = os.environ.get("BINES_ZMQ_HOST", "127.0.0.1")
+MEMORY_BIND_HOST = os.environ.get("BINES_MEMORY_BIND_HOST", "127.0.0.1")
 ZMQ_PORTS = {
     "BUS_PUBLISH": int(os.environ.get("BINES_BUS_PUBLISH_PORT", "5550")),
     "BUS_SUBSCRIBE": int(os.environ.get("BINES_BUS_SUBSCRIBE_PORT", "5551")),
@@ -79,13 +63,22 @@ HEARING_PUNC_MODEL_REVISION = os.environ.get("HEARING_PUNC_MODEL_REVISION", "v2.
 HEARING_ASR_DEVICE = os.environ.get("HEARING_ASR_DEVICE", "cuda")
 HEARING_VAD_MODEL = os.environ.get("HEARING_VAD_MODEL", "fsmn-vad")
 
-# All text tasks use this single credential and model. Vision/ASR/TTS remain separate modalities.
+# Text, vision and Search/Fetch share one DeepSeek credential. ASR/TTS remain separate.
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 DEEPSEEK_API_TIMEOUT = int(os.environ.get("DEEPSEEK_API_TIMEOUT", "60"))
 # deepseek-flash reasons by default; "disabled" keeps short classification calls from returning empty text.
 DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "disabled")
+_DEEPSEEK_API_ROOT = DEEPSEEK_BASE_URL.rstrip("/").removesuffix("/v1")
+DEEPSEEK_VISION_API_URL = f"{_DEEPSEEK_API_ROOT}/chat/completions"
+DEEPSEEK_VISION_MODEL = os.environ.get("DEEPSEEK_VISION_MODEL", "deepseek-flash")
+DEEPSEEK_VISION_TIMEOUT = int(os.environ.get("DEEPSEEK_VISION_TIMEOUT", "60"))
+DEEPSEEK_VISION_DETAIL = os.environ.get("DEEPSEEK_VISION_DETAIL", "original")
+DEEPSEEK_SEARCH_URL = f"{_DEEPSEEK_API_ROOT}/v1/tools/search"
+DEEPSEEK_FETCH_URL = f"{_DEEPSEEK_API_ROOT}/v1/tools/fetch"
+DEEPSEEK_WEB_TIMEOUT = int(os.environ.get("DEEPSEEK_WEB_TIMEOUT", "30"))
+DEEPSEEK_SEARCH_COUNT = int(os.environ.get("DEEPSEEK_SEARCH_COUNT", "5"))
 
 TTS_HTTP_BASE_URL = os.environ.get("BINES_TTS_URL", "http://127.0.0.1:9880")
 # Optional local GPT-SoVITS install; when set, the module manager starts its api_v2.py.
@@ -93,7 +86,10 @@ GPT_SOVITS_DIR = os.environ.get("GPT_SOVITS_DIR", "")
 
 # Singing: separate vocals -> so-vits-svc -> remix, cached per song (see singing/README.md).
 SOVITS_SVC_DIR = os.environ.get("SOVITS_SVC_DIR", "")
-SINGING_PYTHON = os.environ.get("SINGING_PYTHON", "")
+_INSTALLED_SINGING_PYTHON = environment_python("singing", ROOT_DIR)
+SINGING_PYTHON = os.environ.get("SINGING_PYTHON") or (
+    str(_INSTALLED_SINGING_PYTHON) if _INSTALLED_SINGING_PYTHON.is_file() else ""
+)
 SINGING_WORK_DIR = Path(os.environ.get("SINGING_WORK_DIR", str(ROOT_DIR / "singing" / "work")))
 SINGING_LIBRARY_DIR = Path(os.environ.get("SINGING_LIBRARY_DIR", str(ROOT_DIR / "static" / "music" / "library")))
 SINGING_SVC_MODEL = os.environ.get("SINGING_SVC_MODEL", "logs/44k/G_36000.pth")
@@ -114,19 +110,36 @@ ARK_MCP_UID = os.environ.get("ARK_MCP_UID", "")  # 与 arkserver 的 BINES_UID �
 ARK_MCP_TOKEN = os.environ.get("ARK_MCP_TOKEN", "")
 ARK_MCP_TIMEOUT = float(os.environ.get("ARK_MCP_TIMEOUT", "20"))
 
-DASHSCOPE_API_URL = os.environ.get(
-    "DASHSCOPE_API_URL",
-    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-)
-DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
-DASHSCOPE_VISION_MODEL = os.environ.get("DASHSCOPE_VISION_MODEL", "qwen3-vl-flash")
-DASHSCOPE_API_TIMEOUT = int(os.environ.get("DASHSCOPE_API_TIMEOUT", "30"))
+# Historical DashScope constants are aliases for old external consumers.
+# All in-repository vision callers use the DeepSeek names below.
+DASHSCOPE_API_URL = DEEPSEEK_VISION_API_URL
+DASHSCOPE_API_KEY = DEEPSEEK_API_KEY
+DASHSCOPE_VISION_MODEL = DEEPSEEK_VISION_MODEL
+DASHSCOPE_API_TIMEOUT = DEEPSEEK_VISION_TIMEOUT
 VISUAL_FACE_MODEL = os.environ.get("VISUAL_FACE_MODEL", "buffalo_l")
 
 _LOCAL_EMBEDDING_DIR = ROOT_DIR / "thingking" / "models" / "all-MiniLM-L6-v2"
 RAG_EMBEDDING_MODEL = str(_LOCAL_EMBEDDING_DIR) if _LOCAL_EMBEDDING_DIR.is_dir() else "sentence-transformers/all-MiniLM-L6-v2"
 HF_ENDPOINT_DEFAULT = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
 HF_DOWNLOAD_TIMEOUT = int(os.environ.get("HF_DOWNLOAD_TIMEOUT", "300"))
+
+# Dedicated semantic index for the expression corpus.  Kept separate from the
+# main memory database so corpus imports cannot contend with chat writes.
+QDRANT_URL = os.environ.get("BINES_QDRANT_URL", "http://127.0.0.1:6333")
+QDRANT_COLLECTION = os.environ.get("BINES_QDRANT_COLLECTION", "bines_expression")
+QDRANT_TIMEOUT = float(os.environ.get("BINES_QDRANT_TIMEOUT", "2.0"))
+QDRANT_MIN_SCORE = float(os.environ.get("BINES_QDRANT_MIN_SCORE", "0.52"))
+QDRANT_TOP_K = int(os.environ.get("BINES_QDRANT_TOP_K", "12"))
+EXPRESSION_CORPUS_PATH = os.environ.get(
+    "BINES_EXPRESSION_CORPUS",
+    str(ROOT_DIR / "thingking" / "data" / "expression_corpus" / "expression_corpus_1k.jsonl"),
+)
+# The main memory index uses an English sentence model; Chinese expression
+# retrieval needs its own compact Chinese embedding model.
+EXPRESSION_EMBEDDING_MODEL = os.environ.get(
+    "BINES_EXPRESSION_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+EXPRESSION_QUERY_PREFIX = os.environ.get(
+    "BINES_EXPRESSION_QUERY_PREFIX", "为这个句子生成表示以用于检索相关文章：")
 
 VOCU_BASE_URL = os.environ.get("VOCU_BASE_URL", "https://v1.vocu.ai")
 VOCU_API_KEY = os.environ.get("VOCU_API_KEY", "")
@@ -135,5 +148,5 @@ VOCU_MODEL_ID = os.environ.get("VOCU_MODEL_ID", "")
 
 def require_env(name: str, value: str | None) -> str:
     if not value:
-        raise RuntimeError(f"Environment variable '{name}' is required but not set.")
+        raise RuntimeError(f"请在项目 .env 文件中配置 {name}。")
     return value

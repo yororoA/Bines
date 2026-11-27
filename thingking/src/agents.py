@@ -1,10 +1,15 @@
 """Pure-Python DeepSeek agents using the local SKILL.md text protocol."""
 from __future__ import annotations
 
+import json
+import threading
 from typing import Any, Dict, List, Optional
 
 from config import DEEPSEEK_MODEL
 from common.deepseek_client import get_deepseek_client
+from common.clock import with_current_time
+from common.website_perception import with_website_observations
+from common.model_usage import measured_request
 from thinking_model_helper import ThinkingModelHelper
 from skill_runner import SkillRunner
 
@@ -21,6 +26,7 @@ def _clean_legacy_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
     cleaned = []
     for original in messages or []:
         message = dict(original)
+        message.pop("reasoning_content", None)
         if message.get("role") == "assistant" and message.get("tool_calls"):
             message.pop("tool_calls", None)
             if not message.get("content"):
@@ -46,11 +52,9 @@ class MainAgent:
         self.skill_instructions = instructions or ""
 
     def get_system_prompt(self) -> str:
-        base = """你是一个有鲜明人设的情感对话助手。理解用户意图并自然回应，保持角色语气。
-- 用户问过去的对话、记忆或聊天记录时，先从已提供的上下文中回答，不要调用屏幕或浏览器动作。
+        base = """用户问过去的对话、记忆或聊天记录时，先从已提供的上下文中回答，不要调用屏幕或浏览器动作。
 - 用户明确要求实际操作时，必须使用已启用的本地技能；不要编造执行结果。
 - 不输出括号内的动作描述。若无需回复则保持空内容。
-- 用户要求写代码、调试或解释技术问题时，应直接给出有帮助的回答。
 """
         sections = [base, SKILL_PROTOCOL]
         if self.skill_instructions:
@@ -60,13 +64,42 @@ class MainAgent:
     def _post_chat_completion(self, payload: Dict[str, Any], stream: bool = False):
         request = dict(payload)
         request.pop("stream", None)
-        return self.client.chat.completions.create(**request, stream=stream)
+        request["messages"] = with_current_time(with_website_observations(request.get("messages") or []))
+        from common.context_budget import bound_request
+        request["messages"] = bound_request(request["messages"], tools=request.get("tools"),
+                                             response_format=request.get("response_format"),
+                                             max_output_tokens=request.get("max_tokens", 0))
+        payload["messages"] = request["messages"]
+        response = measured_request(self.client.chat.completions.create, **request, stream=stream)
+        if not stream and getattr(response, "choices", None):
+            from thinking_model_helper import _confirm_memory_request
+            _confirm_memory_request(request["messages"])
+        return response
 
     def _ensure_system_prompt(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [{"role": "system", "content": self.get_system_prompt()}] + _clean_legacy_messages(messages)
+        rules = {"role": "system", "content": self.get_system_prompt()}
+        cleaned = _clean_legacy_messages(messages)
+        return cleaned if cleaned and cleaned[0] == rules else [rules, *cleaned]
 
     def run_one_turn_streaming_text_only(self, messages: List[Dict], interrupt_check=None):
         holder: Dict[str, Any] = {}
+        cancelled = threading.Event()
+        response_lock = threading.Lock()
+        current_response = [None]
+
+        def close_response():
+            with response_lock:
+                response, current_response[0] = current_response[0], None
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+        def cancel():
+            cancelled.set()
+            holder["interrupted"] = True
+            close_response()
+
+        holder["cancel"] = cancel
         payload = {
             "messages": self._ensure_system_prompt(messages),
             "model": self.model,
@@ -77,33 +110,60 @@ class MainAgent:
             "temperature": 0.7,
             "top_p": 1,
         }
-        try:
-            response = self._post_chat_completion(payload, stream=True)
-        except Exception as exc:
-            holder["error"] = str(exc)
-            return iter(()), holder
-
         full_content = []
 
         def generate():
             try:
+                # Open the request in the producer thread as well: waiting for the
+                # first HTTP response must not block the desktop interrupt loop.
+                if cancelled.is_set() or (interrupt_check and interrupt_check()):
+                    holder["interrupted"] = True
+                    return
+                response = self._post_chat_completion(payload, stream=True)
+                holder["submitted_messages"] = payload["messages"]
+                with response_lock:
+                    current_response[0] = response
+                if cancelled.is_set():
+                    holder["interrupted"] = True
+                    return
+                request_confirmed = False
                 for chunk in response:
-                    if interrupt_check and interrupt_check():
+                    if cancelled.is_set() or (interrupt_check and interrupt_check()):
                         holder["interrupted"] = True
                         return
                     choices = getattr(chunk, "choices", None) or []
                     if not choices:
                         continue
+                    if not request_confirmed:
+                        from thinking_model_helper import _confirm_memory_request
+                        _confirm_memory_request(payload["messages"])
+                        request_confirmed = True
+                    finish_reason = getattr(choices[0], "finish_reason", None)
+                    if finish_reason:
+                        holder["finish_reason"] = finish_reason
+                    if finish_reason == "length":
+                        holder["error"] = "模型流式输出达到长度上限，回答未完成"
+                        return
+                    if finish_reason and finish_reason != "stop":
+                        holder["error"] = f"模型流式输出未正常结束：{finish_reason}"
+                        return
                     content = getattr(choices[0].delta, "content", None)
                     if content:
                         full_content.append(content)
                         yield content
+                if not cancelled.is_set() and not holder.get("interrupted") and not holder.get("finish_reason"):
+                    holder["error"] = "模型流连接结束但缺少完成标记，回答未完成"
             except Exception as exc:
-                holder["error"] = str(exc)
+                if cancelled.is_set() or holder.get("interrupted"):
+                    holder["interrupted"] = True
+                else:
+                    holder["error"] = str(exc)
             finally:
-                close = getattr(response, "close", None)
-                if callable(close):
-                    close()
+                try:
+                    close_response()
+                except Exception as exc:
+                    if not cancelled.is_set():
+                        holder.setdefault("error", f"关闭模型流失败：{type(exc).__name__}")
                 content = "".join(full_content)
                 holder["message"] = {"role": "assistant", "content": content or None}
 
@@ -148,51 +208,19 @@ class MainAgent:
             return f"任务已完成：{tool_result}"
 
 
-class SummaryAgent:
-    """Summary and state-maintenance prompts use the same DeepSeek model."""
-
-    def __init__(self, skill_runner: SkillRunner | None = None):
-        self.thinking_helper = ThinkingModelHelper()
-        self.skill_runner = skill_runner
-
-    def set_skill_runner(self, skill_runner: SkillRunner) -> None:
-        self.skill_runner = skill_runner
-
-    def update_state(self, state_update_description: str, context: str, base_messages: List[Dict]) -> str:
-        if self.skill_runner is None:
-            return "本地技能运行器尚未初始化。"
-        messages = _clean_legacy_messages(base_messages)
-        messages.extend([
-            {"role": "system", "content": "根据对话事实维护动态状态。只更新明确发生变化的字段；无变化时直接回复无需更新。"},
-            {"role": "user", "content": f"状态变化描述：{state_update_description}\n上下文：{context or '无'}"},
-        ])
-        try:
-            result, _, _ = self.thinking_helper.run_skill_protocol(
-                messages, self.skill_runner, allowed_skills={"memory-maintenance"},
-                max_iterations=3, temperature=0.0, max_tokens=1200,
-            )
-            return result or "状态更新完成。"
-        except Exception as exc:
-            return f"状态更新失败：{exc}"
-
-    def summarize_content(self, content: str) -> str:
-        if not content:
-            return ""
-        try:
-            return self.thinking_helper.complete_text([
-                {"role": "system", "content": "你是对话摘要助手。准确压缩重要话题、事实、参与者和观点，忽略无关寒暄。"},
-                {"role": "user", "content": f"请总结以下内容：\n\n{content}"},
-            ], temperature=0.3, max_tokens=1024)
-        except Exception as exc:
-            return f"摘要失败：{exc}"
-
-
 class DynamicMemoryMaintainer:
-    """Update dynamic memory through the memory-maintenance Skill."""
+    """Update the owner's dynamic state through the memory-maintenance Skill after a new episode summary."""
 
-    def __init__(self, skill_runner: SkillRunner | None = None):
+    def __init__(self, skill_runner: SkillRunner | None = None, memory_client=None):
         self.thinking_helper = ThinkingModelHelper()
         self.skill_runner = skill_runner
+        self.memory_client = memory_client
+
+    def update_from_summary(self, summary_text: str) -> str:
+        if not self.memory_client:
+            return ""
+        state = self.memory_client.get_state("owner").get("data") or {}
+        return self.update_dynamic_memory_from_summary(summary_text, json.dumps(state, ensure_ascii=False, indent=2))
 
     def update_dynamic_memory_from_summary(self, summary_text: str, current_dynamic_json: str) -> str:
         if not self.skill_runner or not summary_text.strip():

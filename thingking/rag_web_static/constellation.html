@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>记忆星图 · 碧波</title>
+  <link rel="stylesheet" href="/constellation.css">
+  <script src="/constellation.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="返回碧波记忆库"><span class="brand-mark">碧</span><span>碧波 <small> / 记忆观测室</small></span></a>
+    <div class="header-links"><span class="live-state" id="live-state">连接记忆库</span><a href="/">列表与管理 ↗</a></div>
+  </header>
+  <main class="observatory">
+    <section class="sky" aria-label="全库记忆关联星图">
+      <canvas id="sky" tabindex="0" role="img" aria-label="记忆光斑与真实关联连线。可用搜索结果选择节点；方向键移动，加减键缩放，F 查看全图。"></canvas>
+      <div class="sky-heading">
+        <p class="eyebrow">THE SHAPE OF REMEMBERING</p>
+        <h1>记忆星图<span>每一次想起，循光而行。</span></h1>
+        <p class="description">一束光是一条记忆，一根线是一份关联。</p>
+        <div class="metrics" aria-live="polite"><span><b id="node-count">—</b> 记忆</span><span><b id="edge-count">—</b> 连线</span><span><b id="chain-count">—</b> 理由链</span></div>
+      </div>
+      <div class="filter-bar">
+        <div class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="寻找一条记忆…" aria-label="搜索记忆原文"><kbd>/</kbd></div>
+        <select id="scope" aria-label="筛选作用域"><option value="">全部作用域</option></select>
+        <select id="kind" aria-label="筛选记忆类型"><option value="">全部类型</option><option value="raw">原始对话</option><option value="episode">情节摘要</option><option value="semantic">长期事实</option><option value="diary">日记</option><option value="excerpt">对话片段</option></select>
+        <button id="reload" class="icon-button" title="重新读取全库" aria-label="重新读取全库">↻</button>
+      </div>
+      <div id="results" class="search-results" hidden aria-label="搜索结果"></div>
+      <div id="focus-banner" class="focus-banner" hidden><span class="focus-dot"></span><div><small>正在聚焦理由链</small><strong id="focus-reason"></strong></div><button id="clear-chain" aria-label="取消链聚焦">×</button></div>
+      <div id="tooltip" class="tooltip" hidden></div>
+      <div id="load-state" class="load-state" role="status"><span class="loader"></span><strong>让记忆显现</strong><p>正在读取全库中的原文和关联…</p><button id="retry" hidden>重新连接</button></div>
+      <div class="sky-bottom">
+        <div class="legend"><span style="--color:#bfd8e6">原始对话</span><span style="--color:#dfb986">情节摘要</span><span style="--color:#83d4b5">长期事实</span><span style="--color:#c1b1df">日记</span><span style="--color:#8ab7e2">片段</span><small>亮度 ∝ 最大权重</small></div>
+        <div class="view-controls"><button id="zoom-out" aria-label="缩小">−</button><span id="zoom-label">100%</span><button id="zoom-in" aria-label="放大">+</button><i></i><button id="fit" title="全图 (F)">全图</button></div>
+      </div>
+      <p class="gesture-hint" id="gesture-hint">悬浮点亮关联 · 点击固定记忆 · 滚动缩放 · 拖动画布</p>
+    </section>
+    <aside class="inspector" aria-label="记忆与关联详情">
+      <div class="inspector-heading"><span class="eyebrow">MEMORY / INSPECTOR</span><button id="clear-node" class="icon-button" aria-label="取消固定记忆" hidden>×</button></div>
+      <div id="inspector-body">
+        <div class="empty-inspector"><div class="orbit-mark" aria-hidden="true"><i></i><i></i><i></i></div><h2>沿一束光，<br>走进一段记忆。</h2><p>悬浮光斑，点亮它所处的所有关联链。点击后，原文与每条关联理由会留在这里。</p></div>
+        <div class="reading-guide"><p><span>01</span> 亮度取各链召回与引用权重的最大值。</p><p><span>02</span> 悬浮时，同链所有记忆一起亮起。</p><p><span>03</span> 选择一个理由，让这条链成为焦点。</p></div>
+      </div>
+      <div class="inspector-foot"><span class="small-dot"></span>全库视图 · 包含冷层与未建联记忆</div>
+    </aside>
+  </main>
+  <footer class="footer"><span>BINES <i>/</i> ASSOCIATIVE MEMORY</span><span id="visible-count">等待记忆库</span><span id="snapshot-time"></span></footer>
+  <div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -1,0 +1,228 @@
+"""Authenticated loopback capability gateway. Only this process owns OneBot."""
+import json
+import logging
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from chatBot.config import GATEWAY_HOST, GATEWAY_PORT, gateway_token
+from chatBot.messages import LOCAL_IDENTITY
+from common.local_auth import token_matches
+
+
+class GatewayServer(ThreadingHTTPServer):
+    daemon_threads = True
+    def __init__(self, service, address=None, token=None, memory_hub=None, sticker_library=None):
+        self.service = service
+        self.memory_hub = memory_hub
+        from chatBot.sticker_service import StickerService
+        self.stickers = StickerService(service, library=sticker_library)
+        from chatBot.video import VideoService
+        self.videos = VideoService(service)
+        service.sticker_library = self.stickers.library
+        self.token = token or gateway_token()
+        super().__init__(address or (GATEWAY_HOST, GATEWAY_PORT), GatewayHandler)
+
+
+class GatewayHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        if not token_matches(self.headers.get("Authorization", ""), f"Bearer {self.server.token}"):
+            return self.respond(401, {"error": "authentication required"})
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4*1024*1024:
+                raise ValueError("请求大小无效")
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("请求必须是 JSON 对象")
+            identity = LOCAL_IDENTITY
+            event = {}
+            event_row = None
+            event_id = data.get("event_id")
+            if event_id:
+                with self.server.service.store.connection() as db:
+                    row = db.execute("SELECT id,batch,raw FROM events WHERE id=?", (event_id,)).fetchone()
+                if not row:
+                    raise PermissionError("未知 QQ 事件")
+                event = {**json.loads(row["raw"]), "event_id": event_id}
+                event_row = dict(row)
+                identity = self.server.service.store.identity(event)
+            service = self.server.service
+            if self.path == "/health":
+                result = {"connected": service.client.is_connected}
+                if identity.local:
+                    result["memory"] = bool(self.server.memory_hub and self.server.memory_hub.call(
+                        LOCAL_IDENTITY, "ping", {}).get("ok"))
+                    if hasattr(service.store, "health"):
+                        result["queue"] = service.store.health()
+                    if hasattr(service.client, "health"):
+                        result["transport"] = service.client.health()
+            elif self.path == "/memory":
+                if self.server.memory_hub is None:
+                    raise RuntimeError("Memory hub unavailable")
+                result = self.server.memory_hub.call(identity, data["method"], data.get("params", {}), event_id=event_id)
+            elif self.path == "/discover":
+                result = service.catalog.discover(identity, data.get("query", ""), data.get("action"))
+            elif self.path == "/catalog":
+                result = service.catalog.status(identity)
+                result["connected"] = service.client.is_connected
+            elif self.path == "/schemas":
+                if not identity.qq_admin:
+                    raise PermissionError("完整 schema 只允许本机或已绑定主人")
+                result = service.catalog.schemas()
+            elif self.path == "/action":
+                if event.get("post_type") == "message":
+                    from chatBot.messages import SEND_ACTIONS
+                    operation_id = data.get("operation_id")
+                    prior = service.store.operation(operation_id) if operation_id else {"status": "not_found"}
+                    if (data["action"] in SEND_ACTIONS and prior.get("status") == "not_found"
+                            and service.store.turn_waits.new_input(event_id)):
+                        raise RuntimeError("qq_new_input：同一人已补充消息，本轮尚未发送的旧回复已取消")
+                if event.get("post_type") == "bines_proactive":
+                    from chatBot.proactive import dispatch_allowed
+                    activity = self.server.memory_hub.call(
+                        LOCAL_IDENTITY, "activity_snapshot", {},
+                    ).get("last_owner_activity") or {}
+                    dispatch_allowed(service.store, event, data["action"], data.get("params", {}),
+                                     data.get("operation_id"), central_activity=float(activity.get("ts") or 0))
+                    # Refuse invented destinations before even creating a tool journal
+                    # entry; this is a definite pre-dispatch denial, not uncertain IO.
+                    operation_id = data.get("operation_id")
+                    if not operation_id or service.store.operation(operation_id).get("status") == "not_found":
+                        service.recipients.authorize(identity, data["action"], data.get("params", {}), autonomous=True)
+                operation_id = data.get("operation_id")
+                if operation_id and service.store.operation(operation_id).get("status") != "not_found":
+                    # Receipt replays still pass authorization and exact action/params
+                    # binding in call(), but must never reopen the original journal.
+                    result = service.call(identity, data["action"], data.get("params", {}),
+                                          operation_id, data.get("timeout", 30),
+                                          autonomous=event.get("post_type") == "bines_proactive")
+                    if self.server.memory_hub:
+                        self.server.memory_hub.remember_receipt(identity, data["action"], data.get("params", {}), result)
+                    return self.respond(200, {"result": result})
+                journal, entry = None, None
+                if self.server.memory_hub and data["action"] not in {"get_friend_msg_history", "get_group_msg_history"}:
+                    from common.memory_journal import MemoryJournal
+                    from chatBot.memory_hub import identity_envelope
+                    turn_id = data.get("operation_id") or event_id or "local-api"
+                    if ":tool:" in turn_id:
+                        turn_id = turn_id.split(":tool:", 1)[0]
+                    elif ":reply:" in turn_id:
+                        turn_id = turn_id.split(":reply:", 1)[0]
+                    journal = MemoryJournal(self.server.memory_hub.outbox, identity_envelope(identity),
+                        turn_id, autonomous=event.get("post_type") == "bines_proactive",
+                        candidate=event.get("proactive"), event_ids=[event_id] if event_id else [])
+                    operation_id = data.get("operation_id")
+                    entry = journal.begin({"action": data["action"], "args": data.get("params", {})},
+                        key=journal.prefix + ":native:" + operation_id if operation_id else None)
+                try:
+                    result = service.call(identity, data["action"], data.get("params", {}),
+                                          data.get("operation_id"), data.get("timeout", 30),
+                                          autonomous=event.get("post_type") == "bines_proactive")
+                except BaseException as exc:
+                    if journal:
+                        journal.finish(entry, str(exc), status="uncertain")
+                    raise
+                if journal:
+                    journal.finish(entry, result)
+                    self.server.memory_hub.remember_receipt(identity, data["action"], data.get("params", {}), result)
+            elif self.path == "/quoted_message":
+                result = service.quoted_message(identity, event_id, data.get("message_id"))
+            elif self.path == "/video":
+                result = self.server.videos.call(identity, data["method"], data.get("params", {}),
+                                                  event_id=event_id)
+            elif self.path == "/stickers":
+                sync_allowed = data.get("sync_qq", True) is True
+                before_sync = None
+                if event.get("post_type") == "bines_proactive":
+                    from chatBot.proactive import guard, dispatch_allowed
+                    activity = self.server.memory_hub.call(
+                        LOCAL_IDENTITY, "activity_snapshot", {},
+                    ).get("last_owner_activity") or {} if self.server.memory_hub else {}
+                    central_activity = float(activity.get("ts") or 0)
+                    if event.get("proactive", {}).get("planning_only"):
+                        raise PermissionError("休息思考轮次不执行表情操作")
+                    reason = guard(service.store, event, central_activity=central_activity)
+                    if reason:
+                        raise PermissionError(f"表情操作已取消：{reason}")
+                    if data.get("method") == "collect":
+                        if not str(data.get("operation_id") or "").startswith(str(event_id) + ":"):
+                            raise PermissionError("收藏必须绑定本轮回执编号")
+                        try:
+                            dispatch_allowed(service.store, event, "add_custom_face", {},
+                                             data.get("operation_id"), central_activity=central_activity)
+                        except PermissionError:
+                            sync_allowed = False  # Quiet observation may save locally, never write QQ.
+                        def before_sync():
+                            try:
+                                fresh_activity = self.server.memory_hub.call(
+                                    LOCAL_IDENTITY, "activity_snapshot", {},
+                                ).get("last_owner_activity") or {} if self.server.memory_hub else {}
+                                central = float(fresh_activity.get("ts") or 0)
+                                if guard(service.store, event, central_activity=central):
+                                    return False
+                                # Use the not-yet-started QQ sub-operation for the
+                                # dispatch check; the outer collection is already recorded.
+                                dispatch_allowed(service.store, event, "add_custom_face", {},
+                                                 data["operation_id"] + ":sync-check", central_activity=central)
+                                return True
+                            except Exception:
+                                return False
+                result = self.server.stickers.call(
+                    identity, data["method"], data.get("params", {}), event_id=event_id,
+                    operation_id=data.get("operation_id"), sync_allowed=sync_allowed, before_sync=before_sync)
+            elif self.path == "/operation":
+                if not identity.qq_admin:
+                    raise PermissionError("回执查询只允许本机或已绑定主人")
+                result = self.server.stickers.reconcile(identity, data["operation_id"])
+            elif self.path == "/operation_state":
+                # A scoped reply can inspect its own persisted turn's receipts.
+                # Knowing an operation ID must not expose another conversation.
+                if not identity.qq_admin:
+                    operation_id = data.get("operation_id")
+                    prefixes = [str(event_row[key]) + ":" for key in ("id", "batch") if event_row.get(key)]
+                    if not isinstance(operation_id, str) or not operation_id.startswith(tuple(prefixes)):
+                        raise PermissionError("只能查询当前轮次的操作回执")
+                result = service.store.operation(data["operation_id"])
+            elif self.path == "/events":
+                with service.store.connection() as db:
+                    rows = db.execute(
+                        "SELECT * FROM events ORDER BY received DESC" if identity.privileged else
+                        "SELECT * FROM events WHERE conversation=? ORDER BY received DESC",
+                        () if identity.privileged else (identity.conversation,),
+                    ).fetchall()
+                result = []
+                for row in rows:
+                    event = json.loads(row["raw"])
+                    if identity.privileged or service.store.identity(event).scope == identity.scope:
+                        result.append({"event_id": row["id"], "event": event, "status": row["status"]})
+                        if len(result) >= max(1, min(int(data.get("limit", 20)), 100)):
+                            break
+            else:
+                return self.respond(404, {"error": "unknown endpoint"})
+            self.respond(200, {"result": result})
+        except PermissionError as exc:
+            self.respond(403, {"error": str(exc)})
+        except (ValueError, TypeError, KeyError) as exc:
+            self.respond(400, {"error": str(exc)})
+        except RuntimeError as exc:
+            from memory.client import MemoryUnavailable
+            if isinstance(exc, MemoryUnavailable):
+                return self.respond(503, {"error": "记忆服务连接暂时不可用", "error_type": "MemoryUnavailable"})
+            self.respond(409 if "StateConflict" in str(exc) else 503, {"error": str(exc)})
+        except Exception:
+            self.respond(503, {"error": "NapCat 能力入口暂不可用"})
+
+    def respond(self, code, data):
+        payload = json.dumps(data, ensure_ascii=False).encode()
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (ConnectionError, TimeoutError):
+            # The handler may already have committed an operation receipt.
+            # A lost HTTP response is neither a failed action nor a new 503.
+            self.close_connection = True
+            logging.getLogger("bines.gateway").debug("客户端已断开，HTTP %s 回包未送达", code)

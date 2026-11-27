@@ -1,0 +1,10 @@
+{
+  "name": "bines-vendored-see-now-pipeline",
+  "private": true,
+  "type": "module",
+  "version": "0.2.3",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  }
+}

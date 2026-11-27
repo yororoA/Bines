@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bines · 设置与控制</title>
+  <link rel="stylesheet" href="{{ url_for('status_dashboard.static', filename='control_center.css') }}">
+</head>
+<body>
+  <header><a class="brand" href="/control"><span class="brand-mark">B</span><span>Bines<small>设置与控制</small></span></a>
+    <nav aria-label="管理导航"><a href="/control" aria-current="page">设置与控制</a><a href="/status">状态总览</a><a data-port="MODULE_MANAGER" href="/">模块管理 ↗</a><a data-port="RAG_MEMORY" href="/">记忆库 ↗</a></nav>
+  </header>
+  <main>
+    <section class="page-heading"><div><h1>设置与控制</h1></div><a class="quiet-link" href="/status#memory-transfer">记忆备份与迁移 ↗</a></section>
+    <div id="control-notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="tabs" role="tablist" aria-label="控制中心分区">
+      <button type="button" id="tab-settings" role="tab" aria-selected="true" aria-controls="section-settings" data-section="settings">全部配置 <span id="settings-count"></span></button>
+      <button type="button" id="tab-documents" role="tab" aria-selected="false" aria-controls="section-documents" data-section="documents">人格与能力</button>
+      <button type="button" id="tab-runtime" role="tab" aria-selected="false" aria-controls="section-runtime" data-section="runtime">记忆与自主状态</button>
+      <button type="button" id="tab-services" role="tab" aria-selected="false" aria-controls="section-services" data-section="services">服务与本机控制</button>
+    </div>
+
+    <section id="section-settings" role="tabpanel" aria-labelledby="tab-settings">
+      <div class="panel toolbar"><div class="search-field"><label for="settings-search">搜索配置</label><input id="settings-search" type="search" placeholder="名称、配置键或说明" autocomplete="off"></div><div><label for="settings-group">配置分组</label><select id="settings-group"><option value="">全部分组</option></select></div><button type="button" id="settings-reload">重新读取</button></div>
+      <p id="settings-source" class="muted">正在读取配置…</p>
+      <p class="help">这里只保存改动过的字段。凭据不返回明文，留空会保留原值；使用“恢复默认”可移除覆盖。保存后请按提示重启对应服务。以下运行值来自当前管理进程，其他服务加载的值可能不同。</p>
+      <form id="settings-form" novalidate><div id="settings-fields" class="settings-list" aria-live="polite"><div class="panel empty">正在读取全部配置…</div></div>
+        <div class="save-bar"><span id="settings-dirty">没有未保存的更改</span><div class="button-row"><button type="button" id="settings-discard" disabled>撤销本页更改</button><button type="submit" id="settings-save" class="primary" disabled>保存配置</button></div></div>
+      </form>
+    </section>
+
+    <section id="section-documents" role="tabpanel" aria-labelledby="tab-documents" hidden>
+      <div class="panel"><div class="section-heading"><div><h2>人格与能力文件</h2></div><button type="button" id="document-reload">重新读取</button></div>
+        <div class="document-toolbar"><label for="document-kind">选择配置</label><select id="document-kind"><option value="persona">人格定义</option><option value="mcp">外部 MCP 服务</option><option value="screen">实时屏幕设置</option><option value="skills">技能动作开关</option></select><span id="document-revision" class="muted"></span></div>
+        <p id="document-note" class="help">选择配置后读取。</p><p id="document-secrets" class="help" hidden>敏感字段以 •••••••• 显示；保留占位符会保留原值，填写新值会更新，删除字段会移除配置。</p>
+        <label class="editor-label" for="document-content">完整配置（JSON）</label><textarea id="document-content" class="json-editor document-editor" spellcheck="false" disabled aria-describedby="document-note"></textarea>
+        <div class="button-row editor-actions"><span id="document-dirty" class="muted">没有未保存的更改</span><button type="button" id="document-format">格式化 JSON</button><button type="button" id="document-save" class="primary" disabled>保存此配置</button></div>
+        <p class="help">保存实时屏幕设置后，可在“服务与本机控制”中应用到宿主机。</p>
+      </div>
+    </section>
+
+    <section id="section-runtime" role="tabpanel" aria-labelledby="tab-runtime" hidden>
+      <div class="panel toolbar"><div><label for="runtime-scope">记忆作用域</label><select id="runtime-scope"><option value="owner">owner · 管理员</option></select></div><button type="button" id="runtime-reload">刷新状态</button><span id="runtime-updated" class="muted"></span></div>
+      <div class="runtime-grid">
+        <section class="panel full-width"><div class="section-heading"><h2>动态记忆状态</h2><span id="state-version" class="pill">版本未知</span></div><div id="state-error" class="inline-notice" hidden></div>
+          <details open><summary>查看当前完整状态</summary><pre id="state-current" class="readout">尚未读取</pre></details>
+          <h3>修改状态</h3><p class="help">勾选需要修改的字段。关系分值通过增量调整，物品与高亮逐项增删；其他派生状态由对应操作更新。</p><div id="state-fields" class="state-fields"></div>
+          <details><summary>查看或编辑待提交的 JSON</summary><label class="sr-only" for="state-changes">待提交状态变更 JSON</label><textarea id="state-changes" class="json-editor" spellcheck="false">{}</textarea></details>
+          <div class="button-row editor-actions"><span id="state-dirty" class="muted">没有待提交的变更</span><button type="button" id="state-discard">撤销变更</button><button type="button" id="state-save" class="primary" disabled>保存当前作用域状态</button></div>
+          <details id="state-extensions" hidden><summary>编辑扩展字段</summary>
+            <p class="help">这些字段来自此作用域已保存的状态。保留字段名称，在 JSON 中修改各字段的值。</p>
+            <label class="editor-label" for="extension-values">扩展字段（JSON）</label>
+            <textarea id="extension-values" class="json-editor" spellcheck="false" disabled></textarea>
+            <div class="button-row editor-actions"><span id="extension-dirty" class="muted"></span><button type="button" id="extension-discard" disabled>撤销扩展字段更改</button><button type="button" id="extension-save" class="primary" disabled>保存扩展字段</button></div>
+          </details>
+        </section>
+        <section class="panel"><div class="section-heading"><h2>生命节律</h2><span id="life-state" class="pill">未知</span></div><div id="life-error" class="inline-notice" hidden></div><pre id="life-current" class="readout compact">尚未读取</pre>
+          <div class="form-row"><label for="life-action">调节方式</label><select id="life-action"><option value="rest">休息</option><option value="wake">保持清醒</option><option value="auto">恢复自动节律</option></select></div>
+          <div class="form-row"><label for="life-duration">持续分钟</label><input id="life-duration" type="number" min="5" step="1" value="30"></div><div class="form-row"><label for="life-reason">原因</label><input id="life-reason" type="text" minlength="2" maxlength="300" placeholder="说明这次调节的原因"></div><button type="button" id="life-save" class="primary" disabled>应用节律调节</button>
+          <p class="help">仅管理员作用域可调节；精力、睡眠压力等随节律演化，不能直接填写任意值。</p>
+        </section>
+        <section class="panel"><div class="section-heading"><h2>自主活动</h2><span id="autonomy-state" class="pill">未知</span></div><div id="autonomy-error" class="inline-notice" hidden></div><pre id="autonomy-current" class="readout compact">尚未读取</pre><label for="autonomy-reason">操作原因（可选）</label><input id="autonomy-reason" type="text" maxlength="500" placeholder="例如：暂时需要安静">
+          <div class="button-row autonomy-actions"><button type="button" data-autonomy="pause" disabled>暂停自主活动</button><button type="button" data-autonomy="resume" class="primary" disabled>恢复自主活动</button><button type="button" data-autonomy="stop" class="danger" disabled>停止自主活动</button></div><p class="help">控制会持久保存。服务连接、调用用量等观测指标请在 <a href="/status">状态总览</a> 查看。</p>
+        </section>
+        <section class="panel full-width"><div class="section-heading"><h2>自主调度状态</h2><button type="button" id="schedulers-refresh">刷新调度状态</button></div>
+          <div id="schedulers-error" class="inline-notice" hidden></div><div id="schedulers-list" class="task-list">尚未读取</div>
+          <div class="pagination"><button type="button" id="schedulers-first" disabled>回到首页</button><button type="button" id="schedulers-next" disabled>下一页</button></div>
+        </section>
+        <section class="panel full-width"><div class="section-heading"><div><h2>后台记忆任务</h2><p class="muted">失败原因、重试次数与可重试条件在这里查看。</p></div><div class="button-row"><label class="sr-only" for="jobs-status">任务状态</label><select id="jobs-status"><option value="failed">失败任务</option><option value="pending">等待中</option><option value="running">处理中</option><option value="done">已完成</option><option value="cancelled">已取消</option><option value="">全部任务</option></select><button type="button" id="jobs-reload">刷新任务</button></div></div><div id="jobs-error" class="inline-notice" hidden></div><div id="jobs-list" class="empty">尚未读取</div><div class="pagination"><button type="button" id="jobs-prev">上一页</button><span id="jobs-page" class="muted"></span><button type="button" id="jobs-next">下一页</button></div></section>
+        <section class="panel full-width maintenance-panel"><div><h2>检索索引维护</h2><p class="help">从记忆数据库重新构建向量索引。重建在后台进行，当前进度可在状态总览查看。</p></div><button type="button" id="index-rebuild" class="danger">重建向量索引</button></section>
+      </div>
+    </section>
+
+    <section id="section-services" role="tabpanel" aria-labelledby="tab-services" hidden>
+      <div id="host-unavailable" class="panel" hidden><h2>此入口未管理宿主机进程</h2><p>当前入口仍可保存配置、编辑记忆与自主状态。服务启停、用户在线状态、游戏模式和屏幕即时应用，需要打开宿主机的模块管理入口。</p><a data-port="MODULE_MANAGER" data-path="/control#services" href="/control#services">打开宿主机设置与控制 ↗</a><p class="muted">Docker 容器由启动器或 Docker 管理，本页不会把未接入的宿主进程误报为停止。</p></div>
+      <div id="host-controls">
+        <div class="runtime-grid"><section class="panel"><h2>用户在线状态</h2><p id="presence-current" class="muted">尚未读取</p><label class="check-line"><input id="presence-online" type="checkbox"> 用户在线</label><button type="button" id="presence-save">保存在线状态</button><div id="presence-error" class="inline-notice" hidden></div></section>
+        <section class="panel"><h2>游戏模式</h2><p class="help">控制当前管理器会话中的模式。页面显示的值来自管理器，不等同于所有客户端已收到通知。</p><label class="check-line"><input id="game-enabled" type="checkbox"> 开启游戏模式</label><div class="form-row"><label for="game-interval">间隔（秒）</label><input id="game-interval" type="number" min="0.01" step="0.01" value="0.1"></div><button type="button" id="game-save">应用游戏模式</button><div id="game-error" class="inline-notice" hidden></div></section>
+        <section class="panel full-width"><div class="section-heading"><div><h2>服务进程与日志</h2><p class="muted">启动会补齐依赖，停止服务可能同时停止依赖它的模块。</p></div><div class="button-row"><button type="button" id="services-reload">刷新服务</button><button type="button" id="services-start-all">启动默认服务</button><button type="button" id="services-stop-all" class="danger">停止所有托管服务</button></div></div><div id="services-error" class="inline-notice" hidden></div><div id="services-list" class="empty">尚未读取</div></section>
+        <section class="panel full-width maintenance-panel"><div><h2>应用实时屏幕设置</h2><p class="help">先在“人格与能力 → 实时屏幕设置”保存，再应用到当前宿主机。此操作可能启动或停止屏幕分析模块。</p></div><button type="button" id="screen-apply">应用已保存设置</button></section></div>
+      </div>
+    </section>
+  </main>
+  <dialog id="service-log"><div class="section-heading"><h2 id="service-log-title">服务日志</h2><button type="button" id="service-log-close" aria-label="关闭服务日志">关闭</button></div><pre id="service-log-content" class="readout"></pre></dialog>
+  <script id="control-config" type="application/json">{{ {'ports': ports, 'host_controls': host_controls} | tojson }}</script>
+  <script src="{{ url_for('status_dashboard.static', filename='control_center.js') }}"></script>
+</body>
+</html>

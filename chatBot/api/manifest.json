@@ -1,0 +1,8 @@
+{
+  "version": "4.18.38",
+  "file": "napcat-4.18.38.openapi.json",
+  "source": "https://raw.githubusercontent.com/NapNeko/NapCatDocs/main/src/api/4.18.38/openapi.json",
+  "source_sha256": "8dd8f06a02d8764ef25f353b09b374ce2d151d18fcfdcee50dcb6d0e4cda1ca8",
+  "sha256": "e51016a63efdc9745eea09c335a22c3ee702e5132d1db52bb52a4b198958b8fd",
+  "actions": 178
+}

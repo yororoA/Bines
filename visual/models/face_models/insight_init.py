@@ -20,6 +20,9 @@ def load_insightface_model():
         # 如果 CUDA 可用，使用 GPU 0；否则回退到 CPU
         try:
             import onnxruntime as ort
+            # install.py --device cuda installs the vendor CUDA/cuDNN runtime wheels.
+            if "CUDAExecutionProvider" in ort.get_available_providers() and hasattr(ort, "preload_dlls"):
+                ort.preload_dlls()
             # 检查 CUDA 是否可用
             available_providers = ort.get_available_providers()
             if 'CUDAExecutionProvider' in available_providers:
