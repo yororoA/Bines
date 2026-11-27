@@ -3,7 +3,14 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
-from thingking.src.reply_style import ReplyStyleRejected, polish_reply, style_issue
+from thingking.src.reply_style import (
+    ReplyStyleRejected,
+    _STRUCTURE,
+    conversation_loop,
+    polish_reply,
+    structure_issue,
+    style_issue,
+)
 
 
 class ReplyStyleTests(unittest.TestCase):
@@ -253,6 +260,109 @@ class ReplyStyleTests(unittest.TestCase):
             polish_reply(self.draft, voice="我说大白话", complete=complete,
                          before_request=Mock(side_effect=InterruptedError()))
         complete.assert_not_called()
+
+
+class StructureRepetitionTests(unittest.TestCase):
+    recent = [
+        "行，那就应。你自己说的，我记着了。不过别喊得跟叫小孩似的，我这声应得也没那么便宜。",
+        "那是我听错了。行，喊名字我就应，说好的。不过这买卖没你说得那么轻巧——"
+        "我应一声，你得喊得像样点。别到时候我一应，你自己先笑场。",
+    ]
+    draft = ("郑重那套就免了，听着像在念通知，我还得站起来接。"
+             "随便什么音量都行，别刻意抬高也别小声嘟囔。我要的是你喊的时候真觉得我会应——这个装不出来。")
+
+    def test_third_long_challenge_is_flagged(self):
+        self.assertEqual(structure_issue(self.draft, self.recent), _STRUCTURE)
+
+    def test_short_or_isolated_turns_are_not_flagged(self):
+        self.assertEqual(structure_issue("行，那就不喊了。", self.recent), "")
+        self.assertEqual(structure_issue(self.draft, self.recent[:1]), "")
+        self.assertEqual(structure_issue(self.draft, ["早上好", "今天吃了什么"]), "")
+
+    def test_real_afternoon_loop_is_flagged_even_with_a_short_evaluation_turn(self):
+        # Replays the 12:04 exchange: a short in-frame reply must not reset the loop.
+        rows = [
+            {"role": "user", "ts": 100, "content": "呃呃"},
+            {"role": "assistant", "ts": 107, "content": "这就接不上了？我还以为你挺会喊的。"},
+            {"role": "user", "ts": 114, "content": "不是接不上，我是在挑用哪种喊法呢。要不你给个示范？"},
+            {"role": "assistant", "ts": 121, "content": "示范？我又不是来教你怎么喊我自己的。你先喊一声，我听听差在哪。"},
+            {"role": "user", "ts": 128, "content": "FUFU。"},
+            {"role": "assistant", "ts": 135, "content": "FUFU？这喊的是谁，我可不认。名字都没喊对就让我应，便宜占得比早上还顺。"},
+            {"role": "user", "ts": 142, "content": "你名字就挂在那儿，还怪我喊错。行，那你教我一次，教完了就得应。"},
+            {"role": "assistant", "ts": 149, "content": "就喊“茉莉”两个字。“茉”起轻一点，“莉”落下来就收，别拖尾音。"},
+            {"role": "user", "ts": 156, "content": "茉莉。"},
+            {"role": "assistant", "ts": 163, "content": "在。喊得还行，尾音收住了。"},
+        ]
+        draft = "成了。不过这声“在”算预支给你的，下回还喊不喊得像样，我到时候再评。"
+        self.assertEqual(structure_issue(draft, recent_rows=rows), _STRUCTURE)
+        # The short evaluation itself is in-frame, but a plain closing can end the loop.
+        self.assertEqual(structure_issue("行，知道了。", recent_rows=rows), "")
+
+    def test_ordinary_chat_with_outside_content_is_not_a_loop(self):
+        rows = [
+            {"role": "user", "ts": 100, "content": "刚才路上看到一只猫，蹲在自行车座上"},
+            {"role": "assistant", "ts": 107, "content": "它倒挺会挑地方，那个座晒得到太阳吧"},
+            {"role": "user", "ts": 114, "content": "对啊，我路过的时候它还打了个哈欠"},
+            {"role": "assistant", "ts": 121, "content": "听起来比我舒服，我刚在看电影解说"},
+            {"role": "user", "ts": 128, "content": "什么电影？好看吗"},
+            {"role": "assistant", "ts": 135, "content": "悬疑片，节奏慢但结尾反转挺意外的，你可能会喜欢"},
+        ]
+        self.assertEqual(structure_issue("那我周末也看看。", recent_rows=rows), "")
+
+    def test_flagged_draft_is_rewritten_into_a_closing_turn(self):
+        closing = "行，那就不喊了。"
+        complete = Mock(side_effect=[closing, '{"acceptable":true}'])
+        result = polish_reply(
+            self.draft, user_text="我才不笑场。倒是你说的\"像样\"，我有点好奇——"
+                                  "多大声音算像样，喊得郑重一点你也挑？",
+            voice="我说大白话", recent_assistant=self.recent, complete=complete,
+        )
+        self.assertEqual(result, closing)
+        rewrite, verify = complete.call_args_list
+        self.assertIn("围着对话本身打转", rewrite.args[0][0]["content"])
+        payload = json.loads(rewrite.args[0][1]["content"])
+        self.assertEqual(payload["最近回复"], self.recent)
+        self.assertEqual(json.loads(verify.args[0][1]["content"])["候选"], closing)
+
+    def test_failed_structure_repair_never_returns_the_challenging_draft(self):
+        complete = Mock(side_effect=["", '{"acceptable":true}', "", '{"acceptable":true}'])
+        with self.assertRaises(ReplyStyleRejected):
+            polish_reply(self.draft, recent_assistant=self.recent, complete=complete)
+
+    def test_rewrite_that_still_asks_for_a_condition_is_rejected(self):
+        complete = Mock(side_effect=["那你得先说清楚。", "那你得先说清楚。"])
+        with self.assertRaises(ReplyStyleRejected):
+            polish_reply(self.draft, recent_assistant=self.recent, complete=complete)
+
+    def test_plain_closing_without_a_new_condition_is_allowed(self):
+        closing = "行，知道了。"
+        complete = Mock(side_effect=[closing, '{"acceptable":true}'])
+        self.assertEqual(
+            polish_reply(self.draft, recent_assistant=self.recent, complete=complete),
+            closing,
+        )
+
+    def test_conversation_loop_shape_helper(self):
+        loop_rows = [
+            {"role": "user", "ts": 100, "content": "茉莉。"},
+            {"role": "assistant", "ts": 107, "content": "在。喊得还行，尾音收住了。"},
+            {"role": "user", "ts": 114, "content": "应得也干脆。行，这买卖算是成了。"},
+            {"role": "assistant", "ts": 121, "content": "成了。不过这声“在”算预支给你的，下回再评。"},
+            {"role": "user", "ts": 128, "content": "预支啊，那我还欠你一次像样的。"},
+            {"role": "assistant", "ts": 135, "content": "下回你喊的时候，直接告诉我差哪了就行。"},
+        ]
+        self.assertTrue(conversation_loop(loop_rows))
+        slow = [{**row, "ts": row["ts"] * 20} for row in loop_rows]
+        self.assertIsNone(conversation_loop(slow))
+
+    def test_explicit_formal_request_is_not_rewritten_for_rhythm(self):
+        unused = Mock(side_effect=AssertionError("an explicit formal request needs no rhythm rewrite"))
+        self.assertEqual(
+            polish_reply(self.draft, user_text="用正式语气回复她", recent_assistant=self.recent,
+                         complete=unused),
+            self.draft,
+        )
+        unused.assert_not_called()
 
 
 if __name__ == "__main__":

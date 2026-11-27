@@ -513,5 +513,63 @@ class MemoryStateRetractionTest(unittest.TestCase):
                 self.assertEqual("警告：relationship_level" in result, warning)
 
 
+class RecentHighlightFilterTest(unittest.TestCase):
+    """State distilled from the visible exchange must not be repeated as background."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="bines-recent-highlight-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        env = patch.dict(os.environ, {
+            "BINES_ENV_FILE": "/dev/null", "BINES_MEMORY_DIR": str(self.root),
+            "BINES_GATEWAY_DIR": str(self.root / "gateway"),
+            "BINES_HEALTH_DIR": str(self.root / "health"),
+            "BINES_MODEL_USAGE_PATH": str(self.root / "usage.db"),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        from memory.repository import MemoryRepository
+        from memory.settings import MemorySettings
+        from memory.service import MemoryService
+        from memory.lexical_index import LexicalIndex
+        self.now = 1_792_800_000.0
+        self.repo = MemoryRepository(self.root / "memory.db", lambda: self.now)
+        self.addCleanup(self.repo.close)
+        settings = MemorySettings(
+            data_dir=self.root, owner_qq_ids=frozenset({"10001"}), state_updates=True,
+            associations_enabled=False, summarize_trigger=1000,
+            working_window=2, working_segment_extra=0,
+        )
+        self.service = MemoryService(self.repo, LexicalIndex(self.repo), settings, lambda: self.now)
+        self.service.sync_identities()
+
+    def envelope(self):
+        from memory.channels import qq_envelope
+        return qq_envelope({"self_id": "bot", "user_id": "10001"}, timestamp=self.now).to_dict()
+
+    def record(self, ref, text):
+        self.service.record_message(self.envelope(), "user", text, source_ref=ref)
+
+    def complete(self, changes):
+        claim = self.service.claim_job(["update_state"])
+        self.assertIsNotNone(claim)
+        result = self.service.complete_state_update(
+            claim["job"]["id"], changes,
+            expected_version=claim["materials"]["version"],
+            expected_attempt=claim["job"]["attempts"],
+        )
+        self.assertEqual(result["status"], "done")
+
+    def test_highlight_from_working_window_is_reinjected_only_after_it_ages_out(self):
+        self.record("m1", "说好周五一起听歌")
+        self.complete({"add_memory_highlight": "周五一起听歌"})
+        recent = self.service.build_context(self.envelope(), "周五一起听歌")
+        self.assertNotIn("周五一起听歌", recent["state"].get("memory_highlights", []))
+        for index in range(3):
+            self.now += 1
+            self.record(f"m{index + 2}", f"后来聊到别的事{index}")
+        older = self.service.build_context(self.envelope(), "周五一起听歌")
+        self.assertIn("周五一起听歌", older["state"].get("memory_highlights", []))
+
 if __name__ == "__main__":
     unittest.main()

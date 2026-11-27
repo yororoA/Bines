@@ -149,6 +149,37 @@ class StateEffects:
                     break
         return data
 
+    def highlight_sources(self, scope):
+        """Map current highlights to the message that most recently introduced them.
+
+        A highlight derived from a message still visible in the working window
+        should not be repeated as persistent state: the raw exchange is already
+        in the prompt, and repeating it turns a passing joke into an agreement.
+        """
+        highlights = self.repo.get_state(scope)["data"].get("memory_highlights") or []
+        wanted = {str(text) for text in highlights if isinstance(text, str) and text}
+        found = {}
+        if not wanted:
+            return found
+        rows = self.conn.execute(
+            "SELECT message_id,conversation_id,event_ts,changes FROM state_effects "
+            "WHERE scope=? AND json_type(changes,'$.add_memory_highlight')='text' "
+            "ORDER BY seq DESC", (scope,)
+        )
+        for row in rows:
+            try:
+                changes = json.loads(row["changes"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            added = changes.get("add_memory_highlight")
+            if isinstance(added, str) and added in wanted and added not in found:
+                found[added] = (
+                    row["message_id"], row["conversation_id"], float(row["event_ts"] or 0)
+                )
+            if len(found) == len(wanted):
+                break
+        return found
+
     def _baseline(self, scope):
         current = self.repo.get_state(scope)
         created = self.conn.execute("INSERT OR IGNORE INTO state_effect_baselines VALUES(?,?,?)",

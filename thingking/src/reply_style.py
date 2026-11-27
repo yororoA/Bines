@@ -68,6 +68,84 @@ _GENERIC_MAXIM = re.compile(
 _BLAND = "闲聊只剩可套给许多人的泛泛评价或祝愿"
 _STIFF = "把眼前的聊天写成客服或书面报告"
 _WORDING = "把对方的感叹当作选词练习，顺手点评对方说话水平"
+_STRUCTURE = "对话一直围着对话本身打转，还在加条件或互相评价"
+# 对话过程词：称呼、应答、规则、评价、教学和记账式比喻。命中只说明仍在框架内，
+# 还要结合最近消息整体形态判断是否构成闭环，避免误伤正常短句。
+_LOOP_FRAME_MARKERS = (
+    "喊", "应", "名字", "像样", "评", "教", "示范", "指点", "预支", "欠", "买卖", "便宜",
+    "条件", "说好", "说定", "约定", "下回", "下次", "倒是", "那你", "这算", "不叫", "至于",
+    "不过", "先说好", "要是", "不如", "你得", "还得", "别", "不能", "不许", "必须",
+    "我要的是", "才算", "才不", "才是", "尾音", "赖",
+)
+# 弱信号只说明还在谈对话安排；收束句里出现它们不阻止收束。
+_WEAK_FRAME_MARKERS = ("下回", "下次", "说定", "约定", "先说好")
+# 条件级信号：给对方立规矩、打分、记账或教学。硬改写只拦截这一级，
+# 普通的称呼、应答和带“别”的关心不进硬门。
+_CONDITION_GRADE = (
+    "你得", "还得", "不能", "不许", "再评", "再教", "得先", "必须",
+    "条件", "预支", "欠", "我要的是", "才算", "便宜", "买卖", "像样", "指点",
+    "示范", "尾音",
+)
+# 收束判定只排除强条件；“知道了，下次直接说”这类弱时间词允许收束。
+_CONDITION_MARKERS = _CONDITION_GRADE
+_EXTERNAL_HINT = re.compile(
+    r"今天|昨天|刚才|路上|家里|学校|店里|电影|歌|音乐|饭|茶|咖啡|天气|下雨|冷|热|"
+    r"猫|狗|看到|听见|新闻|视频|书|画|游戏|B站|综艺|剧|外卖|快递|上班|下课|"
+    r"凌晨|早上|晚上|睡觉|困了|好累|忙|同学|朋友|老师|妈妈|爸爸"
+)
+_CLOSING_HEAD = re.compile(r"^(?:行|好|嗯|哦|噢|算了|就这样|不聊了|知道了|明白|成交|成了|可以)[，。！？、…\s]*")
+_STRUCTURE_REWRITE = (
+    "最近几轮一直围着对话本身打转：怎么称呼、怎么回应、谁欠谁、互相评价或教对方怎么做，"
+    "没有任何新的事情或真实感受进来。把草稿改成这一轮的收束："
+    "直接同意或承认对方说的、只应一声、换一件你真实注意到的事，或者就此结束。"
+    "禁止新增条件、禁止评价或考核对方的表现、禁止再用买卖/预支/欠债一类记账比喻、"
+    "禁止教学式要求和反问，也不要写自我分析或关系总结。"
+    "没有真实的新内容就只发一句简短收束。保留事实、称呼、承诺、否定和明确情绪。"
+    "只返回可直接发送的正文。"
+)
+
+
+def _loop_frame_hits(text):
+    return [marker for marker in _LOOP_FRAME_MARKERS if marker in str(text or "")]
+
+
+def _is_closing(text):
+    """A plain acknowledgement that adds no new condition may end the loop."""
+    text = str(text or "").strip()
+    if not text or not _CLOSING_HEAD.match(text):
+        return False
+    return not any(marker in text for marker in _CONDITION_MARKERS)
+
+
+def conversation_loop(rows, *, window_seconds=600, min_messages=6):
+    """Detect a rapid, self-referential exchange with almost no outside world.
+
+    Shape-based rather than vocabulary-based: the frame marker set only proves
+    the topic is the conversation itself, while the external-hint guard keeps
+    ordinary chats that merely mention a name from being misclassified.
+    """
+    recent = [row for row in (rows or []) if str(row.get("content") or "").strip()][-10:]
+    if len(recent) < min_messages:
+        return None
+    stamps = [float(row["ts"]) for row in recent if row.get("ts") is not None]
+    if stamps and max(stamps) - min(stamps) > window_seconds:
+        return None
+    framed = sum(1 for row in recent if _loop_frame_hits(row.get("content")))
+    if framed / len(recent) < 0.7:
+        return None
+    condition_grade = sum(
+        1 for row in recent
+        if row.get("role") == "assistant" and _condition_grade(row.get("content"))
+    )
+    if condition_grade < 2:
+        return None
+    external = sum(1 for row in recent if _EXTERNAL_HINT.search(str(row.get("content") or "")))
+    if external > 1:
+        return None
+    assistant = [row for row in recent if row.get("role") == "assistant"]
+    if len(assistant) < 3:
+        return None
+    return {"framed": framed, "total": len(recent), "assistant": len(assistant)}
 _WORD_SUBJECT = r"(?:这|那)(?:个|种|两|几个)?(?:词[儿汇]?|说法|用词|措辞|字|句(?:话)?)"
 _WORD_COMMENT = re.compile(
     _WORD_SUBJECT +
@@ -169,6 +247,41 @@ def style_issue(text: str, user_text: str = "") -> str:
     return ""
 
 
+def _condition_grade(text):
+    return any(marker in str(text or "") for marker in _CONDITION_GRADE)
+
+
+def _keeps_loop_alive(text):
+    """A rewrite candidate is rejected only when it adds another condition."""
+    text = str(text or "").strip()
+    if not text or _is_closing(text):
+        return False
+    return _condition_grade(text)
+
+
+def structure_issue(text, recent_assistant=(), recent_rows=()):
+    """Flag a draft that keeps a self-referential condition loop going.
+
+    Full message rows give the shape-based :func:`conversation_loop`; a tuple
+    of recent assistant strings keeps older callers working with the same
+    frame evidence. The hard gate needs a condition-grade draft: merely
+    answering a name call or saying "别难过" must not be rewritten.
+    """
+    draft = str(text or "").strip()
+    if not draft or _is_closing(draft) or not _condition_grade(draft):
+        return ""
+    if recent_rows:
+        if conversation_loop(recent_rows):
+            return _STRUCTURE
+        return ""
+    recent = [str(item or "").strip() for item in recent_assistant if str(item or "").strip()][-3:]
+    if len(recent) < 2:
+        return ""
+    if sum(bool(_loop_frame_hits(item)) for item in recent) < 2:
+        return ""
+    return _STRUCTURE
+
+
 def _needs_context_check(text, user_text):
     if not user_text or len(text) > 500:
         return False
@@ -267,11 +380,8 @@ _RENDER_WORDING = (
 
 
 def polish_reply(draft: str, *, user_text: str = "", voice: str = "", previous_user_text: str = "",
-                 complete=None, before_request=None) -> str:
+                 recent_assistant=(), recent_rows=(), complete=None, before_request=None) -> str:
     """Pass ordinary drafts unchanged. A flagged draft gets one pivot and up to two renditions."""
-    detected = style_issue(draft, user_text)
-    if not detected and not _needs_context_check(draft, user_text):
-        return draft
     deadline = monotonic() + 20
 
     def request(instruction, material, *, verify=False):
@@ -298,6 +408,35 @@ def polish_reply(draft: str, *, user_text: str = "", voice: str = "", previous_u
         if monotonic() >= deadline:
             raise ReplyStyleRejected("语气润色超时")
         return output
+
+    structure = "" if (_requested_wording(draft, user_text) or _wants_formal_text(user_text)) else (
+        structure_issue(draft, recent_assistant, recent_rows))
+    if structure:
+        material = {
+            "对方的话": user_text, "草稿": draft,
+            "最近回复": [str(item or "").strip() for item in recent_assistant][-3:],
+        }
+        for _ in range(2):
+            candidate = request(_STRUCTURE_REWRITE, material).strip()
+            if not candidate or _NON_REPLY.search(candidate):
+                raise ReplyStyleRejected("结构收束没有得到可发送的正文")
+            if _keeps_loop_alive(candidate):
+                material["待修正"] = "这一轮必须收束，不要再加条件、评价、记账比喻或教学要求"
+                continue
+            verdict = request(_VERIFY, {"对方的话": user_text, "原稿": draft,
+                                        "候选": candidate, "待去除的腔调": structure}, verify=True)
+            try:
+                review = json.loads(verdict)
+            except ValueError:
+                review = None
+            if isinstance(review, dict) and review.keys() == {"acceptable"} and review["acceptable"] is True:
+                return candidate
+            material["待修正"] = "只收束这一轮，保留事实和说话对象，不新增条件或反问"
+        raise ReplyStyleRejected("结构收束未得到保留原意且完成收束的回复")
+
+    detected = style_issue(draft, user_text)
+    if not detected and not _needs_context_check(draft, user_text):
+        return draft
 
     if not detected:
         # A possible style mismatch alone is insufficient to discard a reply.

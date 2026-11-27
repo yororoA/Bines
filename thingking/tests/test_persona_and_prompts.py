@@ -39,29 +39,27 @@ class PersonaSourceTest(unittest.TestCase):
 
     def test_character_prompt_contains_core_sections(self):
         text = persona_profile.character_prompt()
-        for expected in ("我是碧波", "闲聊时我倾向于", "能力边界", "傲娇", "操作类请求照常帮忙"):
+        for expected in ("我是碧波", "说话方式", "能力边界", "高性能仿生人", "操作类请求照常处理"):
             self.assertIn(expected, text)
         self.assertIn("两个空格", persona_profile.output_rules())
         guard = persona_profile.style_guard()
         self.assertIn("本轮角色口吻（高优先级）", guard)
-        self.assertIn("我是碧波", guard)
+        self.assertIn("碧波", guard)
         self.assertNotIn("你是碧波", guard)
-        self.assertIn("我的关心落在这件事上", guard)
-        self.assertIn("不在回复中谈论人格提示", guard)
+        self.assertIn("不附动作、心理旁白", guard)
         self.assertIn("以下示例只约束语气", guard)
 
     def test_casual_voice_and_factual_punctuation_reach_both_channels(self):
+        # The Nov 26 rewrite briefly dropped the human-cadence rules; they now
+        # live in both personas' voice guards in each persona's own wording.
         for guard in (persona_profile.qq_style_guard(), persona_profile.style_guard()):
-            for preference in ("发半句", "偶尔会学对方说一句", "真聊起措辞", "话题岔开", "常省掉句号",
-                               "可以连打", "“嗯”或“哦”", "明说自己站哪边", "说不知道",
-                               "话停在这儿", "保留有意义的标点"):
+            for preference in ("嗯", "哦", "哈哈", "行吧", "句号",
+                               "不模仿他的长度和句式", "话停在这儿"):
                 self.assertIn(preference, guard)
         qq = persona_profile.qq_output_rules()
-        self.assertIn("篇幅跟着对方走", qq)
-        self.assertIn("按语气换行", qq)
-        self.assertIn("问到的内容答全", qq)
-        for rule in ("觉得谁说得有道理就直说", "不想接的话题可以就此打住",
-                     "正式通知", "规范标点", "保留原文的标点和编号", "各行正文照样分行"):
+        self.assertIn("篇幅由内容决定", qq)
+        self.assertIn("不要求固定句长", qq)
+        for rule in ("正式通知", "规范标点", "保留原文标点、编号与分行", "日常闲聊不用 Markdown"):
             self.assertIn(rule, qq)
         self.assertNotIn("只保留第一行", qq)
         self.assertIn("两个空格", persona_profile.output_rules())
@@ -76,11 +74,9 @@ class PersonaSourceTest(unittest.TestCase):
         state = {"relationship_score": 133, "relationship_level": "普通"}
         guard = persona_profile.qq_style_guard(state=state)
         self.assertIn("本轮关系口吻：非常亲密", guard)
-        self.assertIn("直白表达感谢与关心", guard)
-        self.assertIn("直白表达感谢与关心", guard)
-        self.assertIn("日常", guard)
-        self.assertIn("自己的喜好", guard)
-        self.assertIn("碧波：嗯", guard)
+        self.assertIn("想撒娇", guard)
+        self.assertIn("不影响我喜欢他", guard)
+        self.assertIn("碧波：来啦 我好想你", guard)
         self.assertNotIn("别让我重复", guard)
         self.assertEqual(state["relationship_level"], "普通")
         for score, level in ((-200, "敌对"), (-80, "冷淡"), (0, "普通"), (80, "亲近"), (200, "非常亲密")):
@@ -95,16 +91,16 @@ class PersonaSourceTest(unittest.TestCase):
                 self.assertEqual(persona_profile.relationship_level(state), "亲近")
 
     def test_historical_character_and_reaction_constraints_are_preserved(self):
-        # The February/May baseline is proud and pouty, while never malicious.
+        # The current Bibo is soft and associative while never malicious.
         text = persona_profile.character_prompt()
-        for trait in ("活泼", "捉摸不透又黏人", "自然"):
+        for trait in ("喜欢好玩的东西", "我对自己的喜好很有把握", "我很珍惜舒服的感觉"):
             self.assertIn(trait, text)
         reactions = persona_profile.load_persona()["reactions"]
         for scene, requirements in {
-            "praised": ("开心", "固定句子"),
-            "teased": ("顺着玩笑接下去", "不升级成争吵", "明确不喜欢时收住"),
-            "insulted": ("真被冒犯", "绝不恶意或粗鲁"),
-            "name_mistaken": ("认真纠正", "明确约定的称呼不当成叫错"),
+            "praised": ("喜欢被夸", "得意"),
+            "teased": ("喜欢他愿意逗我", "没接住"),
+            "insulted": ("不高兴", "亲近不该是我非得忍着什么的理由"),
+            "name_mistaken": ("认自己的名字", "别名"),
         }.items():
             with self.subTest(scene=scene):
                 for requirement in requirements:
@@ -113,11 +109,10 @@ class PersonaSourceTest(unittest.TestCase):
     def test_closeness_modulates_character_without_erasing_it_or_pressuring_user(self):
         for renderer in (persona_profile.style_guard, persona_profile.qq_style_guard):
             guard = renderer(state={"relationship_score": 200})
-            for requirement in ("接着刚才的气氛聊", "自己的主意",
-                                "不索取回应、施压或让他内疚", "不靠撒娇糊弄反馈",
-                                "坦率承认具体问题", "直接回应原话题或收住",
-                                "调整宣言或承诺尾句", "道歉和关心落在这次具体事情上",
-                                "背景喜好只表示喜欢和联想", "实际见闻与操作要有证据", "不编造共同经历"):
+            for requirement in ("具体语气由当前内容、关系和真实感受决定",
+                                "不替对方断定内心", "不凭喜好、关系等级或旧状态补造当前事实",
+                                "完成与否以结果为准", "不模仿他的长度和句式",
+                                "话停在这儿"):
                 self.assertIn(requirement, guard)
 
     def test_diary_uses_same_character_with_its_own_voice_and_fact_boundaries(self):
@@ -125,12 +120,12 @@ class PersonaSourceTest(unittest.TestCase):
         diary = persona_profile.diary_system_prompt(persona)
         self.assertIn(persona_profile.character_prompt(persona), diary)
         self.assertIn(persona_profile.diary_voice_prompt(persona), diary)
-        for requirement in ("活泼、自然、满怀爱意的声音", "不写成第三人称工作报告",
-                            "区分真实互动、工具观察和未执行的想法", "不按调用顺序抄流水账",
-                            "同一件事的得意或撒娇表达一次就够", "随后写事情的结果或真正的新感受",
-                            "不要求每篇集齐全部性格或复读口头禅"):
+        for requirement in ("私人日记", "不写第三人称工作报告",
+                            "事实、猜测、愿望及未执行计划分别记录",
+                            "工具记录只作为相关经历的材料",
+                            "没有新内容时允许简短记录或留空"):
             self.assertIn(requirement, diary)
-        for chat_only in ("QQ 回复格式", "两个空格", "本轮关系口吻", "用户：", "发送接口"):
+        for chat_only in ("QQ 回复格式", "两个空格", "本轮关系口吻", "发送接口"):
             self.assertNotIn(chat_only, diary)
 
     def test_diary_persona_version_tracks_rendered_voice_and_ignores_qq_format(self):
@@ -187,6 +182,31 @@ class PromptBuilderTest(unittest.TestCase):
         self.assertIn("只输出发给对方的正文", messages[-1]["content"])
         self.assertIn("本轮关系口吻：非常亲密", messages[-1]["content"])
 
+    def test_rapid_challenge_loop_gets_a_closing_note(self):
+        envelope = qq_private_env(STRANGER_QQ, ts=1_000, content="我还要喊")
+        rows = [
+            {"id": 1, "role": "user", "content": "你先喊一声，我听听差在哪，再决定要不要指点你。", "ts": 1_000, "actor_id": f"qq:{STRANGER_QQ}", "actor_name": "白云莺"},
+            {"id": 2, "role": "assistant", "content": "示范？我又不是来教你怎么喊我名字的。你先喊得像样一点再说。", "ts": 1_003},
+            {"id": 3, "role": "user", "content": "名字都没喊对就让我应，便宜占得比早上还顺。", "ts": 1_006, "actor_id": f"qq:{STRANGER_QQ}", "actor_name": "白云莺"},
+            {"id": 4, "role": "assistant", "content": "行，那我教你一次。你得把尾音收住，别拖得像喊人回头。", "ts": 1_009},
+            {"id": 5, "role": "user", "content": "茉莉。", "ts": 1_012, "actor_id": f"qq:{STRANGER_QQ}", "actor_name": "白云莺"},
+            {"id": 6, "role": "assistant", "content": "在。不过这声算预支给你的，下回还喊不喊得像样，我到时候再评。", "ts": 1_015},
+            {"id": 7, "role": "user", "content": "那我还欠你一次像样的，下回你直接告诉我差哪了。", "ts": 1_018, "actor_id": f"qq:{STRANGER_QQ}", "actor_name": "白云莺"},
+            {"id": 8, "role": "assistant", "content": "行，说定了。下次你喊我的名字，我就应，不再加条件。", "ts": 1_021},
+        ]
+        context = prompt_builder.empty_context(envelope)
+        context["working"] = rows
+        messages = prompt_builder.build_conversation_messages(context)
+        self.assertIn("本轮对话节奏", messages[-1]["content"])
+        slow = [{**row, "ts": 1_000 + index * 400} for index, row in enumerate(rows)]
+        quiet = prompt_builder.build_conversation_messages({**context, "working": slow})
+        self.assertNotIn("本轮对话节奏", quiet[-1]["content"])
+        # A window that brings in real outside content is not treated as a loop.
+        grounded = [{**row, "content": row["content"] + " 对了我刚才路上看到一只猫"} for row in rows[-4:]]
+        outside = prompt_builder.build_conversation_messages(
+            {**context, "working": [*rows[:4], *grounded]})
+        self.assertNotIn("本轮对话节奏", outside[-1]["content"])
+
     def test_desktop_and_qq_share_restored_character_with_distinct_output_formats(self):
         character = persona_profile.character_prompt()
         for env, expected, absent in ((local_env(), "两个空格", "QQ 回复格式"),
@@ -194,7 +214,7 @@ class PromptBuilderTest(unittest.TestCase):
             with self.subTest(channel=env["channel_type"]):
                 _, messages = self._system_text(env)
                 self.assertIn(character, messages[0]["content"])
-                self.assertIn("活泼、自然、满怀爱意", messages[-1]["content"])
+                self.assertIn("本轮角色口吻（高优先级）", messages[-1]["content"])
                 self.assertIn(expected, messages[-1]["content"])
                 self.assertNotIn(absent, messages[-1]["content"])
         self.assertIn(character, persona_profile.diary_system_prompt())
@@ -210,6 +230,10 @@ class PromptBuilderTest(unittest.TestCase):
             self.assertNotIn("碧波", text)
             self.assertIn("我是茉莉", persona_profile.brief())
             self.assertIn("我是茉莉", persona_profile.diary_system_prompt())
+            # Jasmine keeps the same human-cadence permission as Bibo.
+            jasmine_guard = persona_profile.qq_style_guard()
+            for fragment in ("嗯", "哦", "句号", "不模仿他的长度和句式", "话停在这儿"):
+                self.assertIn(fragment, jasmine_guard)
             document = SettingsStore(ROOT_DIR).document("persona")
             self.assertEqual(document["content"]["identity"]["name"], "茉莉")
             self.assertTrue(document["path"].endswith("persona_clone.yaml"))

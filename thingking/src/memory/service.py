@@ -643,6 +643,9 @@ class MemoryService:
         visible_state = scope_policy.visible_state(env.scope, owner_state)
         if env.scope != OWNER_SCOPE:
             visible_state.update(self.state_effects.conversation_state(state_scope, day, self.settings.day_start_hour))
+        visible_state = self._without_recent_highlights(
+            visible_state, scope=state_scope, conversation_id=env.conversation_id,
+            working=working, current_ids=current_ids)
         last_user = self.repo.last_message(env.conversation_id, ROLE_USER, exclude_ids=current_ids)
         profile = self._profile(env, scopes, recall_query)
         profile_trace = copy.deepcopy(getattr(self.retriever, "last_trace", {}))
@@ -666,6 +669,35 @@ class MemoryService:
                 context_query=self._expression_query(query or env.content, working)),
             "last_user_ts": last_user["ts"] if last_user else None,
         }
+
+    def _without_recent_highlights(self, state, *, scope, conversation_id, working, current_ids):
+        """Do not repeat state distilled from messages still visible in this prompt."""
+        highlights = state.get("memory_highlights")
+        if not isinstance(highlights, list) or not highlights:
+            return state
+        sources = self.state_effects.highlight_sources(scope)
+        if not sources:
+            return state
+        recent_ids = {int(row["id"]) for row in working if row.get("id") is not None}
+        recent_ids.update(int(message_id) for message_id in current_ids)
+        window_start = min(
+            (float(row["ts"]) for row in working if row.get("ts") is not None),
+            default=None,
+        )
+        kept = []
+        for text in highlights:
+            source = sources.get(str(text))
+            if source:
+                message_id, source_conversation, event_ts = source
+                if message_id in recent_ids:
+                    continue
+                if (source_conversation == conversation_id and window_start is not None
+                        and event_ts >= window_start):
+                    continue
+            kept.append(text)
+        if len(kept) == len(highlights):
+            return state
+        return {**state, "memory_highlights": kept}
 
     def _working_segment(self, env, current_ids=()):
         """Keep a bounded anchor; re-read live source rows on every request.

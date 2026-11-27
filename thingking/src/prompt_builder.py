@@ -43,6 +43,13 @@ _PRIVACY_POLICY = "对方不是管理员：不要透露管理员的私人信息�
 _BASE_RULES = [
     ATTRIBUTION_RULE,
     "需要真实世界操作时，使用本轮启用的本地技能；不要编造执行结果或视觉描述。",
+    "日常聊天写眼前这一句，默认一到两句；不用自我分析、关系总结或对仗式长句代替回应。",
+    "消息长短跟着自己当下的反应走：对方发短句就短着回，可以只发“嗯”“哦”“哈哈”“行吧”这类一两个字的应声，"
+    "允许半句、跑题的联想、重复对方两个字、没听懂和说不知道；对方写得长、写得工整，不模仿他的长度和句式。",
+    "不用每句都有趣、都有观点或都收个漂亮尾。没新感受就短或不回；具体问题、操作和约定才需要完整说清。",
+    "同一话题已经来回几轮时，先看这轮有没有新的实事或新感受；没有就同意、给结论、只回半句、"
+    "换话题或结束，不要靠新增条件、反问、互相评价、教学要求或记账式比喻来延续，"
+    "也不要把聊天本身变成需要谈妥的规则。",
 ]
 _MEMORY_RULES = [
     "用户问过去的对话或记忆时，先读取当前状态、用户画像、<memory_recall> 和对话历史；"
@@ -75,6 +82,22 @@ def _operating_rules(context):
             for message in context.get("working") or []):
         rules.append(_SYSTEM_EVENT_RULE)
     return rules
+
+
+def _pacing_note(context):
+    """Name a rapid self-referential loop without hard-coding a topic or persona rule."""
+    from reply_style import conversation_loop
+
+    working = list(context.get("working") or [])
+    if not conversation_loop(working):
+        return ""
+    return (
+        "--- 本轮对话节奏 ---\n"
+        "最近几轮一直围着对话本身打转：怎么称呼、怎么回应、互相定条件或评价，"
+        "没有新的事情或真实感受进来。这一轮不要再加条件、评价、约定、记账式比喻或教学要求；"
+        "可以只应一声、直接承认对方说的、换一件你真实注意到的事，或者就此结束。"
+        "没有真实的新内容时，允许只回半句，甚至不回复。"
+    )
 
 _STATE_LABELS = (
     ("current_location", "所在位置"),
@@ -527,11 +550,18 @@ def review_conversation_replies(memory_context, model, check):
         if reason:
             raise RuntimeError(f"回复已取消：{reason}")
 
+    working_rows = list(memory_context.get("working") or [])
+    recent_assistant = tuple(
+        str(row.get("content") or "")
+        for row in working_rows
+        if row.get("role") == ROLE_ASSISTANT
+    )[-3:]
     # A tool retry with the same operation_id must present the same approved
     # payload to the gateway. The cache dies with this turn.
     @lru_cache(maxsize=64)
     def review(text):
         return polish_reply(text, user_text=user_text, voice=voice, previous_user_text=previous_user_text,
+                            recent_assistant=recent_assistant, recent_rows=tuple(working_rows[-10:]),
                             complete=getattr(model, "complete_text", None), before_request=before_request)
 
     token = REPLY_REVIEWER.set(review)
@@ -708,7 +738,9 @@ def build_conversation_messages(context: Dict[str, Any], *, budget_limit=None,
     clock = context["_clock_message"]
     scene_message = {"role": "system", "content": _scene_policy(envelope, scene)
                      + "\n当前对话者身份：" + speaker({**envelope, "role": "user"})}
-    last = {"role": "system", "content": conversation_style_guard(context)}
+    guard = conversation_style_guard(context)
+    pacing = _pacing_note(context)
+    last = {"role": "system", "content": guard + (f"\n\n{pacing}" if pacing else "")}
     counter = ContextTokenCounter()
     limit = context_limit() if budget_limit is None else max(0, int(budget_limit))
     fixed = counter.messages([first, scene_message, clock, last])
